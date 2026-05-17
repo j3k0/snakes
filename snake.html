@@ -22,6 +22,9 @@
             border: 2px solid #333;
             background-color: #111;
             display: block;
+            max-width: calc(100vw - 20px);
+            max-height: 70vh;
+            touch-action: none;
         }
         #score {
             font-size: 1.5em;
@@ -31,13 +34,38 @@
             color: #aaa;
             margin-bottom: 10px;
         }
+        @media (max-width: 480px) {
+          body { padding: 5px; box-sizing: border-box; }
+          #gameCanvas { width: 100%; height: auto; }
+          .dpad-btn { width: 56px; height: 56px; font-size: 24px; }
+        }
+        @media (pointer: coarse) {
+          #dpad { display: flex !important; justify-content: center; }
+        }
     </style>
 </head>
 <body>
     <h1>Snake Game</h1>
     <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <div id="dpad" style="display:none;margin-top:10px;touch-action:manipulation;user-select:none;-webkit-user-select:none;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
+        <button class="dpad-btn" data-key="ArrowUp" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▲</button>
+        <div style="display:flex;gap:48px;">
+          <button class="dpad-btn" data-key="ArrowLeft" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">◀</button>
+          <button class="dpad-btn" data-key="ArrowDown" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▼</button>
+          <button class="dpad-btn" data-key="ArrowRight" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▶</button>
+        </div>
+        <button class="dpad-btn" data-key=" " style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;margin-top:4px;">⏸</button>
+      </div>
+    </div>
     <p>Score: <span id="score">0</span></p>
     <p id="highScore">Best: 0</p>
+        <div id="xpDisplay" style="color:#aaa;font-size:0.9em;"></div>
+        <div id="comboDisplay" style="color:#FFD700;font-size:1.2em;min-height:1.5em;"></div>
+        <div id="toast" style="display:none;position:fixed;top:20px;left:50%;transform:translateX(-50%);color:#FFD700;font-size:24px;font-weight:bold;text-shadow:2px 2px 4px rgba(0,0,0,0.8);z-index:1000;pointer-events:none;text-align:center;"></div>
+        <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.95);border:2px solid #555;border-radius:10px;padding:20px;color:white;font-family:monospace;z-index:100;min-width:300px;max-width:400px;"></div>
+        <div id="achievementsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #FFD700;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:350px;max-width:480px;"></div>
+        <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
 
     <script>
         const TILE_SIZE = 20;
@@ -56,44 +84,251 @@
         let dx = 0;
         let dy = 0;
         let score = 0;
-        let highScore = parseInt(localStorage.getItem('snake_high_score')) || 0;
+        let highScore;
+        try { highScore = parseInt(localStorage.getItem('snake_high_score')) || 0; } catch(e) { highScore = 0; }
         let gameInterval = null;
         let gameState = 'idle';
         let nextDirection = null;
         let audioCtx = null;
-        let muted = parseInt(localStorage.getItem('snake_muted')) || 0;
+        let muted;
+        try { muted = parseInt(localStorage.getItem('snake_muted')) || 0; } catch(e) { muted = 0; }
         let particles = [];
         let displayedScore = 0;
+        let obstacles = [];
+        let lastFrameTime = 0;
+        let shakeTimer = 0;
+        let flashOverlay = null;
+        let eatAnimTimer = 0;
+
+        // === PROGRESSION SYSTEM ===
+        let stats = loadStats();
+        let xp;
+        try { xp = parseInt(localStorage.getItem('snake_xp')) || 0; } catch(e) { xp = 0; }
+        let level = getLevelFromXP(xp);
+        let sessionXP = 0; // reserved for achievements
+        let gameTick = 0;
+        let comboCount = 0;
+        let lastEatTime = 0;
+        let sessionStartTime = 0;
+        let sessionFoodEaten = 0;
+        let sessionFoodTypes = new Set();
+        let sessionSpeedFood = 0; // will be used in future achievements
+        let sessionBonusFood = 0; // will be used in future achievements
+        let sessionTimeAlive = 0;
+        let sessionMaxCombo = 0;
+        let sessionPauseStart = 0;
+        let sessionPausedTime = 0;
+        let comboFadeTimer = null;
+        let dailyAttempts = 3;
+        let dailyDone = false;
+
+        // === ACHIEVEMENT SYSTEM ===
+        const ACHIEVEMENTS = {
+            FIRST_BITE: { name:'First Bite', desc:'Eat your first food ever', xp:25, icon:'🍽️', check:function(s,c){return s.totalFoodEaten>=1;} },
+            CENTURY: { name:'Century', desc:'Score 100 in one game', xp:100, icon:'💯', check:function(s,c){return c.sessionScore>=100;} },
+            QUINTESSENCE: { name:'Quintessence', desc:'Score 500 in one game', xp:300, icon:'🌟', check:function(s,c){return c.sessionScore>=500;} },
+            BONUS_FEAST: { name:'Bonus Feast', desc:'Eat 10 bonus foods total', xp:100, icon:'🥇', check:function(s,c){return s.bonusFoodEaten>=10;} },
+            SPEED_DEMON: { name:'Speed Demon', desc:'Eat 10 speed foods total', xp:100, icon:'⚡', check:function(s,c){return s.speedFoodEaten>=10;} },
+            GOURMAND: { name:'Gourmand', desc:'Eat 100 normal foods total', xp:200, icon:'🍕', check:function(s,c){return s.normalFoodEaten>=100;} },
+            GLUTTON: { name:'Glutton', desc:'Eat 20 foods in one game', xp:150, icon:'🤤', check:function(s,c){return c.sessionFoodEaten>=20;} },
+            SURVIVOR: { name:'Survivor', desc:'Survive 1 minute in one game', xp:100, icon:'⏱️', check:function(s,c){return c.sessionTimeAlive>=60000;} },
+            MARATHONER: { name:'Marathoner', desc:'Survive 3 minutes in one game', xp:300, icon:'⏳', check:function(s,c){return c.sessionTimeAlive>=180000;} },
+            LONG_BOI: { name:'Long Boi', desc:'Reach snake length 20', xp:150, icon:'🐍', check:function(s,c){return c.snakeLength>=20;} },
+            SERPENT: { name:'Serpent', desc:'Reach snake length 50', xp:400, icon:'🐉', check:function(s,c){return c.snakeLength>=50;} },
+            HAT_TRICK: { name:'Hat Trick', desc:'Eat 4+ different food types in one game', xp:150, icon:'🎩', check:function(s,c){return c.hatTrickEligible;} },
+            COMBO_3: { name:'Combo Lord', desc:'Reach 3x combo', xp:150, icon:'🔥', check:function(s,c){return c.maxCombo>=3;} },
+            COMBO_5: { name:'Combo Master', desc:'Reach 5x combo', xp:300, icon:'💥', check:function(s,c){return c.maxCombo>=5;} },
+        };
+
+        let achievements = loadAchievements();
+
+        // === COSMETICS SYSTEM ===
+        const SNAKE_SKINS = {
+            snake_green: { name:'Classic Green', head:'#00FF00', body:'#00CC00', unlock:1 },
+            snake_cyan: { name:'Cyan', head:'#00FFFF', body:'#00CCCC', unlock:2 },
+            snake_purple: { name:'Purple', head:'#9B59B6', body:'#7D3C98', unlock:4 },
+            snake_gold: { name:'Gold', head:'#FFD700', body:'#DAA520', unlock:7 },
+            snake_fire: { name:'Fire', head:'#FF4500', body:'#8B0000', unlock:10 },
+            snake_rainbow: { name:'Rainbow', head:'rainbow', body:'rainbow', unlock:15 },
+        };
+
+        const GRID_THEMES = {
+            grid_classic: { name:'Classic Grid', stroke:'rgba(255,255,255,0.04)', bg:'#111', unlock:1 },
+            grid_neon: { name:'Neon Grid', stroke:'rgba(0,255,255,0.08)', bg:'#0a0a1a', unlock:3 },
+            grid_matrix: { name:'Matrix Grid', stroke:'rgba(0,255,65,0.1)', bg:'#000', unlock:12 },
+        };
+
+        const TRACE_EFFECTS = {
+            trace_none: { name:'No Trail', unlock:1 },
+            trace_ghost: { name:'Ghost Trail', unlock:9 },
+            trace_sparkle: { name:'Sparkle Trail', unlock:15 },
+        };
+
+        const DEATH_EFFECTS = {
+            death_classic: { name:'Classic Burst', color:'#FF4500', count:30, unlock:1 },
+            death_blue: { name:'Blue Burst', color:'#4488FF', count:30, unlock:13 },
+            death_rainbow: { name:'Rainbow Burst', color:'rainbow', count:50, unlock:20 },
+        };
+
+        const LEVEL_UNLOCKS = {
+            2:['snake_cyan'], 3:['grid_neon'], 4:['snake_purple'],
+            7:['snake_gold'], 9:['trace_ghost'], 10:['snake_fire'],
+            12:['grid_matrix'], 13:['death_blue'], 15:['snake_rainbow','trace_sparkle'],
+            20:['death_rainbow']
+        };
+
+        let unlockedCosmetics = loadUnlocked();
+        let cosmetics = loadEquipped();
+
+        function loadUnlocked() {
+            try {
+                const data = JSON.parse(localStorage.getItem('snake_unlocks'));
+                if (data && Array.isArray(data) && data.length > 0) return data;
+            } catch(e) {}
+            return ['snake_green','grid_classic','trace_none','death_classic'];
+        }
+
+        function loadEquipped() {
+            try {
+                const data = JSON.parse(localStorage.getItem('snake_equipped'));
+                if (data && data.snake) return data;
+            } catch(e) {}
+            return { snake:'snake_green', grid:'grid_classic', trace:'trace_none', death:'death_classic' };
+        }
+
+        function loadAchievements() {
+            try { return JSON.parse(localStorage.getItem('snake_achievements')) || {}; }
+            catch(e) { return {}; }
+        }
+
+        // === GAME MODES ===
+        const MODE_CONFIG = {
+            classic: {
+                name:'Classic', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+            },
+            timeAttack: {
+                name:'Time Attack', speed:80, selfCollision:true, wallDeath:false, wrap:true,
+                timer:60000, scoreIs:'points', earnXP:true, achievementsEnabled:true
+            },
+            zen: {
+                name:'Zen', speed:150, selfCollision:false, wallDeath:false, wrap:true,
+                timer:null, scoreIs:'length', earnXP:false, achievementsEnabled:false
+            },
+            daily: {
+                name:'Daily Challenge', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+            }
+        };
+
+        const FOOD_TIERS = {
+            common:   { pts: 10, xp: 25, weight: 0.40, color: '#FF4444', pCount: 8,  sound: 'eat' },
+            uncommon: { pts: 15, xp: 30, weight: 0.25, color: '#4488FF', pCount: 10, sound: 'eat' },
+            rare:     { pts: 20, xp: 40, weight: 0.12, color: '#44FF44', pCount: 14, sound: 'eat', glow: 8 },
+            epic:     { pts: 30, xp: 55, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14 },
+            bonus:    { pts: 30, xp: 60, weight: 0.15, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
+            speed:    { pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed' },
+        };
+
+        const MODE_ORDER = ['classic', 'timeAttack', 'zen', 'daily'];
+
+        const DAILY_CHALLENGES = [
+          { desc:'Score 200+ points', check:function(s,st){return s>=200;}, reward:200 },
+          { desc:'Score 300+ points', check:function(s,st){return s>=300;}, reward:300 },
+          { desc:'Eat 5 speed foods', check:function(s,st){return st.sessionSpeedFood>=5;}, reward:150 },
+          { desc:'Eat 10 bonus foods', check:function(s,st){return st.sessionBonusFood>=10;}, reward:200 },
+          { desc:'Reach 3x combo', check:function(s,st){return st.sessionMaxCombo>=3;}, reward:150 },
+          { desc:'Reach 5x combo', check:function(s,st){return st.sessionMaxCombo>=5;}, reward:300 },
+          { desc:'Survive 2 minutes', check:function(s,st){return st.sessionTimeAlive>=120000;}, reward:200 },
+          { desc:'Eat 20 foods total', check:function(s,st){return st.sessionFoodEaten>=20;}, reward:250 },
+          { desc:'Reach snake length 15', check:function(s,st){return st.snakeLength>=15;}, reward:200 },
+          { desc:'Eat 4+ different food types', check:function(s,st){return st.sessionFoodTypes.size>=4;}, reward:250 },
+        ];
+
+        function getDailySeed() {
+            const today = new Date();
+            const dateStr = today.getFullYear() + '-' + (today.getMonth()+1) + '-' + today.getDate();
+            let hash = 0;
+            for (let i = 0; i < dateStr.length; i++) {
+                hash = ((hash << 5) - hash) + dateStr.charCodeAt(i);
+                hash |= 0;
+            }
+            return Math.abs(hash);
+        }
+
+        let gameMode = 'classic';
+        let modeSelectIndex = 0;
+        let timeAttackEnd = 0;
+        let zenActive = false;
+        let modeHighScores = loadModeHighScores();
+
+        function loadModeHighScores() {
+            try { return JSON.parse(localStorage.getItem('snake_mode_highs')) || {}; }
+            catch(e) { return {}; }
+        }
+
+        function getModeDesc(mode) {
+            const descs = {
+                classic: 'Standard Snake. Wall wrapping, speed increases with score.',
+                timeAttack: 'Score max points in 60 seconds. Fixed speed, bonus food worth +50.',
+                zen: 'No death from collisions. Relax and grow. Score = snake length.',
+                daily: 'Complete today\'s unique challenge! 3 attempts per day.'
+            };
+            return descs[mode] || '';
+        }
 
         highScoreEl.textContent = 'Best: ' + highScore;
 
         function getSpeed() {
+            const mc = MODE_CONFIG[gameMode];
+            if (typeof mc.speed === 'number') return mc.speed;
             return Math.max(MIN_SPEED, BASE_SPEED - Math.floor(score / 50) * 5);
         }
 
         function generateFood(currentSnake) {
-            if (currentSnake.length >= (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE)) return null;
+            const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
+            if (currentSnake.length + obstacles.length >= totalTiles) return null;
             let newFood;
             do {
                 const rand = Math.random();
                 let type;
-                if (rand < 0.80) type = 'normal';
-                else if (rand < 0.95) type = 'bonus';
-                else type = 'speed';
+                const tiers = FOOD_TIERS;
+                let cumulative = 0;
+                let selectedType = 'common';
+                for (const typeKey in tiers) {
+                    cumulative += tiers[typeKey].weight;
+                    if (rand < cumulative) { selectedType = typeKey; break; }
+                }
+                type = selectedType;
                 newFood = {
                     x: Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE,
                     y: Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE,
                     type: type
                 };
-            } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y));
+            } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y) ||
+                     obstacles.some(o => o.x === newFood.x && o.y === newFood.y));
             return newFood;
         }
 
         function resetGame() {
+            comboCount = 0;
+            sessionFoodEaten = 0;
+            sessionFoodTypes = new Set();
+            sessionSpeedFood = 0;
+            sessionBonusFood = 0;
+            gameTick = 0;
+            lastEatTime = 0;
+            sessionXP = 0;
+            sessionPauseStart = 0;
+            sessionPausedTime = 0;
+            sessionTimeAlive = 0;
+            sessionMaxCombo = 0;
+
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
             dy = 0;
             food = generateFood(snake);
+            generateObstacles();  // ADD THIS LINE
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -102,23 +337,78 @@
             nextDirection = null;
             updateScoreDisplay();
             drawGame();
+            timeAttackEnd = 0;
+            zenActive = false;
         }
 
         function updateScoreDisplay() {
+            if (score > (modeHighScores[gameMode] || 0)) {
+                modeHighScores[gameMode] = score;
+                try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
+            }
             if (score > highScore) {
                 highScore = score;
-                localStorage.setItem('snake_high_score', highScore);
+                try { localStorage.setItem('snake_high_score', highScore); } catch(e) { /* localStorage unavailable */ }
+            }
+            if (modeHighScores[gameMode]) {
+                highScoreEl.textContent = 'Best (' + MODE_CONFIG[gameMode].name + '): ' + modeHighScores[gameMode];
+            } else {
                 highScoreEl.textContent = 'Best: ' + highScore;
             }
         }
 
         function startGame() {
+            if (gameMode === 'daily') {
+                if (dailyAttempts <= 0) {
+                    const el = document.getElementById('toast');
+                    if (el) {
+                        el.textContent = 'No attempts remaining! Come back tomorrow.';
+                        el.style.display = 'block';
+                        setTimeout(function() { el.style.display = 'none'; }, 3000);
+                    }
+                    return;
+                }
+                dailyAttempts--;
+                try { localStorage.setItem('snake_daily_attempts_remaining', String(dailyAttempts)); } catch(e) {}
+                // Update streak — only when a daily game actually starts
+                try {
+                    const storedDate = localStorage.getItem('snake_daily_date') || '';
+                    let streak = parseInt(localStorage.getItem('snake_streak_count')) || 0;
+                    if (storedDate) {
+                        const storedDateObj = new Date(storedDate);
+                        const diffMs = Date.now() - storedDateObj.getTime();
+                        const diffDays = Math.round(diffMs / 86400000);
+                        if (diffDays === 1) {
+                            // Consecutive day — increment streak
+                            localStorage.setItem('snake_streak_count', String(streak + 1));
+                        } else if (diffDays > 1) {
+                            // More than 1 day gap — reset streak
+                            localStorage.setItem('snake_streak_count', '0');
+                        }
+                        // diffDays === 0 means same day — no change
+                    } else {
+                        // First ever game
+                        localStorage.setItem('snake_streak_count', '1');
+                    }
+                } catch(e) {}
+            }
+            const mc = MODE_CONFIG[gameMode];
+            if (mc.timer) timeAttackEnd = Date.now() + mc.timer;
+            if (gameMode === 'zen') zenActive = true;
+            sessionStartTime = Date.now();
             gameState = 'playing';
             gameInterval = setInterval(updateGame, getSpeed());
             drawGame();
         }
 
         function checkCollision(pos) {
+            const mc = MODE_CONFIG[gameMode];
+            // Check obstacle collision
+            for (let i = 0; i < obstacles.length; i++) {
+                if (pos.x === obstacles[i].x && pos.y === obstacles[i].y) return true;
+            }
+            // Check self collision (existing)
+            if (!mc.selfCollision) return false;
             for (let i = 0; i < snake.length; i++) {
                 if (pos.x === snake[i].x && pos.y === snake[i].y) return true;
             }
@@ -132,12 +422,101 @@
             };
         }
 
+        function generateObstacles() {
+            obstacles = [];
+            if (gameMode === 'zen') return;
+            const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
+            const count = 3 + Math.floor(Math.random() * 6); // 3-8 obstacles
+            const maxAttempts = 50;
+            const headX = 10 * TILE_SIZE;
+            const headY = 10 * TILE_SIZE;
+            for (let i = 0; i < count; i++) {
+                let placed = false;
+                for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                    const obsX = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                    const obsY = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                    // Check minimum distance from snake head (3 tiles)
+                    const dist = Math.abs(obsX - headX) + Math.abs(obsY - headY);
+                    if (dist < 3 * TILE_SIZE) continue;
+                    // Check overlap with snake
+                    if (snake.some(s => s.x === obsX && s.y === obsY)) continue;
+                    // Check overlap with food
+                    if (food && food.x === obsX && food.y === obsY) continue;
+                    // Check overlap with existing obstacles
+                    if (obstacles.some(o => o.x === obsX && o.y === obsY)) continue;
+                    obstacles.push({ x: obsX, y: obsY });
+                    placed = true;
+                    break;
+                }
+                if (!placed) break; // Can't place more, continue with what we have
+            }
+            // Safety: if obstacles would leave < 50% of board open, reduce
+            const minOpen = totalTiles / 2;
+            if (totalTiles - obstacles.length - snake.length < minOpen) {
+                obstacles = obstacles.slice(0, Math.max(0, Math.floor(totalTiles / 4)));
+            }
+        }
+
         function gameOver() {
             clearInterval(gameInterval);
             gameInterval = null;
             gameState = 'gameover';
-            spawnParticles(snake[0].x, snake[0].y, 30, '#FF4500');
+            sessionTimeAlive = Date.now() - sessionStartTime - sessionPausedTime;
+            stats.gamesPlayed++;
+            stats.totalScore += score;
+            stats.totalDeaths++;
+            stats.totalTimePlayed += sessionTimeAlive;
+            if (score > stats.maxScore) stats.maxScore = score;
+            if (sessionTimeAlive > stats.longestTimeAlive) stats.longestTimeAlive = sessionTimeAlive;
+            awardXP(snake.length * 10);
+            saveAllState();
+            checkAchievements(score);
+            checkDailyCompletion(score, {
+                sessionSpeedFood: sessionSpeedFood,
+                sessionBonusFood: sessionBonusFood,
+                sessionMaxCombo: sessionMaxCombo,
+                sessionTimeAlive: sessionTimeAlive,
+                sessionFoodEaten: sessionFoodEaten,
+                sessionFoodTypes: sessionFoodTypes,
+                snakeLength: snake.length
+            });
+            // Per-mode high score
+            if (score > (modeHighScores[gameMode] || 0)) {
+                modeHighScores[gameMode] = score;
+                try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
+            }
+            const de = DEATH_EFFECTS[cosmetics.death] || DEATH_EFFECTS.death_classic;
+            if (de.color === 'rainbow') {
+                const perColor = Math.floor(de.count / 3);
+                const extra = de.count - perColor * 3;
+                spawnParticles(snake[0].x, snake[0].y, perColor + (extra > 0 ? 1 : 0), '#FF0000');
+                spawnParticles(snake[0].x, snake[0].y, perColor + (extra > 1 ? 1 : 0), '#00FF00');
+                spawnParticles(snake[0].x, snake[0].y, perColor, '#0000FF');
+            } else {
+                spawnParticles(snake[0].x, snake[0].y, de.count, de.color);
+            }
             playSound('gameover');
+            shakeTimer = 200;
+            drawGame();
+        }
+
+        function endZenSession() {
+            gameState = 'gameover';
+            score = snake.length;
+            sessionTimeAlive = Date.now() - sessionStartTime - sessionPausedTime;
+            stats.gamesPlayed++;
+            stats.totalScore += score;
+            stats.totalDeaths++;
+            stats.totalTimePlayed += sessionTimeAlive;
+            if (score > stats.maxScore) stats.maxScore = score;
+            if (sessionTimeAlive > stats.longestTimeAlive) stats.longestTimeAlive = sessionTimeAlive;
+            if (snake.length > stats.longestLength) stats.longestLength = snake.length;
+            saveAllState();
+            if (score > (modeHighScores[gameMode] || 0)) {
+                modeHighScores[gameMode] = score;
+                try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
+            }
+            zenActive = false;
             drawGame();
         }
 
@@ -215,21 +594,59 @@
             }
         }
 
-        function animateVisuals() {
+        function animateVisuals(timestamp) {
+            if (!lastFrameTime) lastFrameTime = timestamp;
+            const delta = Math.min(timestamp - lastFrameTime, 100);
+            lastFrameTime = timestamp;
+
             // Update and draw particles
             for (let i = particles.length - 1; i >= 0; i--) {
                 const p = particles[i];
                 p.x += p.vx;
                 p.y += p.vy;
                 p.vy += 0.05; // gravity
-                p.life -= 16 / (p.maxLife * 1000); // ~60fps normalized
+                p.life -= delta / (p.maxLife * 1000);
                 if (p.life <= 0) {
                     particles.splice(i, 1);
                 }
             }
 
+            if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - delta);
+            if (eatAnimTimer > 0) eatAnimTimer = Math.max(0, eatAnimTimer - delta);
+
             // Redraw game + particles
+            if (shakeTimer > 0 && gameState !== 'paused') {
+                const intensity = (shakeTimer / 200) * 5;
+                ctx.save();
+                ctx.translate((Math.random() - 0.5) * 2 * intensity, (Math.random() - 0.5) * 2 * intensity);
+            }
             drawGame();
+            if (shakeTimer > 0 && gameState !== 'paused') ctx.restore();
+
+            if (flashOverlay) {
+                flashOverlay.alpha -= delta * 0.004;
+                if (flashOverlay.alpha <= 0) flashOverlay = null;
+            }
+
+            if (cosmetics.trace === 'trace_ghost' && snake.length >= 4) {
+                const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+                const trailColor = skin.head === 'rainbow' ? '#00FF00' : skin.head;
+                for (let t = 0; t < 3; t++) {
+                    const idx = snake.length - 1 - t;
+                    if (idx < 0) break;
+                    const seg = snake[idx];
+                    ctx.globalAlpha = 0.15 - t * 0.05;
+                    ctx.fillStyle = trailColor;
+                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            if (cosmetics.trace === 'trace_sparkle' && gameTick % 5 === 0 && snake.length > 1) {
+                const tail = snake[snake.length - 1];
+                spawnParticles(tail.x, tail.y, 2, '#FFD700');
+            }
+
             for (const p of particles) {
                 const alpha = Math.max(0, p.life);
                 ctx.globalAlpha = alpha;
@@ -239,18 +656,92 @@
             ctx.globalAlpha = 1;
 
             // Animate score
-            const delta = score - displayedScore;
-            if (delta > 1) {
-                displayedScore += Math.ceil(delta * 0.3);
-            } else if (delta > 0) {
+            const scoreDelta = score - displayedScore;
+            if (scoreDelta > 1) {
+                displayedScore += Math.ceil(scoreDelta * 0.3);
+            } else if (scoreDelta > 0) {
                 displayedScore = score;
             }
             scoreEl.textContent = displayedScore;
+
+            const comboEl = document.getElementById('comboDisplay');
+            if (comboEl) {
+                const mul = 1 + comboCount * 0.5;
+                comboEl.textContent = comboCount > 0 ? 'x' + mul.toFixed(1) + ' COMBO!' : '';
+                if (comboCount > 0) {
+                    clearTimeout(comboFadeTimer);
+                    comboFadeTimer = setTimeout(function() {
+                        document.getElementById('comboDisplay').textContent = '';
+                    }, 3500);
+                }
+            }
+            const xpEl = document.getElementById('xpDisplay');
+            if (xpEl) {
+                xpEl.textContent = 'Lv.' + level + ' | XP: ' + xp.toLocaleString();
+            }
+
+// Zen mode: score = snake length
+            if (gameMode === 'zen') {
+                score = snake.length;
+            }
 
             requestAnimationFrame(animateVisuals);
         }
 
         function drawOverlay(text, subtext) {
+            if (gameState === 'idle') {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 32px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('SNAKE', CANVAS_WIDTH / 2, 60);
+                ctx.font = '20px Arial';
+                for (let i = 0; i < MODE_ORDER.length; i++) {
+                    const mode = MODE_ORDER[i];
+                    const cfg = MODE_CONFIG[mode];
+                    const y = 140 + i * 60;
+                    const isSelected = i === modeSelectIndex;
+                    ctx.fillStyle = isSelected ? '#FFD700' : '#666';
+                    ctx.font = isSelected ? 'bold 22px Arial' : '18px Arial';
+                    ctx.fillText((isSelected ? '▶ ' : '  ') + cfg.name + (modeHighScores[mode] ? ' (Best: ' + modeHighScores[mode] + ')' : ''), CANVAS_WIDTH / 2, y);
+                    if (isSelected) {
+                        ctx.fillStyle = '#AAA';
+                        ctx.font = '13px Arial';
+                        ctx.fillText(getModeDesc(mode), CANVAS_WIDTH / 2, y + 22);
+                    }
+                }
+                // Daily challenge info
+                if (gameMode === 'daily') {
+                    try {
+                        const seed = getDailySeed();
+                        const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
+                        ctx.fillStyle = '#FFD700';
+                        ctx.font = 'bold 16px Arial';
+                        ctx.fillText('Today: ' + challenge.desc, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 110);
+                        ctx.fillStyle = '#AAA';
+                        ctx.font = '14px Arial';
+                        ctx.fillText('Reward: +' + challenge.reward + ' XP', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 90);
+                        ctx.fillStyle = dailyDone ? '#4CAF50' : '#FFD700';
+                        ctx.fillText('Attempts: ' + dailyAttempts + (dailyDone ? ' ✅' : ''), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 70);
+                        let streak = 0;
+                        try { streak = parseInt(localStorage.getItem('snake_streak_count')) || 0; } catch(e) {}
+                        if (streak > 0) {
+                            ctx.fillStyle = '#FF6B35';
+                            ctx.font = '13px Arial';
+                            ctx.fillText('🔥 ' + streak + ' day streak!', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 50);
+                        }
+                    } catch(e) {}
+                }
+                ctx.fillStyle = '#888';
+                ctx.font = '14px Arial';
+                ctx.fillText('Lv.' + level + ' | XP: ' + xp.toLocaleString(), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 60);
+                ctx.fillStyle = '#555';
+                ctx.font = '13px Arial';
+                ctx.fillText('↑↓ Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 30);
+                return;
+            }
             ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
             ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             ctx.fillStyle = '#FFF';
@@ -263,11 +754,29 @@
                 ctx.fillStyle = '#AAA';
                 ctx.fillText(subtext, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
             }
+            if (gameState === 'gameover') {
+                ctx.font = '13px Arial';
+                ctx.fillStyle = '#888';
+                ctx.fillText('Mode: ' + MODE_CONFIG[gameMode].name, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 55);
+            }
+            if (gameMode === 'daily' && gameState === 'gameover') {
+                const seed = getDailySeed();
+                const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
+                ctx.fillStyle = dailyDone ? '#4CAF50' : '#FF6B35';
+                ctx.font = '15px Arial';
+                ctx.fillText(dailyDone ? '✅ Daily Challenge Complete!' : '❌ Daily challenge not completed', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 80);
+                ctx.fillStyle = '#AAA';
+                ctx.font = '13px Arial';
+                ctx.fillText('Attempts remaining: ' + dailyAttempts, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 100);
+            }
         }
 
         function drawGrid() {
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+            const theme = GRID_THEMES[cosmetics.grid] || GRID_THEMES.grid_classic;
+            ctx.strokeStyle = theme.stroke;
             ctx.lineWidth = 1;
+            ctx.fillStyle = theme.bg;
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             for (let x = 0; x <= CANVAS_WIDTH; x += TILE_SIZE) {
                 ctx.beginPath();
                 ctx.moveTo(x, 0);
@@ -282,27 +791,62 @@
             }
         }
 
+        function drawObstacles() {
+            ctx.fillStyle = '#555';
+            ctx.strokeStyle = '#777';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < obstacles.length; i++) {
+                const o = obstacles[i];
+                ctx.fillRect(o.x, o.y, TILE_SIZE, TILE_SIZE);
+                ctx.strokeRect(o.x, o.y, TILE_SIZE, TILE_SIZE);
+            }
+        }
+
         function drawFood() {
             if (!food) return;
-            if (food.type === 'bonus') {
+            const tier = FOOD_TIERS[food.type] || FOOD_TIERS.common;
+
+            // Save context state for glow effects
+            if (tier.glow) {
+                ctx.save();
+                ctx.shadowBlur = tier.glow;
+                ctx.shadowColor = tier.color;
+            }
+
+            if (tier.pulse) {
+                // Existing bonus food pulse logic
                 const pulse = 1 + 0.5 * Math.sin(Date.now() / 200);
                 const size = Math.round(TILE_SIZE * pulse);
                 const offset = Math.round((TILE_SIZE - size) / 2);
-                ctx.fillStyle = '#FFD700';
+                ctx.fillStyle = tier.color;
                 ctx.fillRect(food.x + offset, food.y + offset, size, size);
-            } else if (food.type === 'speed') {
-                ctx.fillStyle = '#00FFFF';
-                ctx.fillRect(food.x, food.y, TILE_SIZE, TILE_SIZE);
             } else {
-                ctx.fillStyle = 'red';
+                ctx.fillStyle = tier.color;
                 ctx.fillRect(food.x, food.y, TILE_SIZE, TILE_SIZE);
+            }
+
+            if (tier.glow) {
+                ctx.restore();
             }
         }
 
         function drawSnake() {
-            snake.forEach((segment, index) => {
-                ctx.fillStyle = index === 0 ? '#00FF00' : '#00CC00';
-                ctx.fillRect(segment.x, segment.y, TILE_SIZE - 1, TILE_SIZE - 1);
+            const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+            snake.forEach(function(segment, index) {
+                if (skin.head === 'rainbow') {
+                    const hue = (index * 20 + Date.now() * 0.05) % 360;
+                    ctx.fillStyle = 'hsl(' + hue + ', 100%, 50%)';
+                } else {
+                    ctx.fillStyle = index === 0 ? skin.head : skin.body;
+                }
+                if (index === 0 && eatAnimTimer > 0) {
+                    const scale = 1 + 0.2 * (eatAnimTimer / 150);
+                    const size = Math.round((TILE_SIZE - 1) * scale);
+                    const offset = Math.round(((TILE_SIZE - 1) - size) / 2);
+                    ctx.fillRect(segment.x + offset, segment.y + offset, size, size);
+                } else {
+                    ctx.fillRect(segment.x, segment.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
 
                 if (index === 0) {
                     let ex1, ey1, ex2, ey2;
@@ -330,10 +874,20 @@
         }
 
         function drawGame() {
-            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             drawGrid();
+            drawObstacles();
             drawFood();
             drawSnake();
+
+            // Time Attack HUD
+            if (gameMode === 'timeAttack' && gameState === 'playing' && timeAttackEnd > 0) {
+                const remaining = Math.max(0, Math.ceil((timeAttackEnd - Date.now()) / 1000));
+                ctx.fillStyle = remaining <= 10 ? '#FF4444' : '#FFD700';
+                ctx.font = 'bold 18px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText('TIME: ' + remaining + 's', CANVAS_WIDTH / 2, 5);
+            }
 
             if (gameState === 'idle') {
                 drawOverlay('SNAKE', 'Press ENTER to Start');
@@ -342,10 +896,27 @@
             } else if (gameState === 'gameover') {
                 drawOverlay('GAME OVER', 'Score: ' + score + ' | Press ENTER to Restart');
             }
+
+            if (flashOverlay) {
+                ctx.fillStyle = flashOverlay.color;
+                ctx.globalAlpha = Math.max(0, flashOverlay.alpha);
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                ctx.globalAlpha = 1;
+            }
         }
 
         function updateGame() {
             if (gameState !== 'playing') return;
+
+            gameTick++;
+            stats.totalDistance++;
+            if (gameTick % 10 === 0) awardXP(1);
+
+            // Time Attack timer
+            if (gameMode === 'timeAttack' && timeAttackEnd > 0) {
+                const remaining = timeAttackEnd - Date.now();
+                if (remaining <= 0) { gameOver(); return; }
+            }
 
             if (nextDirection) {
                 if (nextDirection.dx !== -dx || nextDirection.dy !== -dy) {
@@ -375,14 +946,43 @@
             if (wrappedHead.x === food.x && wrappedHead.y === food.y) {
                 snake.push(tail);
                 const eatenType = food.type;
-                let particleColor = eatenType === 'bonus' ? '#FFD700' : eatenType === 'speed' ? '#00FFFF' : '#00FF00';
-                spawnParticles(wrappedHead.x, wrappedHead.y, 12, particleColor);
-                if (eatenType === 'bonus') {
-                    score += 30;
-                    playSound('bonus');
-                } else if (eatenType === 'speed') {
-                    score += 5;
-                    playSound('speed');
+
+                // Stats tracking
+                sessionFoodTypes.add(eatenType);
+                sessionFoodEaten++;
+                stats.totalFoodEaten++;
+                if (eatenType === 'bonus') { stats.bonusFoodEaten++; sessionBonusFood++; }
+                else if (eatenType === 'speed') { stats.speedFoodEaten++; sessionSpeedFood++; }
+                else { stats.normalFoodEaten++; }
+
+                // Combo logic
+                const now = Date.now();
+                if (now - lastEatTime < 3000 && lastEatTime > 0) {
+                    comboCount = Math.min(5, comboCount + 1);
+                } else {
+                    comboCount = 0;
+                }
+                lastEatTime = now;
+                if (comboCount > stats.maxCombo) stats.maxCombo = comboCount;
+                if (comboCount > sessionMaxCombo) sessionMaxCombo = comboCount;
+
+                // XP award for eating
+                const tier = FOOD_TIERS[eatenType] || FOOD_TIERS.common;
+                const foodXP = tier.xp;
+                const comboMul = 1 + comboCount * 0.5;
+                awardXP(Math.round(foodXP * comboMul));
+
+                // Track longest length
+                if (snake.length > stats.longestLength) stats.longestLength = snake.length;
+
+                const tierColor = tier.color;
+                flashOverlay = { color: tierColor, alpha: 0.4 };
+                eatAnimTimer = 150;
+                spawnParticles(wrappedHead.x, wrappedHead.y, tier.pCount, tierColor);
+                if (gameMode !== 'zen') score += tier.pts;
+                playSound(tier.sound);
+                // speed food still has the special speed boost behavior
+                if (eatenType === 'speed') {
                     clearInterval(gameInterval);
                     gameInterval = setInterval(updateGame, Math.max(MIN_SPEED, getSpeed() - 30));
                     const ci = gameInterval;
@@ -392,11 +992,9 @@
                             gameInterval = setInterval(updateGame, getSpeed());
                         }
                     }, 2000);
-                } else {
-                    score += 10;
-                    playSound('eat');
                 }
                 updateScoreDisplay();
+                checkAchievements(score);
                 food = generateFood(snake);
                 if (!food) { gameOver(); return; }
                 if (eatenType !== 'speed') {
@@ -408,16 +1006,334 @@
             drawGame();
         }
 
+        function getLevelFromXP(xp) {
+            let n = 1;
+            while (true) {
+                const required = 100 * n * (n + 1) / 2;
+                if (xp < required) return n;
+                n++;
+            }
+        }
+
+        function awardXP(amount) {
+            const mc = MODE_CONFIG[gameMode];
+            if (!mc.earnXP) return;
+            xp += amount;
+            sessionXP += amount;
+            const newLevel = getLevelFromXP(xp);
+            while (newLevel > level) {
+                level++;
+                showLevelUpToast(level);
+                checkLevelUnlocks(level);
+            }
+            try { localStorage.setItem('snake_xp', xp); } catch(e) { /* localStorage unavailable */ }
+        }
+
+        function loadStats() {
+            try { return JSON.parse(localStorage.getItem('snake_stats')) || getDefaultStats(); }
+            catch(e) { return getDefaultStats(); }
+        }
+
+        function getDefaultStats() {
+            return {
+                gamesPlayed: 0, totalScore: 0, maxScore: 0,
+                totalFoodEaten: 0, normalFoodEaten: 0, bonusFoodEaten: 0, speedFoodEaten: 0,
+                longestLength: 0, longestTimeAlive: 0, totalTimePlayed: 0,
+                totalDistance: 0, maxCombo: 0, totalDeaths: 0
+            };
+        }
+
+        function saveAllState() {
+            try { localStorage.setItem('snake_stats', JSON.stringify(stats)); } catch(e) { /* localStorage unavailable */ }
+        }
+
+        function syncDailyState() {
+            const today = new Date();
+            const dateStr = today.getFullYear() + '-' + (today.getMonth()+1) + '-' + today.getDate();
+            let lastDate;
+            try { lastDate = localStorage.getItem('snake_daily_date') || ''; } catch(e) { lastDate = ''; }
+            
+            if (lastDate !== dateStr) {
+                // New day — reset attempts
+                dailyAttempts = 3;
+                dailyDone = false;
+                try {
+                    localStorage.setItem('snake_daily_date', dateStr);
+                    localStorage.setItem('snake_daily_done', 'false');
+                    localStorage.setItem('snake_daily_attempts_remaining', '3');
+                } catch(e) {}
+                
+
+            } else {
+                // Same day — load saved state
+                let rem = 3;
+                try { rem = parseInt(localStorage.getItem('snake_daily_attempts_remaining')) || 0; } catch(e) {}
+                dailyAttempts = rem;
+                let done = false;
+                try { done = localStorage.getItem('snake_daily_done') === 'true'; } catch(e) {}
+                dailyDone = done;
+            }
+        }
+
+        function showLevelUpToast(level) {
+            const el = document.getElementById('toast');
+            if (!el) return;
+            el.textContent = '⚡ LEVEL UP! Level ' + level + ' ⚡';
+            el.style.display = 'block';
+            window.lvlToastTimer = setTimeout(function() { el.style.display = 'none'; }, 3000);
+        }
+
+        function checkLevelUnlocks(newLevel) {
+            const unlocks = LEVEL_UNLOCKS[newLevel] || [];
+            for (let i = 0; i < unlocks.length; i++) {
+                const id = unlocks[i];
+                if (unlockedCosmetics.indexOf(id) === -1) {
+                    unlockedCosmetics.push(id);
+                    try { localStorage.setItem('snake_unlocks', JSON.stringify(unlockedCosmetics)); } catch(e) {}
+                    const allCosmetics = Object.assign({}, SNAKE_SKINS, GRID_THEMES, TRACE_EFFECTS, DEATH_EFFECTS);
+                    const c = allCosmetics[id];
+                    if (c) {
+                        const el = document.getElementById('toast');
+                        if (el) {
+                            el.textContent = '🎨 Unlocked: ' + c.name + '!';
+                            el.style.display = 'block';
+                            if (window.lvlToastTimer) clearTimeout(window.lvlToastTimer);
+                            window.lvlToastTimer = setTimeout(function() { el.style.display = 'none'; }, 3000);
+                        }
+                    }
+                }
+            }
+        }
+
+        function checkAchievements(sessionScore) {
+            const mc = MODE_CONFIG[gameMode];
+            if (!mc.achievementsEnabled) return;
+            let unlockedAny = false;
+            const ctx = {
+                sessionFoodEaten: sessionFoodEaten,
+                sessionTimeAlive: sessionTimeAlive,
+                snakeLength: snake.length,
+                hatTrickEligible: sessionFoodTypes.size >= 4,
+                maxCombo: sessionMaxCombo,
+                sessionScore: sessionScore || score
+            };
+            for (const id in ACHIEVEMENTS) {
+                if (achievements[id]) continue;
+                const ach = ACHIEVEMENTS[id];
+                if (ach.check(stats, ctx)) {
+                    achievements[id] = Date.now();
+                    try { localStorage.setItem('snake_achievements', JSON.stringify(achievements)); } catch(e) {}
+                    awardXP(ach.xp);
+                    showAchievementToast(ach);
+                    unlockedAny = true;
+                }
+            }
+        }
+
+        function showAchievementToast(ach) {
+            const el = document.getElementById('toast');
+            if (!el) return;
+            el.textContent = '🏆 ' + ach.icon + ' ' + ach.name + ': ' + ach.desc + ' (+' + ach.xp + ' XP)';
+            el.style.display = 'block';
+            if (window.achToastTimer) clearTimeout(window.achToastTimer);
+            if (window.lvlToastTimer) clearTimeout(window.lvlToastTimer);
+            window.achToastTimer = setTimeout(function() { el.style.display = 'none'; }, 4000);
+        }
+
+        function checkDailyCompletion(sessionScore, checkCtx) {
+            if (gameMode !== 'daily') return;
+            if (dailyDone) return;
+            const seed = getDailySeed();
+            const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
+            if (challenge.check(sessionScore, checkCtx)) {
+                dailyDone = true;
+                awardXP(challenge.reward);
+                try { localStorage.setItem('snake_daily_done', 'true'); } catch(e) {}
+                const el = document.getElementById('toast');
+                if (el) {
+                    el.textContent = '⭐ Daily Complete! ' + challenge.desc + ' (+' + challenge.reward + ' XP)';
+                    el.style.display = 'block';
+                    if (window.achToastTimer) clearTimeout(window.achToastTimer);
+                    if (window.lvlToastTimer) clearTimeout(window.lvlToastTimer);
+                    window.achToastTimer = setTimeout(function() { el.style.display = 'none'; }, 4000);
+                }
+            }
+        }
+
+        function showAchievementsPanel() {
+            const el = document.getElementById('achievementsPanel');
+            if (!el) return;
+            if (el.style.display === 'block') { el.style.display = 'none'; return; }
+            document.getElementById('statsPanel').style.display = 'none';
+            document.getElementById('cosmeticsPanel').style.display = 'none';
+            let html = '<h2 style="text-align:center;margin-top:0;color:#FFD700;">🏆 ACHIEVEMENTS</h2><div style="max-height:400px;overflow-y:auto;">';
+            for (const id in ACHIEVEMENTS) {
+                const ach = ACHIEVEMENTS[id];
+                const unlocked = achievements[id];
+                html += '<div style="padding:10px;margin:6px 0;background:' + (unlocked ? 'rgba(255,215,0,0.12)' : 'rgba(255,255,255,0.04)') + ';border-radius:8px;border:1px solid ' + (unlocked ? 'rgba(255,215,0,0.3)' : 'rgba(255,255,255,0.1)') + ';">' +
+                    '<div style="display:flex;align-items:center;justify-content:space-between;">' +
+                    '<span><span style="font-size:1.3em;">' + (unlocked ? '✅' : '🔒') + '</span> ' +
+                    '<strong>' + ach.icon + ' ' + ach.name + '</strong></span>' +
+                    '<span style="color:' + (unlocked ? '#4CAF50' : '#FFD700') + ';font-size:0.9em;">' + (unlocked ? '✓ Unlocked' : '+' + ach.xp + ' XP') + '</span></div>' +
+                    '<div style="color:#aaa;font-size:0.85em;margin-top:4px;margin-left:28px;">' + ach.desc + '</div>' +
+                    (unlocked ? '<div style="color:#666;font-size:0.75em;margin-top:2px;margin-left:28px;">' + new Date(unlocked).toLocaleDateString() + '</div>' : '') +
+                    '</div>';
+            }
+            html += '</div><p style="text-align:center;color:#666;margin-top:10px;font-size:0.85em;">Press F or ESC to close</p>';
+            el.innerHTML = html;
+            el.style.display = 'block';
+        }
+
+        function showCosmeticsPanel() {
+            const el = document.getElementById('cosmeticsPanel');
+            if (!el) return;
+            if (el.style.display === 'block') { el.style.display = 'none'; return; }
+            document.getElementById('statsPanel').style.display = 'none';
+            document.getElementById('achievementsPanel').style.display = 'none';
+
+            function cycle(currentId, categoryMap, direction) {
+                const keys = Object.keys(categoryMap);
+                const idx = keys.indexOf(currentId);
+                if (idx === -1) return currentId;
+                let newIdx = idx;
+                const maxAttempts = keys.length;
+                for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                    newIdx = (newIdx + direction + keys.length) % keys.length;
+                    if (unlockedCosmetics.indexOf(keys[newIdx]) !== -1) return keys[newIdx];
+                }
+                return currentId;
+            }
+
+            function renderPanel() {
+                const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+                const grid = GRID_THEMES[cosmetics.grid] || GRID_THEMES.grid_classic;
+                const trace = TRACE_EFFECTS[cosmetics.trace] || TRACE_EFFECTS.trace_none;
+                const death = DEATH_EFFECTS[cosmetics.death] || DEATH_EFFECTS.death_classic;
+
+                el.innerHTML =
+                    '<h2 style="text-align:center;margin-top:0;color:#FFD700;">🎨 COSMETICS</h2>' +
+                    '<div style="margin:12px 0;">' +
+                    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;">' +
+                    '<button class="cosmetic-btn" data-cat="snake" data-dir="-1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">◀</button>' +
+                    '<div style="text-align:center;"><strong>Snake</strong><br><span style="color:#aaa;font-size:0.9em;">' + skin.name + '</span></div>' +
+                    '<button class="cosmetic-btn" data-cat="snake" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
+                    '</div>' +
+
+                    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;margin-top:8px;">' +
+                    '<button class="cosmetic-btn" data-cat="grid" data-dir="-1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">◀</button>' +
+                    '<div style="text-align:center;"><strong>Grid</strong><br><span style="color:#aaa;font-size:0.9em;">' + grid.name + '</span></div>' +
+                    '<button class="cosmetic-btn" data-cat="grid" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
+                    '</div>' +
+
+                    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;margin-top:8px;">' +
+                    '<button class="cosmetic-btn" data-cat="trace" data-dir="-1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">◀</button>' +
+                    '<div style="text-align:center;"><strong>Trail</strong><br><span style="color:#aaa;font-size:0.9em;">' + trace.name + '</span></div>' +
+                    '<button class="cosmetic-btn" data-cat="trace" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
+                    '</div>' +
+
+                    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;margin-top:8px;">' +
+                    '<button class="cosmetic-btn" data-cat="death" data-dir="-1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">◀</button>' +
+                    '<div style="text-align:center;"><strong>Death Effect</strong><br><span style="color:#aaa;font-size:0.9em;">' + death.name + '</span></div>' +
+                    '<button class="cosmetic-btn" data-cat="death" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
+                    '</div>' +
+                    '</div>' +
+                    '<p style="text-align:center;color:#666;font-size:0.85em;">Press C or ESC to close</p>';
+
+                el.querySelectorAll('.cosmetic-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function(ev) {
+                        const cat = ev.target.getAttribute('data-cat');
+                        const dir = parseInt(ev.target.getAttribute('data-dir'));
+                        if (cat === 'snake') {
+                            cosmetics.snake = cycle(cosmetics.snake, SNAKE_SKINS, dir);
+                        } else if (cat === 'grid') {
+                            cosmetics.grid = cycle(cosmetics.grid, GRID_THEMES, dir);
+                        } else if (cat === 'trace') {
+                            cosmetics.trace = cycle(cosmetics.trace, TRACE_EFFECTS, dir);
+                        } else if (cat === 'death') {
+                            cosmetics.death = cycle(cosmetics.death, DEATH_EFFECTS, dir);
+                        }
+                        try { localStorage.setItem('snake_equipped', JSON.stringify(cosmetics)); } catch(e) {}
+                        renderPanel();
+                    });
+                });
+            }
+
+            renderPanel();
+            el.style.display = 'block';
+        }
+
+        function showStatsPanel() {
+            const el = document.getElementById('statsPanel');
+            if (!el) return;
+            if (el.style.display === 'block') { el.style.display = 'none'; return; }
+            document.getElementById('achievementsPanel').style.display = 'none';
+            document.getElementById('cosmeticsPanel').style.display = 'none';
+            el.innerHTML = '<h2 style="text-align:center;margin-top:0;">📊 STATS</h2>' +
+                '<table style="width:100%;border-collapse:collapse;">' +
+                '<tr><td style="padding:4px 8px;">Games Played</td><td style="text-align:right;padding:4px 8px;">' + stats.gamesPlayed + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Total Score</td><td style="text-align:right;padding:4px 8px;">' + stats.totalScore.toLocaleString() + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Best Score</td><td style="text-align:right;padding:4px 8px;">' + stats.maxScore.toLocaleString() + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Total Food Eaten</td><td style="text-align:right;padding:4px 8px;">' + stats.totalFoodEaten + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Normal / Bonus / Speed</td><td style="text-align:right;padding:4px 8px;">' + stats.normalFoodEaten + ' / ' + stats.bonusFoodEaten + ' / ' + stats.speedFoodEaten + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Longest Snake</td><td style="text-align:right;padding:4px 8px;">' + stats.longestLength + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Longest Life</td><td style="text-align:right;padding:4px 8px;">' + Math.floor(stats.longestTimeAlive / 1000) + 's</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Total Time</td><td style="text-align:right;padding:4px 8px;">' + Math.floor(stats.totalTimePlayed / 60000) + 'm</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Total Distance</td><td style="text-align:right;padding:4px 8px;">' + stats.totalDistance + ' tiles</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Best Combo</td><td style="text-align:right;padding:4px 8px;">' + stats.maxCombo + 'x</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Deaths</td><td style="text-align:right;padding:4px 8px;">' + stats.totalDeaths + '</td></tr>' +
+                '</table>' +
+                '<p style="text-align:center;color:#888;margin-top:10px;font-size:0.9em;">Press TAB or ESC to close</p>';
+            el.style.display = 'block';
+        }
+
         document.addEventListener('keydown', (e) => {
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
                 e.preventDefault();
             }
 
             if (e.key === 'Enter') {
-                if (gameState === 'idle' || gameState === 'gameover') {
+                if (gameState === 'idle') {
+                    if (gameMode === 'daily' && dailyAttempts <= 0) {
+                        const el = document.getElementById('toast');
+                        if (el) {
+                            el.textContent = 'No attempts left today!';
+                            el.style.display = 'block';
+                            setTimeout(function() { el.style.display = 'none'; }, 2000);
+                        }
+                        return;
+                    }
                     resetGame();
                     startGame();
+                    return;
                 }
+                if (gameState === 'gameover') {
+                    gameState = 'idle';
+                    drawGame();
+                    return;
+                }
+            }
+
+            // Mode selection on idle
+            if (gameState === 'idle') {
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    modeSelectIndex = (modeSelectIndex - 1 + MODE_ORDER.length) % MODE_ORDER.length;
+                    gameMode = MODE_ORDER[modeSelectIndex];
+                    drawGame();
+                    return;
+                }
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    modeSelectIndex = (modeSelectIndex + 1) % MODE_ORDER.length;
+                    gameMode = MODE_ORDER[modeSelectIndex];
+                    drawGame();
+                    return;
+                }
+            }
+
+            // Zen mode quit
+            if (e.key === 'Enter' && gameState === 'playing' && gameMode === 'zen') {
+                endZenSession();
                 return;
             }
 
@@ -426,10 +1342,19 @@
                     gameState = 'paused';
                     clearInterval(gameInterval);
                     gameInterval = null;
+                    sessionPauseStart = Date.now();
                     playSound('pause');
                     drawGame();
                 } else if (gameState === 'paused') {
                     gameState = 'playing';
+                    if (sessionPauseStart) {
+                        const pauseDuration = Date.now() - sessionPauseStart;
+                        sessionPausedTime += pauseDuration;
+                        if (gameMode === 'timeAttack') {
+                            timeAttackEnd += pauseDuration;
+                        }
+                        sessionPauseStart = 0;
+                    }
                     gameInterval = setInterval(updateGame, getSpeed());
                     playSound('resume');
                     drawGame();
@@ -439,7 +1364,32 @@
 
             if (e.key === 'm' || e.key === 'M') {
                 muted = muted ? 0 : 1;
-                localStorage.setItem('snake_muted', muted);
+                try { localStorage.setItem('snake_muted', muted); } catch(e) { /* localStorage unavailable */ }
+                return;
+            }
+
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                showStatsPanel();
+                return;
+            }
+            if (e.key === 'c' || e.key === 'C') {
+                e.preventDefault();
+                if (gameState === 'playing') return;
+                showCosmeticsPanel();
+                return;
+            }
+
+            if (e.key === 'Escape') {
+                document.getElementById('statsPanel').style.display = 'none';
+                document.getElementById('achievementsPanel').style.display = 'none';
+                document.getElementById('cosmeticsPanel').style.display = 'none';
+                return;
+            }
+
+            if (e.key === 'f' || e.key === 'F') {
+                e.preventDefault();
+                showAchievementsPanel();
                 return;
             }
 
@@ -479,8 +1429,65 @@
             }
         });
 
+        // Virtual D-pad
+        document.querySelectorAll('.dpad-btn').forEach(function(btn) {
+          btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const key = btn.getAttribute('data-key');
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
+          });
+          // Also handle touch to avoid double-firing
+          btn.addEventListener('touchstart', function(e) {
+            e.preventDefault();
+            const key = btn.getAttribute('data-key');
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
+          }, { passive: false });
+        });
+
+        // Touch swipe controls
+        let touchStartX = 0;
+        let touchStartY = 0;
+        canvas.addEventListener('touchstart', function(e) {
+          e.preventDefault();
+          touchStartX = e.touches[0].clientX;
+          touchStartY = e.touches[0].clientY;
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function(e) {
+          e.preventDefault();
+          const dx_touch = e.changedTouches[0].clientX - touchStartX;
+          const dy_touch = e.changedTouches[0].clientY - touchStartY;
+
+          // Tap detection (small movement)
+          if (Math.abs(dx_touch) < 10 && Math.abs(dy_touch) < 10) {
+            if (gameState === 'idle' || gameState === 'gameover') {
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+            } else if (gameState === 'playing') {
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
+            }
+            return;
+          }
+
+          // Swipe detection (minimum 30px movement)
+          if (Math.abs(dx_touch) < 30 && Math.abs(dy_touch) < 30) return;
+
+          let newDx = 0, newDy = 0;
+          if (Math.abs(dx_touch) > Math.abs(dy_touch)) {
+            newDx = dx_touch > 0 ? TILE_SIZE : -TILE_SIZE;
+          } else {
+            newDy = dy_touch > 0 ? TILE_SIZE : -TILE_SIZE;
+          }
+
+          // Same reversal check as keydown handler
+          const currentDir = nextDirection ?? { dx, dy };
+          if (newDx !== -currentDir.dx || newDy !== -currentDir.dy) {
+            nextDirection = { dx: newDx, dy: newDy };
+          }
+        }, { passive: false });
+
         document.addEventListener('visibilitychange', () => {
             if (document.hidden && gameState === 'playing') {
+                sessionPauseStart = Date.now();
                 gameState = 'paused';
                 clearInterval(gameInterval);
                 gameInterval = null;
@@ -489,6 +1496,7 @@
             }
         });
 
+        syncDailyState();
         resetGame();
         requestAnimationFrame(animateVisuals);
     </script>
