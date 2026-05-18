@@ -1,0 +1,160 @@
+# Snake Game Bug Fix Design
+
+> **Spec Status:** Draft v1
+> **Date:** 2026-05-18
+
+## Bug Fix Package
+
+This design document catalogs all known bugs in the Snake game (snake.html) and defines the fix approach for each. Bugs are prioritized by severity and grouped into independent fix tasks for implementation.
+
+---
+
+## Bug Catalog (All Known Issues)
+
+### Critical Bugs
+
+#### B1: Speed Boost + SlowMo Interaction — Stale `preBoostInterval`
+
+**Location:** `updateGame()` lines 2268–2289, `activatePowerUp()` lines 586–591, `deactivatePowerUp()` lines 601–613
+
+**Root Cause:** `preBoostInterval` captures `tickInterval` when speed food is eaten. If slowMo state changes before the speed boost expires, `preBoostInterval` goes stale. When the speed boost ends, `tickInterval = preBoostInterval` restores a wrong value.
+
+**Fix:** Instead of storing a raw `preBoostInterval`, recompute the target speed at boost-end using `getEffectiveSpeed()`. Remove `preBoostInterval` entirely — speed food sets a lower bound on `tickInterval` (not a fixed restore value). The boost-end simply recalculates using `getEffectiveSpeed()`.
+
+#### B2: Speed Boost Counter Only Decrements on Food-Eat Ticks
+
+**Location:** `updateGame()` lines 2282–2289
+
+**Root Cause:** `speedBoostCounter--` (line 2283) is inside the `if (food eaten)` block, so it only decrements when the player eats food. If no food is found, the speed boost lasts indefinitely.
+
+**Fix:** Move `speedBoostCounter--` to the end of `updateGame()`, outside the food-eat block, so it decrements every tick regardless of food consumption.
+
+#### B3: Daily Streak Never Increments — `snake_daily_date` Not Saved
+
+**Location:** `startGame()` lines 706–730, `syncDailyState()` lines 2475–2492
+
+**Root Cause:** `syncDailyState()` runs on page load and saves `today` as `snake_daily_date`. When `startGame()` reads `storedDate`, it matches `todayStr`, so the streak-update block is skipped entirely (the condition `storedDateStr !== todayStr` is false). The streak is loaded but never saved back.
+
+**Fix:** In `startGame()`, after computing the streak value, explicitly save `snake_daily_date` to `todayStr` regardless of whether the streak incremented. Also consolidate: on first daily game of the day, save the new date AND the updated streak count.
+
+#### B4: Duplicate `case 'combo_milestone'` in `playSound()` — Dead Code
+
+**Location:** `playSound()` lines 1170–1177 and 1197–1202
+
+**Root Cause:** Two `case 'combo_milestone':` labels in the same switch statement. JavaScript matches the first one; the second (at line 1197) is unreachable dead code. The two cases have different sound implementations (ascending arpeggio vs. single sustained tone), suggesting conflicting intent.
+
+**Fix:** Remove the dead second case (lines 1197–1202). Keep the first implementation (ascending C5→E5 arpeggio, 0.2s).
+
+### High Bugs
+
+#### B5: `levelUpFlash` Set on Every XP Award, Not Just Level-Ups
+
+**Location:** `awardXP()` line 2448
+
+**Root Cause:** `levelUpFlash = 1500;` is outside the `while (newLevel > level)` loop, so it fires on every `awardXP()` call, including the `awardXP(1)` every 10 game ticks. This causes a constant golden flash making genuine level-ups invisible.
+
+**Fix:** Move `levelUpFlash = 1500;` inside the `while (newLevel > level)` loop, after `level++;`.
+
+#### B6: Flash Overlay Does Not Render Last — Draw Order Violation
+
+**Location:** `animateVisuals()` lines 1390–1445
+
+**Root Cause:** The flash overlay renders at lines 1390–1395, but four elements render after it: help overlay (1398), session summary (1403), snap level-up flash (1422), level-up flash (1435). This violates the AGENTS.md rule that flash overlay must render on top of everything.
+
+**Fix:** Move the flash overlay rendering to the very end of `animateVisuals()`, after the session summary, snap level-up, and level-up flash sections. The ordering should be: help overlay → session summary → snap level-up flash → XP level-up flash → flash overlay.
+
+#### B7: Touch D-Pad Space Button Causes Instant Pause/Resume Toggle
+
+**Location:** D-pad event listeners lines 2931–2943
+
+**Root Cause:** Each `.dpad-btn` has both `click` and `touchstart` listeners. On touch devices, `touchstart` dispatches a Keydown event and `e.preventDefault()` should suppress the subsequent `click`. On some platforms (Android Chrome), the click still fires, causing double-dispatch. For the space button, this means pause followed immediately by resume.
+
+**Fix:** Consolidate to a single event handler. Use `touchstart` only (remove `click` listener on touch devices), or use a flag that the `click` handler checks to skip if a `touchstart` already dispatched the event.
+
+#### B8: Rival `generateFood` Double-Counts Rival Length
+
+**Location:** `updateRival()` line 970–971, `generateFood()` line 508–509
+
+**Root Cause:** When the rival eats food, it calls `generateFood(combinedSnake)` where `combinedSnake = snake.concat(rivalSnake)`. Inside `generateFood`, `rivalLength = rivalActive ? rivalSnake.length : 0` double-counts the rival — once via `currentSnake.length` (which includes rival from `combinedSnake`) and once via `rivalLength`.
+
+**Fix:** When the `currentSnake` parameter already includes the rival snake, pass `rivalActive = false` for the length guard calculation. Simplest approach: in `generateFood`, don't add `rivalLength` to the guard if `currentSnake` already includes rival segments. Or better: remove the `rivalLength` variable entirely and rely solely on `currentSnake.length + obstacles.length`.
+
+#### B9: Magnet Pull Broken at Wrap Edges
+
+**Location:** `updateGame()` lines 2336–2358
+
+**Root Cause:** The magnet pull uses linear Manhattan distance (`head.x - food.x`, `head.y - food.y`) without accounting for world wrapping. Food near the right edge might be 20px away across the wrap boundary but 380px away in linear space, so the magnet pulls in the wrong direction or doesn't pull at all.
+
+**Fix:** Compute wrapped delta: for each axis, if the absolute distance exceeds `CANVAS_WIDTH / 2`, use the wrapped distance instead. Then pull toward the shortest path.
+
+#### B10: `endZenSession()` Skips `checkAchievements()` and `checkDailyCompletion()`
+
+**Location:** `endZenSession()` lines 1083–1090
+
+**Root Cause:** `endZenSession()` calls `finalizeSession(true)` but does NOT call `checkAchievements()` or `checkDailyCompletion()`, unlike `gameOver()`. This makes session-end achievement/daily checks fragile in Zen mode.
+
+**Fix:** Add `checkAchievements(score)` and `checkDailyCompletion(score, ...)` calls to `endZenSession()`, passing the same context object that `gameOver()` uses.
+
+### Medium/Low Bugs (Documented, Deferred)
+
+These are real but less impactful. Documented for awareness; not in scope for this fix cycle.
+
+- **Snap mode shrinkTimer double-accounting** (explorer 1, Bug #1) — Fragile but functionally correct
+- **PowerUp timer uses `getEffectiveSpeed()` not actual tick interval** (explorer 1, Bug #4) — Powerups expire 33% faster during speed boost
+- **Help overlay H key has no gameState guard** (explorer 3, Bug #2) — Can obscure live game
+- **Canvas tap dispatches Space with no debounce** (explorer 3, Bug #3) — Accidental pauses
+- **`drawGame(1)` called twice in `gameOver()`** (explorer 3, Bug #6) — One-frame visual glitch
+- **Toast queue bypassed by direct DOM manipulation** (review 1, Bug #3) — Race condition on toast element
+- **`cachedLevel` not reset on prestige** (review 1, Bug #5)
+- **Stats not persisted until game over** (review 1, Bug #6)
+- **`drawOverlay()` leaks canvas state** (explorer 2, Bug #2)
+- **Help overlay doesn't close on Escape** (explorer 3, Bug #5)
+- **Magnet doesn't check rival snake tiles** (review 2, Bug C)
+
+---
+
+## Implementation Order
+
+| Priority | Bug ID | Description | Impact | Risk |
+|----------|--------|-------------|--------|------|
+| P0 | B1 | Speed boost + slowMo stale preBoostInterval | Game permanently stuck at wrong speed | Medium |
+| P0 | B3 | Daily streak never increments | Core feature broken, user-facing | Low |
+| P1 | B2 | Speed boost decrements only on food-eat | Gameplay bug, boost lasts indefinitely | Low |
+| P1 | B4 | Duplicate combo_milestone case (dead code) | Confusing, wastes code | Low |
+| P1 | B5 | levelUpFlash on every XP award | Visual noise obscures real level-ups | Low |
+| P1 | B6 | Flash overlay draw order violation | Visual bug, screen flash obscured | Low |
+| P1 | B7 | Touch D-pad pause/resume toggle | Core touch UX broken | Medium |
+| P1 | B8 | Rival generateFood double-counts rival | Premature "board filled up" game over | Low |
+| P1 | B9 | Magnet pull broken at wrap edges | Power-up doesn't work near edges | Low |
+| P1 | B10 | endZenSession() skips checks | Achievements/daily not checked in Zen | Low |
+
+---
+
+## Design Decisions
+
+### Decision 1: Replace `preBoostInterval` with on-demand speed recomputation
+
+Instead of tracking a saved interval value, speed-food boost will lower `tickInterval` by 30ms from whatever `getEffectiveSpeed()` returns. When the boost expires, call `getEffectiveSpeed()` to restore. This eliminates the stale-state problem entirely.
+
+### Decision 2: Use a `_touchUsedFlag` for D-pad double-dispatch fix
+
+Rather than removing the `click` event (which would break desktop touchpad users), use a `touchstart`-set flag that the `click` handler checks. On `touchstart`, set a flag. On `click`, if the flag is set, skip dispatch and clear the flag. This handles hybrid touch/pointer devices correctly.
+
+### Decision 3: `generateFood` guard simplification
+
+Remove the `rivalLength` variable from the board-full guard. The function already receives `currentSnake` which may or may not include rival segments. The guard should check `currentSnake.length + obstacles.length >= totalTiles`. If the caller wants to exclude rival from the guard, they can pass a shorter array.
+
+### Decision 4: Wrapped delta for magnet
+
+Compute the shortest-path distance on each axis by checking if the straight-line distance exceeds half the board size, and if so, use the wrapped distance. Pull food along the shortest axis.
+
+---
+
+## Cross-Feature Interactions
+
+| Interaction | Handling |
+|---|---|
+| Speed boost + slowMo active simultaneously | Boost expiration always uses `getEffectiveSpeed()`, which accounts for slowMo. Clean separation. |
+| PowerUp timer during speed boost | PowerUp timer uses tick-based decrement — during speed boost, more ticks fire per second, so powerups expire faster. This is intentional (speed boost costs you powerup time). |
+| Magnet pull near obstacles | Already checked (line 2353). Wrapped delta fix doesn't affect obstacle checking. |
+| Daily streak across midnight | `syncDailyState()` handles date boundary. The startGame() fix ensures the date is saved after streak increment. |
