@@ -1197,12 +1197,6 @@ const TRAIL_RENDER_CONFIG = {
                     osc.start(now);
                     osc.stop(now + 0.05);
                     break;
-                case 'combo_milestone':
-                    osc.frequency.value = 660;
-                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-                    osc.start(now);
-                    osc.stop(now + 0.12);
-                    break;
             }
         }
 
@@ -1390,13 +1384,6 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.restore();
             }
 
-            if (flashOverlay) {
-                ctx.fillStyle = flashOverlay.color;
-                ctx.globalAlpha = Math.max(0, flashOverlay.alpha);
-                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-                ctx.globalAlpha = 1;
-            }
-
             // Help overlay — renders on top of everything
             if (helpOverlayVisible) {
                 drawHelpOverlay();
@@ -1445,6 +1432,14 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textBaseline = 'top';
                 ctx.fillText('🌟 LEVEL ' + level + '! 🌟', CANVAS_WIDTH / 2, 20);
                 ctx.restore();
+            }
+
+            // Flash overlay — renders last on top of everything (AGENTS.md)
+            if (flashOverlay) {
+                ctx.fillStyle = flashOverlay.color;
+                ctx.globalAlpha = Math.max(0, flashOverlay.alpha);
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                ctx.globalAlpha = 1;
             }
 
             // Animate score
@@ -2925,19 +2920,24 @@ const TRAIL_RENDER_CONFIG = {
             setNextDirection(newDx, newDy);
         });
 
-        // Virtual D-pad
+        // Virtual D-pad — single dispatch with touch suppression
+        let _touchDispatched = false;
         document.querySelectorAll('.dpad-btn').forEach(function(btn) {
-          btn.addEventListener('click', function(e) {
-            e.preventDefault();
-            const key = btn.getAttribute('data-key');
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
-          });
-          // Also handle touch to avoid double-firing
           btn.addEventListener('touchstart', function(e) {
             e.preventDefault();
+            _touchDispatched = true;
             const key = btn.getAttribute('data-key');
             document.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
           }, { passive: false });
+          btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            if (_touchDispatched) {
+              _touchDispatched = false;
+              return;
+            }
+            const key = btn.getAttribute('data-key');
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
+          });
         });
 
         // Touch swipe controls
