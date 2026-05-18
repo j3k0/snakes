@@ -146,7 +146,6 @@
         let touchIndicatorTimer = 0;
         let eatAnimTimer = 0;
         let speedBoostCounter = 0;
-        let preBoostInterval = 120;
         let shrinkTimer = 3000;
         let renderTime = 0;
         let gridCacheCanvas = null;
@@ -654,7 +653,6 @@ const TRAIL_RENDER_CONFIG = {
             rivalActive = false;
             rivalRespawnTimer = 0;
             speedBoostCounter = 0;
-            preBoostInterval = 120;
 
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
@@ -781,6 +779,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function restartGameInterval(speed) {
             clearInterval(gameInterval);
+            gameInterval = null;
             gameInterval = setInterval(updateGame, speed || tickInterval);
         }
 
@@ -2266,8 +2265,7 @@ const TRAIL_RENDER_CONFIG = {
                 playSound(tier.sound);
                 // speed food still has the special speed boost behavior
                 if (eatenType === 'speed') {
-                    preBoostInterval = tickInterval;
-                    tickInterval = Math.max(MIN_SPEED, getSpeed() - 30);
+                    tickInterval = Math.max(MIN_SPEED, getEffectiveSpeed() - 30);
                     restartGameInterval(tickInterval);
                     speedBoostCounter = 16; // ~2 seconds at 120ms ticks
                 }
@@ -2275,18 +2273,6 @@ const TRAIL_RENDER_CONFIG = {
                 checkAchievements(score);
                 food = generateFood(snake);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
-                if (eatenType !== 'speed' && speedBoostCounter <= 0) {
-                    tickInterval = getEffectiveSpeed();
-                    restartGameInterval(tickInterval);
-                }
-                // Speed boost counter
-                if (speedBoostCounter > 0) {
-                    speedBoostCounter--;
-                    if (speedBoostCounter <= 0) {
-                        tickInterval = preBoostInterval;
-                        restartGameInterval(tickInterval);
-                    }
-                }
             }
 
             // Check power-up collection
@@ -2416,6 +2402,15 @@ const TRAIL_RENDER_CONFIG = {
 
             lastTickTime = performance.now();
             visualDirty = true;
+
+            // Speed boost counter — decrements every tick
+            if (speedBoostCounter > 0) {
+                speedBoostCounter--;
+                if (speedBoostCounter <= 0) {
+                    tickInterval = getEffectiveSpeed();
+                    restartGameInterval(tickInterval);
+                }
+            }
         }
 
         function getLevelFromXP(xp) {
