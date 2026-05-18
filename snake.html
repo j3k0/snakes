@@ -2468,10 +2468,10 @@ const TRAIL_RENDER_CONFIG = {
             const newLevel = getLevelFromXP(xp);
             while (newLevel > level) {
                 level++;
+                levelUpFlash = 1500; // show "LEVEL N!" for 1.5 seconds
                 showLevelUpToast(level);
                 checkLevelUnlocks(level);
             }
-            levelUpFlash = 1500; // show "LEVEL N!" for 1.5 seconds
             cachedLevel = -1; // invalidate XP cache on level change
             saveManager.set('snake_xp', xp);
         }
