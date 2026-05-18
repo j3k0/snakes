@@ -1,0 +1,219 @@
+import { chromium } from 'playwright';
+
+const FILE = 'file:///Users/jeko/tmp/snakes/snake.html';
+
+const tests = [];
+
+function test(name, fn) {
+  tests.push({ name, fn });
+}
+
+async function run() {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // Collect all console messages
+  const errors = [];
+  page.on('console', msg => {
+    if (msg.type() === 'error') errors.push(msg.text());
+  });
+  page.on('pageerror', err => errors.push(err.message));
+
+  await page.goto(FILE, { waitUntil: 'networkidle' });
+
+  console.log(`Page loaded. Title: ${await page.title()}`);
+
+  // Check for JS errors during load
+  test('No JS errors on load', () => {
+    if (errors.length > 0) throw new Error(`Console errors: ${errors.join('; ')}`);
+  });
+
+  // Test B1/B2: Speed boost system rewrite
+  test('B1/B2: preBoostInterval variable is gone', async () => {
+    const hasPreBoost = await page.evaluate(() => typeof preBoostInterval !== 'undefined');
+    if (hasPreBoost) throw new Error('preBoostInterval still exists');
+  });
+
+  test('B1/B2: speedBoostCounter is accessible', async () => {
+    const hasCounter = await page.evaluate(() => typeof speedBoostCounter !== 'undefined');
+    if (!hasCounter) throw new Error('speedBoostCounter missing');
+  });
+
+  test('B1/B2: restartGameInterval nulls gameInterval', async () => {
+    const source = await page.evaluate(() => restartGameInterval.toString());
+    if (!source.includes('gameInterval = null')) throw new Error('restartGameInterval does not null gameInterval');
+  });
+
+  test('B1/B2: eat speed food, verify speed boost counter starts at 16', async () => {
+    // Start a game in classic mode and wait for snake to initialize
+    await page.evaluate(() => { gameMode = 'classic'; resetGame(); startGame(); });
+    await page.waitForFunction(() => typeof snake !== 'undefined' && snake.length > 0, { timeout: 5000 });
+
+    // Force food to be speed type and move snake onto it
+    const result = await page.evaluate(() => {
+      food.type = 'speed';
+      food.x = snake[0].x + 20;
+      food.y = snake[0].y;
+      dx = 20;
+      dy = 0;
+      speedBoostCounter = 0;
+      // Trigger one updateGame tick which should eat the food
+      updateGame();
+      return { counter: speedBoostCounter, interval: tickInterval };
+    });
+    if (result.counter !== 15) throw new Error(`Expected speedBoostCounter=15 after one eat-tick, got ${result.counter}`);
+    if (typeof result.interval !== 'number' || result.interval <= 0) throw new Error(`Bad tickInterval: ${result.interval}`);
+    // Clean up
+    await page.evaluate(() => { clearInterval(gameInterval); gameInterval = null; gameState = 'idle'; });
+  });
+
+  // Test: Canvas renders pixels after game starts
+  test('Canvas renders pixels after game starts', async () => {
+    await page.evaluate(() => { gameMode = 'classic'; resetGame(); startGame(); });
+    await page.waitForFunction(() => typeof snake !== 'undefined' && snake.length > 0, { timeout: 5000 });
+    // Wait a short moment for a render frame
+    await page.waitForTimeout(100);
+
+    const hasPixels = await page.evaluate(() => {
+      const canvas = document.getElementById('gameCanvas');
+      if (!canvas) return false;
+      const ctx = canvas.getContext('2d');
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      // Check if any pixel has non-zero alpha
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 0) return true;
+      }
+      return false;
+    });
+
+    if (!hasPixels) throw new Error('Canvas has no rendered pixels after game start');
+
+    // Clean up
+    await page.evaluate(() => { clearInterval(gameInterval); gameInterval = null; gameState = 'idle'; });
+  });
+
+  // Test B3: Daily streak
+  test('B3: daily streak functions exist', async () => {
+    const hasStartGame = await page.evaluate(() => typeof startGame === 'function');
+    const hasSyncDaily = await page.evaluate(() => typeof syncDailyState === 'function');
+    if (!hasStartGame || !hasSyncDaily) throw new Error('Required functions missing');
+  });
+
+  // B4: Duplicate case
+  test('B4: only one combo_milestone case in playSound', async () => {
+    const source = await page.evaluate(() => playSound.toString());
+    const matches = source.match(/case\s+'combo_milestone':/g);
+    if (!matches || matches.length !== 1) throw new Error(`Expected 1 combo_milestone case, got ${matches ? matches.length : 0}`);
+  });
+
+  // B5: levelUpFlash inside while loop
+  test('B5: levelUpFlash is inside the level-up while loop', async () => {
+    const source = await page.evaluate(() => awardXP.toString());
+    const lines = source.split('\n');
+    const flashLine = lines.findIndex(l => l.includes('levelUpFlash'));
+    const whileCloseLine = lines.findIndex(l => l.includes('}') && lines.indexOf(l) > lines.findIndex(l => l.includes('while')));
+    // The while loop is around lines with level++, showLevelUpToast, checkLevelUnlocks
+    // levelUpFlash should be between the while opening and the closing }
+    const whileStart = lines.findIndex(l => l.includes('while (newLevel > level)'));
+    const whileBody = lines.slice(whileStart, lines.findIndex((l, i) => i > whileStart && l.trim() === '}' && !l.includes('{')));
+    const hasFlashInWhile = whileBody.some(l => l.includes('levelUpFlash'));
+    if (!hasFlashInWhile) throw new Error('levelUpFlash not inside the while loop body');
+  });
+
+  // B6: Flash overlay renders last in animateVisuals
+  test('B6: flash overlay renders last in animateVisuals', async () => {
+    const source = await page.evaluate(() => animateVisuals.toString());
+    const lines = source.split('\n');
+    const flashIdx = lines.findIndex(l => l.includes('flashOverlay') && l.includes('fillRect'));
+    const scoreIdx = lines.findIndex(l => l.includes('scoreDelta'));
+    if (flashIdx > scoreIdx) throw new Error('Flash overlay renders BEFORE score animation — should render AFTER');
+  });
+
+  // B7: Touch D-pad double-dispatch fix
+  test('B7: _touchDispatched flag exists', async () => {
+    const hasFlag = await page.evaluate(() => typeof _touchDispatched !== 'undefined');
+    if (!hasFlag) throw new Error('_touchDispatched flag missing');
+  });
+
+  // B8: Rival generateFood double-count fix
+  test('B8: rivalLength variable is gone from generateFood', async () => {
+    const source = await page.evaluate(() => generateFood.toString());
+    if (source.includes('rivalLength')) throw new Error('rivalLength still referenced in generateFood');
+  });
+
+  test('B8: generateFood guard uses only currentSnake.length + obstacles.length', async () => {
+    const source = await page.evaluate(() => generateFood.toString());
+    const hasSimpleGuard = source.includes('currentSnake.length + obstacles.length >= totalTiles');
+    if (!hasSimpleGuard) throw new Error('generateFood guard not simplified');
+  });
+
+  // B9: Magnet wrap edge fix
+  test('B9: magnet pull uses wrapped delta', async () => {
+    const source = await page.evaluate(() => {
+      // Find the magnet block in updateGame
+      const fn = updateGame.toString();
+      return fn.includes('CANVAS_WIDTH / 2') && fn.includes('CANVAS_HEIGHT / 2');
+    });
+    if (!source) throw new Error('Magnet wrap check not found in updateGame');
+  });
+
+  // B10: endZenSession calls checkAchievements and checkDailyCompletion
+  test('B10: endZenSession calls checkAchievements', async () => {
+    const source = await page.evaluate(() => endZenSession.toString());
+    if (!source.includes('checkAchievements')) throw new Error('endZenSession missing checkAchievements call');
+    if (!source.includes('checkDailyCompletion')) throw new Error('endZenSession missing checkDailyCompletion call');
+    if (!source.includes('sessionSummary')) throw new Error('endZenSession missing sessionSummary creation');
+  });
+
+  // B11: drawOverlay has save/restore
+  test('B11: drawOverlay has ctx.save at start and ctx.restore at exits', async () => {
+    const source = await page.evaluate(() => drawOverlay.toString());
+    if (!source.includes('ctx.save()')) throw new Error('drawOverlay missing ctx.save()');
+    if (!source.includes('ctx.restore()')) throw new Error('drawOverlay missing ctx.restore()');
+  });
+
+  // B12: Help overlay guard + Escape close
+  test('B12: H key handler guards gameState', async () => {
+    // Check the keydown handler
+    const source = await page.evaluate(() => {
+      const handler = document.querySelector('script');
+      // Search through the script for the H key handler
+      return document.querySelector('script').textContent;
+    });
+    // The keydown handler is inline in the script
+    // Check for the H key pattern in the inline script
+    const scriptText = source;
+    // Find the H key handler section
+    const hMatch = scriptText.match(/e\.key === ['"]h['"]/);
+    if (!hMatch) throw new Error('H key handler not found in keydown event');
+    // Check for gameState guard
+    if (!scriptText.includes("gameState !== 'idle'")) throw new Error('H key handler missing gameState !== idle guard');
+    // Check Escape closes help
+    if (!scriptText.includes('helpOverlayVisible')) throw new Error('Escape handler missing helpOverlayVisible check');
+  });
+
+  // Now run all tests
+  let passed = 0;
+  let failed = 0;
+  for (const t of tests) {
+    try {
+      await t.fn();
+      console.log(`  ✅ ${t.name}`);
+      passed++;
+    } catch (e) {
+      console.log(`  ❌ ${t.name}: ${e.message}`);
+      failed++;
+    }
+  }
+
+  console.log(`\nResults: ${passed} passed, ${failed} failed`);
+  await browser.close();
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+run().catch(err => {
+  console.error('Test runner error:', err);
+  process.exit(1);
+});
