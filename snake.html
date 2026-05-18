@@ -504,8 +504,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function generateFood(currentSnake) {
             const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
-            const rivalLength = rivalActive ? rivalSnake.length : 0;
-            if (currentSnake.length + obstacles.length + rivalLength >= totalTiles) return null;
+            if (currentSnake.length + obstacles.length >= totalTiles) return null;
 
             let newFood;
             let iterations = 0;
@@ -658,7 +657,8 @@ const TRAIL_RENDER_CONFIG = {
             dx = TILE_SIZE;
             dy = 0;
             generateObstacles();
-            food = generateFood(snake);
+            const combinedInitial = snake.concat(rivalActive ? rivalSnake : []);
+            food = generateFood(combinedInitial);
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -1089,6 +1089,25 @@ const TRAIL_RENDER_CONFIG = {
             gameState = 'gameover';
             score = snake.length;
             finalizeSession(true);
+            checkAchievements(score);
+            checkDailyCompletion(score, {
+                sessionSpeedFood: sessionSpeedFood,
+                sessionBonusFood: sessionBonusFood,
+                sessionMaxCombo: sessionMaxCombo,
+                sessionTimeAlive: sessionTimeAlive,
+                sessionFoodEaten: sessionFoodEaten,
+                sessionFoodTypes: sessionFoodTypes,
+                snakeLength: snake.length
+            });
+            // Session summary for display
+            sessionSummary = {
+                score: score,
+                time: Math.floor(sessionTimeAlive / 1000),
+                food: sessionFoodEaten,
+                combo: sessionMaxCombo,
+                xp: sessionXP,
+            };
+            sessionSummaryTimer = 4000;
             zenActive = false;
         }
 
@@ -2270,7 +2289,8 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 updateScoreDisplay();
                 checkAchievements(score);
-                food = generateFood(snake);
+                const playerCombined = snake.concat(rivalActive ? rivalSnake : []);
+                food = generateFood(playerCombined);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
             }
 
@@ -2320,8 +2340,17 @@ const TRAIL_RENDER_CONFIG = {
             // Magnet effect: pull food toward snake
             if (magnetActive && food) {
                 const head = snake[0];
-                const dx_food = head.x - food.x;
-                const dy_food = head.y - food.y;
+                let dx_food = head.x - food.x;
+                let dy_food = head.y - food.y;
+
+                // Account for wrapping — use the shortest path on each axis
+                if (Math.abs(dx_food) > CANVAS_WIDTH / 2) {
+                    dx_food = dx_food > 0 ? dx_food - CANVAS_WIDTH : dx_food + CANVAS_WIDTH;
+                }
+                if (Math.abs(dy_food) > CANVAS_HEIGHT / 2) {
+                    dy_food = dy_food > 0 ? dy_food - CANVAS_HEIGHT : dy_food + CANVAS_HEIGHT;
+                }
+
                 const dist = Math.abs(dx_food) + Math.abs(dy_food);
                 if (dist > 0 && dist <= 4 * TILE_SIZE) {
                     let newFX = food.x;
