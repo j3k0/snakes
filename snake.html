@@ -66,6 +66,7 @@
         <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.95);border:2px solid #555;border-radius:10px;padding:20px;color:white;font-family:monospace;z-index:100;min-width:300px;max-width:400px;"></div>
         <div id="achievementsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #FFD700;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:350px;max-width:480px;"></div>
         <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
+        <div id="panelBackdrop" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;touch-action:manipulation;"></div>
 
     <script>
         const TILE_SIZE = 20;
@@ -98,6 +99,13 @@
         let lastFrameTime = 0;
         let shakeTimer = 0;
         let flashOverlay = null;
+        let visualDirty = true;
+        let prevSnake = [];
+        let lastTickTime = 0;
+        let tickInterval = 120;
+        let snakeGrew = false;
+        let prevRivalSnake = [];
+        let hasTouch = 'ontouchstart' in window;
         let eatAnimTimer = 0;
         let shrinkTimer = 3000;
         let snapDuration = 3000;          // current shrink interval, decreases over time
@@ -110,6 +118,7 @@
         let xp;
         try { xp = parseInt(localStorage.getItem('snake_xp')) || 0; } catch(e) { xp = 0; }
         let level = getLevelFromXP(xp);
+        let prestigeLevel = parseInt(localStorage.getItem('snake_prestige')) || 0;
         let sessionXP = 0; // reserved for achievements
         let gameTick = 0;
         let comboCount = 0;
@@ -140,6 +149,9 @@
         let rivalRespawnTimer = 0;
         const RIVAL_MAX_LENGTH = 20;
 
+        let toastQueue = [];
+        let toastActive = false;
+
         // === ACHIEVEMENT SYSTEM ===
         const ACHIEVEMENTS = {
             FIRST_BITE: { name:'First Bite', desc:'Eat your first food ever', xp:25, icon:'🍽️', check:function(s,c){return s.totalFoodEaten>=1;} },
@@ -156,6 +168,21 @@
             HAT_TRICK: { name:'Hat Trick', desc:'Eat 4+ different food types in one game', xp:150, icon:'🎩', check:function(s,c){return c.hatTrickEligible;} },
             COMBO_3: { name:'Combo Lord', desc:'Reach 3x combo', xp:150, icon:'🔥', check:function(s,c){return c.maxCombo>=3;} },
             COMBO_5: { name:'Combo Master', desc:'Reach 5x combo', xp:300, icon:'💥', check:function(s,c){return c.maxCombo>=5;} },
+            TIME_CRUNCH: { name:'Time Crunch', desc:'Score 150+ in Time Attack', xp:250, icon:'⏰', check:function(s,c){return gameMode==='timeAttack'&&c.sessionScore>=150;} },
+            ZEN_MASTER: { name:'Zen Master', desc:'Reach length 30 in Zen mode', xp:200, icon:'🧘', check:function(s,c){return gameMode==='zen'&&c.snakeLength>=30;} },
+            SNAP_SURVIVOR: { name:'Snap Survivor', desc:'Reach Snap Level 5', xp:250, icon:'⚡', check:function(s,c){return gameMode==='snap'&&c.snapLevel>=5;} },
+            DAILY_DEVOTEE: { name:'Daily Devotee', desc:'Complete 7 daily challenges', xp:500, icon:'📅', check:function(s,c){return s.dailyCompleted>=7;} },
+            ROAD_WARRIOR: { name:'Road Warrior', desc:'Travel 10,000 tiles total', xp:300, icon:'🏃', check:function(s,c){return s.totalDistance>=10000;} },
+            CENTURION: { name:'Centurion', desc:'Play 100 games', xp:400, icon:'💪', check:function(s,c){return s.gamesPlayed>=100;} },
+            IRON_WILL: { name:'Iron Will', desc:'Die 50 times', xp:200, icon:'💀', check:function(s,c){return s.totalDeaths>=50;} },
+            MARATHON_TIME: { name:'Marathon', desc:'Play for 1 hour total', xp:300, icon:'⏱️', check:function(s,c){return s.totalTimePlayed>=3600000;} },
+            LONG_LEGACY: { name:'Long Legacy', desc:'Reach snake length 40', xp:350, icon:'📏', check:function(s,c){return s.longestLength>=40;} },
+            RIVAL_SLAYER: { name:'Rival Slayer', desc:'Defeat 5 rival snakes', xp:250, icon:'⚔️', check:function(s,c){return s.rivalsDefeated>=5;} },
+            SHIELD_MASTER: { name:'Shield Master', desc:'Block 3 collisions with shields', xp:250, icon:'🛡️', check:function(s,c){return s.shieldBlocks>=3;} },
+            MAGNET_KING: { name:'Magnet King', desc:'Eat 30 food while magnet is active', xp:250, icon:'🧲', check:function(s,c){return s.magnetEats>=30;} },
+            STREAK_WEEK: { name:'Week Warrior', desc:'Reach a 7-day daily streak', xp:500, icon:'📆', check:function(s,c){try{var streak=parseInt(localStorage.getItem('snake_streak_count'))||0;return streak>=7;}catch(e){return false;}} },
+            FOODIE: { name:'Foodie', desc:'Eat 500 normal foods total', xp:500, icon:'🍴', check:function(s,c){return s.normalFoodEaten>=500;} },
+            EPICURE: { name:'Epicure', desc:'Eat 30 epic foods total', xp:600, icon:'🌟', check:function(s,c){return s.epicFoodEaten>=30;} },
         };
 
         let achievements = loadAchievements();
@@ -167,6 +194,10 @@
             snake_purple: { name:'Purple', head:'#9B59B6', body:'#7D3C98', unlock:4 },
             snake_gold: { name:'Gold', head:'#FFD700', body:'#DAA520', unlock:7 },
             snake_fire: { name:'Fire', head:'#FF4500', body:'#8B0000', unlock:10 },
+            snake_midnight: { name:'Midnight', head:'#1a1a3e', body:'#2d2d5e', unlock:11 },
+            snake_lava: { name:'Lava', head:'#FF4500', body:'#8B2500', unlock:18 },
+            snake_veteran: { name:'Veteran', head:'#556B2F', body:'#3B4A1F', unlock: 'streak_14' },
+            snake_ghost: { name:'Phantom', head:'ghost', body:'ghost', unlock: 'prestige_2' },
             snake_rainbow: { name:'Rainbow', head:'rainbow', body:'rainbow', unlock:15 },
         };
 
@@ -174,25 +205,61 @@
             grid_classic: { name:'Classic Grid', stroke:'rgba(255,255,255,0.04)', bg:'#111', unlock:1 },
             grid_neon: { name:'Neon Grid', stroke:'rgba(0,255,255,0.08)', bg:'#0a0a1a', unlock:3 },
             grid_matrix: { name:'Matrix Grid', stroke:'rgba(0,255,65,0.1)', bg:'#000', unlock:12 },
+            grid_void: { name:'Void Grid', stroke:'rgba(200,0,200,0.08)', bg:'#120018', unlock:6 },
+            grid_cyberpunk: { name:'Cyberpunk Grid', stroke:'rgba(255,255,0,0.06)', bg:'#0a0a00', unlock:16 },
+            grid_streak_7: { name:'Flame Grid', stroke:'rgba(255,100,0,0.08)', bg:'#0a0800', unlock: 'streak_7' },
+            grid_tron: { name:'Tron Grid', stroke:'rgba(0,150,255,0.12)', bg:'#000808', unlock: 'prestige_4' },
         };
 
         const TRACE_EFFECTS = {
             trace_none: { name:'No Trail', unlock:1 },
             trace_ghost: { name:'Ghost Trail', unlock:9 },
             trace_sparkle: { name:'Sparkle Trail', unlock:15 },
+            trace_fire: { name:'Fire Trail', unlock:5 },
+            trace_neon: { name:'Neon Trail', unlock:14 },
+            trace_rainbow: { name:'Rainbow Trail', unlock:19 },
+            trace_galaxy: { name:'Galaxy Trail', unlock: 'prestige_5' },
+            trace_streak_3: { name:'Ember Trail', unlock: 'streak_3' },
+        };
+
+        const BORDER_EFFECTS = {
+            border_none: { name: 'No Border', unlock: 1 },
+            border_gold: { name: 'Golden Border', unlock: 'prestige_1' },
         };
 
         const DEATH_EFFECTS = {
             death_classic: { name:'Classic Burst', color:'#FF4500', count:30, unlock:1 },
             death_blue: { name:'Blue Burst', color:'#4488FF', count:30, unlock:13 },
+            death_frost: { name:'Frost Burst', color:'#88CCFF', count:40, unlock:8 },
+            death_gold: { name:'Gold Shower', color:'#FFD700', count:45, unlock:17 },
+            death_fireworks: { name:'Fireworks', color:'rainbow', count:50, unlock: 'streak_30' },
+            death_lightning: { name:'Lightning Strike', color:'#4488FF', count:35, unlock: 'prestige_3' },
             death_rainbow: { name:'Rainbow Burst', color:'rainbow', count:50, unlock:20 },
         };
 
         const LEVEL_UNLOCKS = {
             2:['snake_cyan'], 3:['grid_neon'], 4:['snake_purple'],
-            7:['snake_gold'], 9:['trace_ghost'], 10:['snake_fire'],
-            12:['grid_matrix'], 13:['death_blue'], 15:['snake_rainbow','trace_sparkle'],
-            20:['death_rainbow']
+            5:['trace_fire'], 6:['grid_void'], 7:['snake_gold'],
+            8:['death_frost'], 9:['trace_ghost'], 10:['snake_fire'],
+            11:['snake_midnight'], 12:['grid_matrix'], 13:['death_blue'],
+            14:['trace_neon'], 15:['snake_rainbow','trace_sparkle'],
+            16:['grid_cyberpunk'], 17:['death_gold'], 18:['snake_lava'],
+            19:['trace_rainbow'], 20:['death_rainbow']
+        };
+
+        const STREAK_UNLOCKS = {
+            3: 'trace_streak_3',
+            7: 'grid_streak_7',
+            14: 'snake_veteran',
+            30: 'death_fireworks'
+        };
+
+        const PRESTIGE_REWARDS = {
+            1: { id: 'border_gold', name: 'Golden Border', type: 'border' },
+            2: { id: 'snake_ghost', name: 'Phantom Snake', type: 'snake' },
+            3: { id: 'death_lightning', name: 'Lightning Death', type: 'death' },
+            4: { id: 'grid_tron', name: 'Tron Grid', type: 'grid' },
+            5: { id: 'trace_galaxy', name: 'Galaxy Trail', type: 'trace' },
         };
 
         let unlockedCosmetics = loadUnlocked();
@@ -203,7 +270,7 @@
                 const data = JSON.parse(localStorage.getItem('snake_unlocks'));
                 if (data && Array.isArray(data) && data.length > 0) return data;
             } catch(e) {}
-            return ['snake_green','grid_classic','trace_none','death_classic'];
+            return ['snake_green','grid_classic','trace_none','death_classic','border_none'];
         }
 
         function loadEquipped() {
@@ -211,7 +278,7 @@
                 const data = JSON.parse(localStorage.getItem('snake_equipped'));
                 if (data && data.snake) return data;
             } catch(e) {}
-            return { snake:'snake_green', grid:'grid_classic', trace:'trace_none', death:'death_classic' };
+            return { snake:'snake_green', grid:'grid_classic', trace:'trace_none', death:'death_classic', border:'border_none' };
         }
 
         function loadAchievements() {
@@ -231,7 +298,7 @@
             },
             zen: {
                 name:'Zen', speed:150, selfCollision:false, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'length', earnXP:false, achievementsEnabled:false
+                timer:null, scoreIs:'length', earnXP:false, achievementsEnabled:true
             },
             daily: {
                 name:'Daily Challenge', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
@@ -375,8 +442,9 @@
                 case 'slowmo':
                     slowMoActive = true;
                     powerUpTimer = config.duration;
+                    tickInterval = getSpeed() * 2;
                     clearInterval(gameInterval);
-                    gameInterval = setInterval(updateGame, getSpeed() * 2);
+                    gameInterval = setInterval(updateGame, tickInterval);
                     break;
             }
             
@@ -390,8 +458,9 @@
 
         function deactivatePowerUp() {
             if (slowMoActive) {
+                tickInterval = getSpeed();
                 clearInterval(gameInterval);
-                gameInterval = setInterval(updateGame, getSpeed());
+                gameInterval = setInterval(updateGame, tickInterval);
             }
             shieldActive = false;
             magnetActive = false;
@@ -448,7 +517,8 @@
             gameInterval = null;
             nextDirection = null;
             updateScoreDisplay();
-            drawGame();
+            drawGame(1);
+            visualDirty = true;
             timeAttackEnd = 0;
             zenActive = false;
         }
@@ -504,16 +574,36 @@
                     }
                 } catch(e) {}
             }
+            // Check streak cosmetic unlocks
+            try {
+                const streak = parseInt(localStorage.getItem('snake_streak_count')) || 0;
+                for (const days in STREAK_UNLOCKS) {
+                    if (streak >= parseInt(days)) {
+                        const id = STREAK_UNLOCKS[days];
+                        if (unlockedCosmetics.indexOf(id) === -1) {
+                            unlockedCosmetics.push(id);
+                            try { localStorage.setItem('snake_unlocks', JSON.stringify(unlockedCosmetics)); } catch(e) {}
+                        const allCosmetics = Object.assign({}, SNAKE_SKINS, GRID_THEMES, TRACE_EFFECTS, DEATH_EFFECTS, BORDER_EFFECTS);
+                        const c = allCosmetics[id];
+                        if (c) {
+                            queueToast('🔑 Unlocked: ' + c.name + '!', 4000);
+                        }
+                        }
+                    }
+                }
+            } catch(e) {}
             const mc = MODE_CONFIG[gameMode];
             if (mc.timer) timeAttackEnd = Date.now() + mc.timer;
             if (gameMode === 'zen') zenActive = true;
             sessionStartTime = Date.now();
             gameState = 'playing';
-            gameInterval = setInterval(updateGame, getSpeed());
+            tickInterval = getSpeed();
+            gameInterval = setInterval(updateGame, tickInterval);
             if (gameMode === 'classic' || gameMode === 'timeAttack') {
                 spawnRival();
             }
-            drawGame();
+            drawGame(1);
+            visualDirty = true;
         }
 
         function checkCollision(pos) {
@@ -715,6 +805,7 @@
                 awardXP(100);
                 if (gameMode !== 'zen') score += 50;
                 updateScoreDisplay();
+                stats.rivalsDefeated++;
                 const el = document.getElementById('toast');
                 if (el) {
                     el.textContent = '\u{1F480} Rival Defeated! +50 pts +100 XP';
@@ -797,7 +888,8 @@
             }
             playSound('gameover');
             shakeTimer = 200;
-            drawGame();
+            drawGame(1);
+            visualDirty = true;
         }
 
         function endZenSession() {
@@ -819,7 +911,8 @@
                 try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
             }
             zenActive = false;
-            drawGame();
+            drawGame(1);
+            visualDirty = true;
         }
 
         function playSound(name) {
@@ -929,25 +1022,22 @@
                 if (flashOverlay.alpha <= 0) flashOverlay = null;
             }
 
-            if (cosmetics.trace === 'trace_ghost' && snake.length >= 4) {
-                const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
-                const trailColor = skin.head === 'rainbow' ? '#00FF00' : skin.head;
-                for (let t = 0; t < 3; t++) {
-                    const idx = snake.length - 1 - t;
-                    if (idx < 0) break;
-                    const seg = snake[idx];
-                    ctx.globalAlpha = 0.15 - t * 0.05;
-                    ctx.fillStyle = trailColor;
-                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+            const elapsed = timestamp - lastTickTime;
+            const t = lastTickTime > 0 ? Math.min(elapsed / tickInterval, 1) : 1;
+
+            const needsRedraw = visualDirty || particles.length > 0 || flashOverlay || shakeTimer > 0 || eatAnimTimer > 0 || snapLevelUpFlash > 0 || (gameMode === 'snap' && gameState === 'playing');
+            if (needsRedraw) {
+                visualDirty = false;
+                if (shakeTimer > 0 && gameState !== 'paused') {
+                    const intensity = (shakeTimer / 200) * 5;
+                    ctx.save();
+                    ctx.translate((Math.random() - 0.5) * 2 * intensity, (Math.random() - 0.5) * 2 * intensity);
                 }
-                ctx.globalAlpha = 1;
+                drawGame(t);
+                if (shakeTimer > 0 && gameState !== 'paused') ctx.restore();
             }
 
-            if (cosmetics.trace === 'trace_sparkle' && gameTick % 5 === 0 && snake.length > 1) {
-                const tail = snake[snake.length - 1];
-                spawnParticles(tail.x, tail.y, 2, '#FFD700');
-            }
-
+            // Render particles on top of game state
             for (const p of particles) {
                 const alpha = Math.max(0, p.life);
                 ctx.globalAlpha = alpha;
@@ -955,14 +1045,6 @@
                 ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
             }
             ctx.globalAlpha = 1;
-
-            if (shakeTimer > 0 && gameState !== 'paused') {
-                const intensity = (shakeTimer / 200) * 5;
-                ctx.save();
-                ctx.translate((Math.random() - 0.5) * 2 * intensity, (Math.random() - 0.5) * 2 * intensity);
-            }
-            drawGame();
-            if (shakeTimer > 0 && gameState !== 'paused') ctx.restore();
 
             if (flashOverlay) {
                 ctx.fillStyle = flashOverlay.color;
@@ -1063,12 +1145,27 @@
                         }
                     } catch(e) {}
                 }
+                if (prestigeLevel > 0) {
+                    ctx.fillStyle = '#FFD700';
+                    ctx.font = 'bold 14px Arial';
+                    ctx.fillText('\u2B50 Prestige ' + prestigeLevel, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 88);
+                }
                 ctx.fillStyle = '#888';
                 ctx.font = '14px Arial';
                 ctx.fillText('Lv.' + level + ' | XP: ' + xp.toLocaleString(), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 70);
+                if (level >= 20) {
+                    ctx.fillStyle = '#FFD700';
+                    ctx.font = 'bold 14px Arial';
+                    ctx.fillText('Press X to Prestige', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 55);
+                }
                 ctx.fillStyle = '#555';
                 ctx.font = '13px Arial';
                 ctx.fillText('↑↓ Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 40);
+                if (hasTouch) {
+                    ctx.fillStyle = '#555';
+                    ctx.font = '12px Arial';
+                    ctx.fillText('Swipe ↑↓ to change mode', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 24);
+                }
                 return;
             }
             ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
@@ -1132,27 +1229,113 @@
         function drawFood() {
             if (!food) return;
             const tier = FOOD_TIERS[food.type] || FOOD_TIERS.common;
+            const cx = food.x + TILE_SIZE / 2;
+            const cy = food.y + TILE_SIZE / 2;
 
-            // Save context state for glow effects
+            ctx.save();
+
             if (tier.glow) {
-                ctx.save();
                 ctx.shadowBlur = tier.glow;
                 ctx.shadowColor = tier.color;
             }
 
-            if (tier.pulse) {
-                // Existing bonus food pulse logic
-                const pulse = 1 + 0.5 * Math.sin(Date.now() / 200);
-                const size = Math.round(TILE_SIZE * pulse);
-                const offset = Math.round((TILE_SIZE - size) / 2);
-                ctx.fillStyle = tier.color;
-                ctx.fillRect(food.x + offset, food.y + offset, size, size);
-            } else {
-                ctx.fillStyle = tier.color;
-                ctx.fillRect(food.x, food.y, TILE_SIZE, TILE_SIZE);
+            ctx.fillStyle = tier.color;
+
+            switch (food.type) {
+                case 'common': {
+                    // Filled circle
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, TILE_SIZE * 0.4, 0, 2 * Math.PI);
+                    ctx.fill();
+                    break;
+                }
+                case 'uncommon': {
+                    // Diamond shape
+                    const s = TILE_SIZE * 0.45;
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy - s);
+                    ctx.lineTo(cx + s, cy);
+                    ctx.lineTo(cx, cy + s);
+                    ctx.lineTo(cx - s, cy);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                }
+                case 'rare': {
+                    // Upward-pointing triangle
+                    const s = TILE_SIZE * 0.45;
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy - s);
+                    ctx.lineTo(cx + s, cy + s * 0.7);
+                    ctx.lineTo(cx - s, cy + s * 0.7);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                }
+                case 'epic': {
+                    // Hexagon
+                    const r = TILE_SIZE * 0.42;
+                    ctx.beginPath();
+                    for (let i = 0; i < 6; i++) {
+                        const angle = (Math.PI / 3) * i - Math.PI / 2;
+                        const px = cx + r * Math.cos(angle);
+                        const py = cy + r * Math.sin(angle);
+                        if (i === 0) ctx.moveTo(px, py);
+                        else ctx.lineTo(px, py);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                }
+                case 'bonus': {
+                    // Pulsing circle (keep existing pulse mechanic)
+                    const pulse = 1 + 0.5 * Math.sin(Date.now() / 200);
+                    const r = Math.min(TILE_SIZE * 0.4 * pulse, TILE_SIZE * 0.6);
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+                    ctx.fill();
+                    break;
+                }
+                case 'speed': {
+                    // Double chevron >>
+                    const s = TILE_SIZE * 0.35;
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = tier.color;
+                    ctx.beginPath();
+                    ctx.moveTo(cx - s, cy - s);
+                    ctx.lineTo(cx, cy);
+                    ctx.lineTo(cx - s, cy + s);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy - s);
+                    ctx.lineTo(cx + s, cy);
+                    ctx.lineTo(cx, cy + s);
+                    ctx.stroke();
+                    break;
+                }
+                default: {
+                    ctx.fillRect(food.x, food.y, TILE_SIZE, TILE_SIZE);
+                    break;
+                }
             }
 
-            if (tier.glow) {
+            ctx.restore();
+
+            // Letter labels for non-common types with dark background for contrast
+            const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
+            if (labels[food.type]) {
+                ctx.save();
+                // Dark semicircle behind letter
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+                ctx.beginPath();
+                ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
+                ctx.fill();
+                // White letter
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 10px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(labels[food.type], cx, cy);
                 ctx.restore();
             }
         }
@@ -1202,10 +1385,51 @@
             ctx.restore();
         }
 
-        function drawSnake() {
+        function drawSnake(t) {
             const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+            let headDrawX = 0, headDrawY = 0;
             snake.forEach(function(segment, index) {
-                if (skin.head === 'rainbow') {
+                let drawX, drawY;
+                
+                if (t >= 1 || prevSnake.length === 0) {
+                    drawX = segment.x;
+                    drawY = segment.y;
+                } else if (index === 0) {
+                    const prev = prevSnake[0];
+                    if (prev) {
+                        const pdx = segment.x - prev.x;
+                        const pdy = segment.y - prev.y;
+                        drawX = Math.abs(pdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + pdx * t;
+                        drawY = Math.abs(pdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + pdy * t;
+                    } else {
+                        drawX = segment.x;
+                        drawY = segment.y;
+                    }
+                } else if (snakeGrew && prevSnake[index - 1]) {
+                    const prev = prevSnake[index - 1];
+                    const pdx = segment.x - prev.x;
+                    const pdy = segment.y - prev.y;
+                    drawX = Math.abs(pdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + pdx * t;
+                    drawY = Math.abs(pdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + pdy * t;
+                } else if (prevSnake[index]) {
+                    const pdx = segment.x - prevSnake[index].x;
+                    const pdy = segment.y - prevSnake[index].y;
+                    drawX = Math.abs(pdx) > CANVAS_WIDTH / 2 ? segment.x : prevSnake[index].x + pdx * t;
+                    drawY = Math.abs(pdy) > CANVAS_HEIGHT / 2 ? segment.y : prevSnake[index].y + pdy * t;
+                } else {
+                    drawX = segment.x;
+                    drawY = segment.y;
+                }
+                
+                if (index === 0) {
+                    headDrawX = drawX;
+                    headDrawY = drawY;
+                }
+                
+                if (skin.head === 'ghost') {
+                    ctx.globalAlpha = 0.5;
+                    ctx.fillStyle = index === 0 ? 'rgba(200, 200, 255, 0.7)' : 'rgba(150, 150, 255, 0.4)';
+                } else if (skin.head === 'rainbow') {
                     const hue = (index * 20 + Date.now() * 0.05) % 360;
                     ctx.fillStyle = 'hsl(' + hue + ', 100%, 50%)';
                 } else {
@@ -1215,25 +1439,28 @@
                     const scale = 1 + 0.2 * (eatAnimTimer / 150);
                     const size = Math.round((TILE_SIZE - 1) * scale);
                     const offset = Math.round(((TILE_SIZE - 1) - size) / 2);
-                    ctx.fillRect(segment.x + offset, segment.y + offset, size, size);
+                    ctx.fillRect(drawX + offset, drawY + offset, size, size);
                 } else {
-                    ctx.fillRect(segment.x, segment.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                    ctx.fillRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                if (skin.head === 'ghost') {
+                    ctx.globalAlpha = 1;
                 }
 
                 if (index === 0) {
                     let ex1, ey1, ex2, ey2;
                     if (dx > 0) {
-                        ex1 = segment.x + 12; ey1 = segment.y + 4;
-                        ex2 = segment.x + 12; ey2 = segment.y + 12;
+                        ex1 = drawX + 12; ey1 = drawY + 4;
+                        ex2 = drawX + 12; ey2 = drawY + 12;
                     } else if (dx < 0) {
-                        ex1 = segment.x + 4; ey1 = segment.y + 4;
-                        ex2 = segment.x + 4; ey2 = segment.y + 12;
+                        ex1 = drawX + 4; ey1 = drawY + 4;
+                        ex2 = drawX + 4; ey2 = drawY + 12;
                     } else if (dy < 0) {
-                        ex1 = segment.x + 4; ey1 = segment.y + 4;
-                        ex2 = segment.x + 12; ey2 = segment.y + 4;
+                        ex1 = drawX + 4; ey1 = drawY + 4;
+                        ex2 = drawX + 12; ey2 = drawY + 4;
                     } else {
-                        ex1 = segment.x + 4; ey1 = segment.y + 12;
-                        ex2 = segment.x + 12; ey2 = segment.y + 12;
+                        ex1 = drawX + 4; ey1 = drawY + 12;
+                        ex2 = drawX + 12; ey2 = drawY + 12;
                     }
                     ctx.fillStyle = 'white';
                     ctx.beginPath(); ctx.arc(ex1, ey1, 4, 0, 2 * Math.PI); ctx.fill();
@@ -1242,13 +1469,12 @@
                     ctx.beginPath(); ctx.arc(ex1, ey1, 2, 0, 2 * Math.PI); ctx.fill();
                     ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
                 }
-});
+            });
 
             // Snap mode timer ring around head
             if (gameMode === 'snap' && gameState === 'playing' && snake.length > 0) {
-                const head = snake[0];
-                const cx = head.x + TILE_SIZE / 2;
-                const cy = head.y + TILE_SIZE / 2;
+                const cx = headDrawX + TILE_SIZE / 2;
+                const cy = headDrawY + TILE_SIZE / 2;
                 const radius = TILE_SIZE * 0.8;
                 const fraction = Math.min(shrinkTimer, snapDuration) / snapDuration;
 
@@ -1266,7 +1492,6 @@
 
             // Shield aura around head
             if (shieldActive && snake.length > 0) {
-                const head = snake[0];
                 ctx.save();
                 ctx.strokeStyle = '#4488FF';
                 ctx.lineWidth = 2;
@@ -1274,33 +1499,55 @@
                 ctx.shadowColor = '#4488FF';
                 ctx.globalAlpha = 0.6;
                 ctx.beginPath();
-                ctx.arc(head.x + TILE_SIZE / 2, head.y + TILE_SIZE / 2, TILE_SIZE * 0.7, 0, 2 * Math.PI);
+                ctx.arc(headDrawX + TILE_SIZE / 2, headDrawY + TILE_SIZE / 2, TILE_SIZE * 0.7, 0, 2 * Math.PI);
                 ctx.stroke();
                 ctx.restore();
             }
         }
 
-        function drawRival() {
+        function drawRival(t) {
             if (!rivalActive || rivalSnake.length === 0) return;
             
             rivalSnake.forEach(function(segment, index) {
+                let drawX, drawY;
+                
+                if (t >= 1 || prevRivalSnake.length === 0 || !rivalActive) {
+                    drawX = segment.x;
+                    drawY = segment.y;
+                } else if (index === 0 && prevRivalSnake[0]) {
+                    const prev = prevRivalSnake[0];
+                    const rdx = segment.x - prev.x;
+                    const rdy = segment.y - prev.y;
+                    drawX = Math.abs(rdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + rdx * t;
+                    drawY = Math.abs(rdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + rdy * t;
+                } else if (prevRivalSnake[index]) {
+                    const prev = prevRivalSnake[index];
+                    const rdx = segment.x - prev.x;
+                    const rdy = segment.y - prev.y;
+                    drawX = Math.abs(rdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + rdx * t;
+                    drawY = Math.abs(rdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + rdy * t;
+                } else {
+                    drawX = segment.x;
+                    drawY = segment.y;
+                }
+                
                 ctx.fillStyle = index === 0 ? '#FF6600' : '#CC3300';
-                ctx.fillRect(segment.x, segment.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                ctx.fillRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
                 
                 if (index === 0) {
                     let ex1, ey1, ex2, ey2;
                     if (rivalDx > 0) {
-                        ex1 = segment.x + 12; ey1 = segment.y + 4;
-                        ex2 = segment.x + 12; ey2 = segment.y + 12;
+                        ex1 = drawX + 12; ey1 = drawY + 4;
+                        ex2 = drawX + 12; ey2 = drawY + 12;
                     } else if (rivalDx < 0) {
-                        ex1 = segment.x + 4; ey1 = segment.y + 4;
-                        ex2 = segment.x + 4; ey2 = segment.y + 12;
+                        ex1 = drawX + 4; ey1 = drawY + 4;
+                        ex2 = drawX + 4; ey2 = drawY + 12;
                     } else if (rivalDy < 0) {
-                        ex1 = segment.x + 4; ey1 = segment.y + 4;
-                        ex2 = segment.x + 12; ey2 = segment.y + 4;
+                        ex1 = drawX + 4; ey1 = drawY + 4;
+                        ex2 = drawX + 12; ey2 = drawY + 4;
                     } else {
-                        ex1 = segment.x + 4; ey1 = segment.y + 12;
-                        ex2 = segment.x + 12; ey2 = segment.y + 12;
+                        ex1 = drawX + 4; ey1 = drawY + 12;
+                        ex2 = drawX + 12; ey2 = drawY + 12;
                     }
                     ctx.fillStyle = '#FFD700';
                     ctx.beginPath(); ctx.arc(ex1, ey1, 4, 0, 2 * Math.PI); ctx.fill();
@@ -1312,13 +1559,97 @@
             });
         }
 
-        function drawGame() {
+        function drawTrails() {
+            if (cosmetics.trace === 'trace_ghost' && snake.length >= 4) {
+                const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+                const trailColor = skin.head === 'rainbow' ? '#00FF00' : skin.head;
+                for (let t = 0; t < 3; t++) {
+                    const idx = snake.length - 1 - t;
+                    if (idx < 0) break;
+                    const seg = snake[idx];
+                    ctx.globalAlpha = 0.15 - t * 0.05;
+                    ctx.fillStyle = trailColor;
+                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            if (cosmetics.trace === 'trace_fire' && snake.length >= 4) {
+                for (let t = 0; t < 3; t++) {
+                    const idx = snake.length - 1 - t;
+                    if (idx < 0) break;
+                    const seg = snake[idx];
+                    ctx.globalAlpha = 0.3 - t * 0.1;
+                    ctx.fillStyle = t === 0 ? '#FF6600' : t === 1 ? '#CC3300' : '#880000';
+                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            if (cosmetics.trace === 'trace_neon' && snake.length >= 4) {
+                for (let t = 0; t < 3; t++) {
+                    const idx = snake.length - 1 - t;
+                    if (idx < 0) break;
+                    const seg = snake[idx];
+                    ctx.globalAlpha = 0.25 - t * 0.08;
+                    ctx.fillStyle = '#00FFFF';
+                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            if (cosmetics.trace === 'trace_rainbow' && snake.length >= 4) {
+                for (let t = 0; t < 3; t++) {
+                    const idx = snake.length - 1 - t;
+                    if (idx < 0) break;
+                    const seg = snake[idx];
+                    const hue = ((idx * 20) + Date.now() * 0.05) % 360;
+                    ctx.globalAlpha = 0.25 - t * 0.08;
+                    ctx.fillStyle = 'hsl(' + hue + ', 100%, 50%)';
+                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            if (cosmetics.trace === 'trace_galaxy' && snake.length >= 4) {
+                for (let t = 0; t < 3; t++) {
+                    const idx = snake.length - 1 - t;
+                    if (idx < 0) break;
+                    const seg = snake[idx];
+                    ctx.globalAlpha = 0.2 - t * 0.06;
+                    const galaxyHue = (Date.now() * 0.03 + idx * 30) % 360;
+                    ctx.fillStyle = 'hsl(' + galaxyHue + ', 80%, 60%)';
+                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        function drawGame(t) {
             drawGrid();
+
+            // Draw prestige border
+            if (cosmetics.border && cosmetics.border !== 'border_none') {
+                const borderConfig = BORDER_EFFECTS[cosmetics.border];
+                if (borderConfig) {
+                    if (cosmetics.border === 'border_gold') {
+                        ctx.save();
+                        ctx.strokeStyle = '#FFD700';
+                        ctx.lineWidth = 3;
+                        ctx.shadowBlur = 8;
+                        ctx.shadowColor = '#FFD700';
+                        ctx.strokeRect(1.5, 1.5, CANVAS_WIDTH - 3, CANVAS_HEIGHT - 3);
+                        ctx.restore();
+                    }
+                }
+            }
+
             drawObstacles();
             drawFood();
             drawPowerUp();
-            drawSnake();
-            drawRival();
+            drawSnake(t);
+            drawRival(t);
+            drawTrails();
 
             if (slowMoActive) {
                 ctx.fillStyle = 'rgba(170, 68, 255, 0.05)';
@@ -1402,6 +1733,10 @@
         function updateGame() {
             if (gameState !== 'playing') return;
 
+            prevSnake = snake.map(s => ({ x: s.x, y: s.y }));
+            snakeGrew = false;
+            prevRivalSnake = rivalSnake.map(s => ({ x: s.x, y: s.y }));
+
             gameTick++;
             stats.totalDistance++;
             if (gameTick % 10 === 0) awardXP(1);
@@ -1434,6 +1769,7 @@
                     shieldActive = false;
                     powerUpTimer = 0;
                     powerUpType = null;
+                    stats.shieldBlocks++;
                     spawnParticles(wrappedHead.x, wrappedHead.y, 15, '#4488FF');
                     playSound('bonus');
                 } else {
@@ -1451,6 +1787,7 @@
                         shieldActive = false;
                         powerUpTimer = 0;
                         powerUpType = null;
+                        stats.shieldBlocks++;
                         spawnParticles(wrappedHead.x, wrappedHead.y, 15, '#4488FF');
                         playSound('bonus');
                     } else {
@@ -1465,14 +1802,18 @@
 
             if (wrappedHead.x === food.x && wrappedHead.y === food.y) {
                 snake.push(tail);
+                snakeGrew = true;
                 const eatenType = food.type;
 
                 // Stats tracking
                 sessionFoodTypes.add(eatenType);
                 sessionFoodEaten++;
                 stats.totalFoodEaten++;
+                if (magnetActive) stats.magnetEats++;
                 if (eatenType === 'bonus') { stats.bonusFoodEaten++; sessionBonusFood++; }
                 else if (eatenType === 'speed') { stats.speedFoodEaten++; sessionSpeedFood++; }
+                else if (eatenType === 'epic') { stats.epicFoodEaten++; }
+                // common, uncommon, rare all count as normalFoodEaten
                 else { stats.normalFoodEaten++; }
 
                 // Combo logic
@@ -1512,13 +1853,15 @@
                 playSound(tier.sound);
                 // speed food still has the special speed boost behavior
                 if (eatenType === 'speed') {
+                    tickInterval = Math.max(MIN_SPEED, getSpeed() - 30);
                     clearInterval(gameInterval);
-                    gameInterval = setInterval(updateGame, Math.max(MIN_SPEED, getSpeed() - 30));
+                    gameInterval = setInterval(updateGame, tickInterval);
                     const ci = gameInterval;
                     setTimeout(() => {
                         if (gameInterval === ci && gameState === 'playing') {
+                            tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
                             clearInterval(gameInterval);
-                            gameInterval = setInterval(updateGame, slowMoActive ? getSpeed() * 2 : getSpeed());
+                            gameInterval = setInterval(updateGame, tickInterval);
                         }
                     }, 2000);
                 }
@@ -1527,8 +1870,9 @@
                 food = generateFood(snake);
                 if (!food) { gameOver(); return; }
                 if (eatenType !== 'speed') {
+                    tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
                     clearInterval(gameInterval);
-                    gameInterval = setInterval(updateGame, slowMoActive ? getSpeed() * 2 : getSpeed());
+                    gameInterval = setInterval(updateGame, tickInterval);
                 }
             }
 
@@ -1620,7 +1964,28 @@
                 if (!food) return;
             }
 
-            drawGame();
+            // Sparkle trail spawn
+            if (cosmetics.trace === 'trace_sparkle' && gameTick % 5 === 0 && snake.length > 1) {
+                const tail = snake[snake.length - 1];
+                spawnParticles(tail.x, tail.y, 2, '#FFD700');
+            }
+            if (cosmetics.trace === 'trace_rainbow' && gameTick % 4 === 0 && snake.length > 1) {
+                const tail = snake[snake.length - 1];
+                const color = ['#FF0000','#FF8800','#FFFF00','#00FF00','#0088FF','#8800FF'][Math.floor(Date.now() / 200) % 6];
+                spawnParticles(tail.x, tail.y, 3, color);
+            }
+            if (cosmetics.trace === 'trace_galaxy' && gameTick % 4 === 0 && snake.length > 1) {
+                const tail = snake[snake.length - 1];
+                const galaxyColors = ['#FF88FF', '#88FFFF', '#FFFF88', '#8888FF', '#FF8888'];
+                spawnParticles(tail.x, tail.y, 2, galaxyColors[gameTick % galaxyColors.length]);
+            }
+            if (cosmetics.trace === 'trace_fire' && gameTick % 6 === 0 && snake.length > 1) {
+                const tail = snake[snake.length - 1];
+                spawnParticles(tail.x, tail.y, 2, '#FF6600');
+            }
+
+            lastTickTime = performance.now();
+            visualDirty = true;
         }
 
         function getLevelFromXP(xp) {
@@ -1647,8 +2012,10 @@
         }
 
         function loadStats() {
-            try { return JSON.parse(localStorage.getItem('snake_stats')) || getDefaultStats(); }
-            catch(e) { return getDefaultStats(); }
+            try {
+                const saved = JSON.parse(localStorage.getItem('snake_stats'));
+                return saved ? Object.assign(getDefaultStats(), saved) : getDefaultStats();
+            } catch(e) { return getDefaultStats(); }
         }
 
         function getDefaultStats() {
@@ -1656,7 +2023,12 @@
                 gamesPlayed: 0, totalScore: 0, maxScore: 0,
                 totalFoodEaten: 0, normalFoodEaten: 0, bonusFoodEaten: 0, speedFoodEaten: 0,
                 longestLength: 0, longestTimeAlive: 0, totalTimePlayed: 0,
-                totalDistance: 0, maxCombo: 0, totalDeaths: 0
+                totalDistance: 0, maxCombo: 0, totalDeaths: 0,
+                rivalsDefeated: 0,
+                shieldBlocks: 0,
+                magnetEats: 0,
+                dailyCompleted: 0,
+                epicFoodEaten: 0,
             };
         }
 
@@ -1692,12 +2064,33 @@
             }
         }
 
-        function showLevelUpToast(level) {
+        function queueToast(message, duration) {
+            duration = duration || 3000;
+            toastQueue.push({ message: message, duration: duration });
+            if (!toastActive) processToastQueue();
+        }
+
+        function processToastQueue() {
+            if (toastQueue.length === 0) {
+                toastActive = false;
+                return;
+            }
+            toastActive = true;
+            const toast = toastQueue.shift();
             const el = document.getElementById('toast');
-            if (!el) return;
-            el.textContent = '⚡ LEVEL UP! Level ' + level + ' ⚡';
-            el.style.display = 'block';
-            window.lvlToastTimer = setTimeout(function() { el.style.display = 'none'; }, 3000);
+            if (el) {
+                el.textContent = toast.message;
+                el.style.display = 'block';
+            }
+            setTimeout(function() {
+                const el2 = document.getElementById('toast');
+                if (el2) el2.style.display = 'none';
+                processToastQueue();
+            }, toast.duration);
+        }
+
+        function showLevelUpToast(level) {
+            queueToast('\u26A1 LEVEL UP! Level ' + level + ' \u26A1', 3000);
         }
 
         function checkLevelUnlocks(newLevel) {
@@ -1707,18 +2100,21 @@
                 if (unlockedCosmetics.indexOf(id) === -1) {
                     unlockedCosmetics.push(id);
                     try { localStorage.setItem('snake_unlocks', JSON.stringify(unlockedCosmetics)); } catch(e) {}
-                    const allCosmetics = Object.assign({}, SNAKE_SKINS, GRID_THEMES, TRACE_EFFECTS, DEATH_EFFECTS);
+                    const allCosmetics = Object.assign({}, SNAKE_SKINS, GRID_THEMES, TRACE_EFFECTS, DEATH_EFFECTS, BORDER_EFFECTS);
                     const c = allCosmetics[id];
                     if (c) {
-                        const el = document.getElementById('toast');
-                        if (el) {
-                            el.textContent = '🎨 Unlocked: ' + c.name + '!';
-                            el.style.display = 'block';
-                            if (window.lvlToastTimer) clearTimeout(window.lvlToastTimer);
-                            window.lvlToastTimer = setTimeout(function() { el.style.display = 'none'; }, 3000);
-                        }
+                        queueToast('🎨 Unlocked: ' + c.name + '!', 3000);
                     }
                 }
+            }
+        }
+
+        function checkPrestigeUnlocks() {
+            const reward = PRESTIGE_REWARDS[prestigeLevel];
+            if (reward && unlockedCosmetics.indexOf(reward.id) === -1) {
+                unlockedCosmetics.push(reward.id);
+                try { localStorage.setItem('snake_unlocks', JSON.stringify(unlockedCosmetics)); } catch(e) {}
+                queueToast('\u2B50 Prestige ' + prestigeLevel + '! Unlocked: ' + reward.name + '!', 4000);
             }
         }
 
@@ -1732,7 +2128,8 @@
                 snakeLength: snake.length,
                 hatTrickEligible: sessionFoodTypes.size >= 4,
                 maxCombo: sessionMaxCombo,
-                sessionScore: sessionScore || score
+                sessionScore: sessionScore || score,
+                snapLevel: snapLevel,
             };
             for (const id in ACHIEVEMENTS) {
                 if (achievements[id]) continue;
@@ -1748,13 +2145,7 @@
         }
 
         function showAchievementToast(ach) {
-            const el = document.getElementById('toast');
-            if (!el) return;
-            el.textContent = '🏆 ' + ach.icon + ' ' + ach.name + ': ' + ach.desc + ' (+' + ach.xp + ' XP)';
-            el.style.display = 'block';
-            if (window.achToastTimer) clearTimeout(window.achToastTimer);
-            if (window.lvlToastTimer) clearTimeout(window.lvlToastTimer);
-            window.achToastTimer = setTimeout(function() { el.style.display = 'none'; }, 4000);
+            queueToast('\u{1F3C6} ' + ach.icon + ' ' + ach.name + ': ' + ach.desc + ' (+' + ach.xp + ' XP)', 4000);
         }
 
         function checkDailyCompletion(sessionScore, checkCtx) {
@@ -1764,26 +2155,28 @@
             const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
             if (challenge.check(sessionScore, checkCtx)) {
                 dailyDone = true;
+                stats.dailyCompleted++;
                 awardXP(challenge.reward);
                 try { localStorage.setItem('snake_daily_done', 'true'); } catch(e) {}
-                const el = document.getElementById('toast');
-                if (el) {
-                    el.textContent = '⭐ Daily Complete! ' + challenge.desc + ' (+' + challenge.reward + ' XP)';
-                    el.style.display = 'block';
-                    if (window.achToastTimer) clearTimeout(window.achToastTimer);
-                    if (window.lvlToastTimer) clearTimeout(window.lvlToastTimer);
-                    window.achToastTimer = setTimeout(function() { el.style.display = 'none'; }, 4000);
-                }
+                queueToast('⭐ Daily Complete! ' + challenge.desc + ' (+' + challenge.reward + ' XP)', 4000);
             }
+        }
+
+        function closeAllPanels() {
+            document.getElementById('statsPanel').style.display = 'none';
+            document.getElementById('achievementsPanel').style.display = 'none';
+            document.getElementById('cosmeticsPanel').style.display = 'none';
+            document.getElementById('panelBackdrop').style.display = 'none';
         }
 
         function showAchievementsPanel() {
             const el = document.getElementById('achievementsPanel');
             if (!el) return;
-            if (el.style.display === 'block') { el.style.display = 'none'; return; }
+            document.getElementById('panelBackdrop').style.display = 'block';
+            if (el.style.display === 'block') { el.style.display = 'none'; document.getElementById('panelBackdrop').style.display = 'none'; return; }
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
-            let html = '<h2 style="text-align:center;margin-top:0;color:#FFD700;">🏆 ACHIEVEMENTS</h2><div style="max-height:400px;overflow-y:auto;">';
+            let html = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;color:#FFD700;">🏆 ACHIEVEMENTS</h2><div style="max-height:400px;overflow-y:auto;">';
             for (const id in ACHIEVEMENTS) {
                 const ach = ACHIEVEMENTS[id];
                 const unlocked = achievements[id];
@@ -1804,7 +2197,8 @@
         function showCosmeticsPanel() {
             const el = document.getElementById('cosmeticsPanel');
             if (!el) return;
-            if (el.style.display === 'block') { el.style.display = 'none'; return; }
+            document.getElementById('panelBackdrop').style.display = 'block';
+            if (el.style.display === 'block') { el.style.display = 'none'; document.getElementById('panelBackdrop').style.display = 'none'; return; }
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('achievementsPanel').style.display = 'none';
 
@@ -1826,8 +2220,10 @@
                 const grid = GRID_THEMES[cosmetics.grid] || GRID_THEMES.grid_classic;
                 const trace = TRACE_EFFECTS[cosmetics.trace] || TRACE_EFFECTS.trace_none;
                 const death = DEATH_EFFECTS[cosmetics.death] || DEATH_EFFECTS.death_classic;
+                const border = BORDER_EFFECTS[cosmetics.border] || BORDER_EFFECTS.border_none;
 
                 el.innerHTML =
+                    '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button>' +
                     '<h2 style="text-align:center;margin-top:0;color:#FFD700;">🎨 COSMETICS</h2>' +
                     '<div style="margin:12px 0;">' +
                     '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;">' +
@@ -1853,6 +2249,12 @@
                     '<div style="text-align:center;"><strong>Death Effect</strong><br><span style="color:#aaa;font-size:0.9em;">' + death.name + '</span></div>' +
                     '<button class="cosmetic-btn" data-cat="death" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
                     '</div>' +
+
+                    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;margin-top:8px;">' +
+                    '<button class="cosmetic-btn" data-cat="border" data-dir="-1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">◀</button>' +
+                    '<div style="text-align:center;"><strong>Border</strong><br><span style="color:#aaa;font-size:0.9em;">' + border.name + '</span></div>' +
+                    '<button class="cosmetic-btn" data-cat="border" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
+                    '</div>' +
                     '</div>' +
                     '<p style="text-align:center;color:#666;font-size:0.85em;">Press C or ESC to close</p>';
 
@@ -1868,6 +2270,8 @@
                             cosmetics.trace = cycle(cosmetics.trace, TRACE_EFFECTS, dir);
                         } else if (cat === 'death') {
                             cosmetics.death = cycle(cosmetics.death, DEATH_EFFECTS, dir);
+                        } else if (cat === 'border') {
+                            cosmetics.border = cycle(cosmetics.border, BORDER_EFFECTS, dir);
                         }
                         try { localStorage.setItem('snake_equipped', JSON.stringify(cosmetics)); } catch(e) {}
                         renderPanel();
@@ -1882,10 +2286,11 @@
         function showStatsPanel() {
             const el = document.getElementById('statsPanel');
             if (!el) return;
-            if (el.style.display === 'block') { el.style.display = 'none'; return; }
+            document.getElementById('panelBackdrop').style.display = 'block';
+            if (el.style.display === 'block') { el.style.display = 'none'; document.getElementById('panelBackdrop').style.display = 'none'; return; }
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
-            el.innerHTML = '<h2 style="text-align:center;margin-top:0;">📊 STATS</h2>' +
+            el.innerHTML = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;">📊 STATS</h2>' +
                 '<table style="width:100%;border-collapse:collapse;">' +
                 '<tr><td style="padding:4px 8px;">Games Played</td><td style="text-align:right;padding:4px 8px;">' + stats.gamesPlayed + '</td></tr>' +
                 '<tr><td style="padding:4px 8px;">Total Score</td><td style="text-align:right;padding:4px 8px;">' + stats.totalScore.toLocaleString() + '</td></tr>' +
@@ -1898,6 +2303,10 @@
                 '<tr><td style="padding:4px 8px;">Total Distance</td><td style="text-align:right;padding:4px 8px;">' + stats.totalDistance + ' tiles</td></tr>' +
                 '<tr><td style="padding:4px 8px;">Best Combo</td><td style="text-align:right;padding:4px 8px;">' + stats.maxCombo + 'x</td></tr>' +
                 '<tr><td style="padding:4px 8px;">Deaths</td><td style="text-align:right;padding:4px 8px;">' + stats.totalDeaths + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Rivals Defeated</td><td style="text-align:right;padding:4px 8px;">' + stats.rivalsDefeated + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Shield Blocks</td><td style="text-align:right;padding:4px 8px;">' + stats.shieldBlocks + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Epic Food</td><td style="text-align:right;padding:4px 8px;">' + stats.epicFoodEaten + '</td></tr>' +
+                '<tr><td style="padding:4px 8px;">Daily Challenges</td><td style="text-align:right;padding:4px 8px;">' + stats.dailyCompleted + '</td></tr>' +
                 '</table>' +
                 '<p style="text-align:center;color:#888;margin-top:10px;font-size:0.9em;">Press TAB or ESC to close</p>';
             el.style.display = 'block';
@@ -1921,13 +2330,29 @@
                     }
                     resetGame();
                     startGame();
+                    visualDirty = true;
                     return;
                 }
                 if (gameState === 'gameover') {
                     gameState = 'idle';
-                    drawGame();
+                    drawGame(1);
+                    visualDirty = true;
                     return;
                 }
+            }
+
+            // Prestige on idle
+            if ((e.key === 'x' || e.key === 'X') && gameState === 'idle' && level >= 20) {
+                prestigeLevel++;
+                xp = 0;
+                level = 1;
+                try {
+                    localStorage.setItem('snake_prestige', String(prestigeLevel));
+                    localStorage.setItem('snake_xp', '0');
+                } catch(e2) {}
+                checkPrestigeUnlocks();
+                drawGame(1);
+                return;
             }
 
             // Mode selection on idle
@@ -1936,14 +2361,16 @@
                     e.preventDefault();
                     modeSelectIndex = (modeSelectIndex - 1 + MODE_ORDER.length) % MODE_ORDER.length;
                     gameMode = MODE_ORDER[modeSelectIndex];
-                    drawGame();
+                    drawGame(1);
+                    visualDirty = true;
                     return;
                 }
                 if (e.key === 'ArrowDown') {
                     e.preventDefault();
                     modeSelectIndex = (modeSelectIndex + 1) % MODE_ORDER.length;
                     gameMode = MODE_ORDER[modeSelectIndex];
-                    drawGame();
+                    drawGame(1);
+                    visualDirty = true;
                     return;
                 }
             }
@@ -1961,7 +2388,8 @@
                     gameInterval = null;
                     sessionPauseStart = Date.now();
                     playSound('pause');
-                    drawGame();
+                    drawGame(1);
+                    visualDirty = true;
                 } else if (gameState === 'paused') {
                     gameState = 'playing';
                     if (sessionPauseStart) {
@@ -1972,9 +2400,11 @@
                         }
                         sessionPauseStart = 0;
                     }
-                    gameInterval = setInterval(updateGame, slowMoActive ? getSpeed() * 2 : getSpeed());
+                    tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
+                    gameInterval = setInterval(updateGame, tickInterval);
                     playSound('resume');
-                    drawGame();
+                    drawGame(1);
+                    visualDirty = true;
                 }
                 return;
             }
@@ -1990,17 +2420,15 @@
                 showStatsPanel();
                 return;
             }
+            if (e.key === 'Escape') {
+                closeAllPanels();
+                return;
+            }
+
             if (e.key === 'c' || e.key === 'C') {
                 e.preventDefault();
                 if (gameState === 'playing') return;
                 showCosmeticsPanel();
-                return;
-            }
-
-            if (e.key === 'Escape') {
-                document.getElementById('statsPanel').style.display = 'none';
-                document.getElementById('achievementsPanel').style.display = 'none';
-                document.getElementById('cosmeticsPanel').style.display = 'none';
                 return;
             }
 
@@ -2082,6 +2510,21 @@
             return;
           }
 
+          // Idle-state swipe detection for mode selection
+          if (gameState === 'idle') {
+            if (Math.abs(dy_touch) > Math.abs(dx_touch) && Math.abs(dy_touch) > 30) {
+              if (dy_touch < 0) {
+                modeSelectIndex = (modeSelectIndex + 1) % MODE_ORDER.length;
+              } else {
+                modeSelectIndex = (modeSelectIndex - 1 + MODE_ORDER.length) % MODE_ORDER.length;
+              }
+              gameMode = MODE_ORDER[modeSelectIndex];
+              visualDirty = true;
+              return;
+            }
+            return;
+          }
+
           // Swipe detection (minimum 30px movement)
           if (Math.abs(dx_touch) < 30 && Math.abs(dy_touch) < 30) return;
 
@@ -2092,7 +2535,9 @@
             newDy = dy_touch > 0 ? TILE_SIZE : -TILE_SIZE;
           }
 
-          setNextDirection(newDx, newDy);
+          if (gameState === 'playing') {
+            setNextDirection(newDx, newDy);
+          }
         }, { passive: false });
 
         document.addEventListener('visibilitychange', () => {
@@ -2102,8 +2547,13 @@
                 clearInterval(gameInterval);
                 gameInterval = null;
                 playSound('pause');
-                drawGame();
+                drawGame(1);
+                visualDirty = true;
             }
+        });
+
+        document.getElementById('panelBackdrop').addEventListener('click', function() {
+            closeAllPanels();
         });
 
         syncDailyState();
