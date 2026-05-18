@@ -116,6 +116,39 @@
         let dx = 0;
         let dy = 0;
         let score = 0;
+
+        // === PROGRESSION SYSTEM ===
+        const saveManager = {
+            get(key, defaultVal) {
+                try { const v = localStorage.getItem(key); return v !== null ? v : defaultVal; }
+                catch(e) { return defaultVal; }
+            },
+            set(key, value) {
+                try { localStorage.setItem(key, String(value)); }
+                catch(e) { /* localStorage unavailable */ }
+            },
+            getInt(key, defaultVal) {
+                try { const v = localStorage.getItem(key); return v !== null ? parseInt(v, 10) || defaultVal : defaultVal; }
+                catch(e) { return defaultVal; }
+            },
+            getJSON(key, defaultVal, validator) {
+                try {
+                    const v = localStorage.getItem(key);
+                    if (v === null) return defaultVal;
+                    const parsed = JSON.parse(v);
+                    return validator ? (validator(parsed) ? parsed : defaultVal) : parsed;
+                }
+                catch(e) { return defaultVal; }
+            },
+            setJSON(key, value) {
+                try { localStorage.setItem(key, JSON.stringify(value)); }
+                catch(e) { /* localStorage unavailable */ }
+            },
+            remove(key) {
+                try { localStorage.removeItem(key); }
+                catch(e) { /* localStorage unavailable */ }
+            }
+        };
         let highScore = saveManager.getInt('snake_high_score', 0);
         let gameInterval = null;
         let gameState = 'idle';
@@ -161,38 +194,6 @@
         let sessionSummaryTimer = 0;          // countdown timer for "LEVEL N!" flash display
         let levelUpFlash = 0;
 
-        // === PROGRESSION SYSTEM ===
-        const saveManager = {
-            get(key, defaultVal) {
-                try { const v = localStorage.getItem(key); return v !== null ? v : defaultVal; }
-                catch(e) { return defaultVal; }
-            },
-            set(key, value) {
-                try { localStorage.setItem(key, String(value)); }
-                catch(e) { /* localStorage unavailable */ }
-            },
-            getInt(key, defaultVal) {
-                try { const v = localStorage.getItem(key); return v !== null ? parseInt(v, 10) || defaultVal : defaultVal; }
-                catch(e) { return defaultVal; }
-            },
-            getJSON(key, defaultVal, validator) {
-                try {
-                    const v = localStorage.getItem(key);
-                    if (v === null) return defaultVal;
-                    const parsed = JSON.parse(v);
-                    return validator ? (validator(parsed) ? parsed : defaultVal) : parsed;
-                }
-                catch(e) { return defaultVal; }
-            },
-            setJSON(key, value) {
-                try { localStorage.setItem(key, JSON.stringify(value)); }
-                catch(e) { /* localStorage unavailable */ }
-            },
-            remove(key) {
-                try { localStorage.removeItem(key); }
-                catch(e) { /* localStorage unavailable */ }
-            }
-        };
         let stats = loadStats();
         let xp = saveManager.getInt('snake_xp', 0);
         let level = getLevelFromXP(xp);
