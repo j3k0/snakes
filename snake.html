@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
     <title>Snake Game</title>
     <style>
         body {
@@ -106,6 +107,8 @@
         let snakeGrew = false;
         let prevRivalSnake = [];
         let hasTouch = 'ontouchstart' in window;
+        let autoPaused = false;
+        let lastVibrateTime = 0;
         let eatAnimTimer = 0;
         let shrinkTimer = 3000;
         let snapDuration = 3000;          // current shrink interval, decreases over time
@@ -118,7 +121,8 @@
         let xp;
         try { xp = parseInt(localStorage.getItem('snake_xp')) || 0; } catch(e) { xp = 0; }
         let level = getLevelFromXP(xp);
-        let prestigeLevel = parseInt(localStorage.getItem('snake_prestige')) || 0;
+        let prestigeLevel;
+        try { prestigeLevel = parseInt(localStorage.getItem('snake_prestige')) || 0; } catch(e) { prestigeLevel = 0; }
         let sessionXP = 0; // reserved for achievements
         let gameTick = 0;
         let comboCount = 0;
@@ -135,7 +139,7 @@
         let comboFadeTimer = null;
         let dailyAttempts = 3;
         let dailyDone = false;
-        let powerUp = null;
+        let powerUpPickup = null;
         let shieldActive = false;
         let magnetActive = false;
         let slowMoActive = false;
@@ -298,7 +302,7 @@
             },
             zen: {
                 name:'Zen', speed:150, selfCollision:false, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'length', earnXP:false, achievementsEnabled:true
+                timer:null, scoreIs:'length', earnXP:true, achievementsEnabled:true
             },
             daily: {
                 name:'Daily Challenge', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
@@ -314,13 +318,22 @@
             common:   { pts: 10, xp: 25, weight: 0.40, color: '#FF4444', pCount: 8,  sound: 'eat' },
             uncommon: { pts: 15, xp: 30, weight: 0.25, color: '#4488FF', pCount: 10, sound: 'eat' },
             rare:     { pts: 20, xp: 40, weight: 0.12, color: '#44FF44', pCount: 14, sound: 'eat', glow: 8 },
-            epic:     { pts: 30, xp: 55, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14 },
+            epic:     { pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14 },
             bonus:    { pts: 30, xp: 60, weight: 0.15, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
             speed:    { pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed' },
         };
 
+const TRAIL_RENDER_CONFIG = {
+  trace_ghost:   { alphaStart:0.15, alphaDecay:0.05, color: (idx, skin) => skin.head==='rainbow' ? '#00FF00' : skin.head },
+  trace_fire:    { alphaStart:0.30, alphaDecay:0.10, color: (idx) => ['#FF6600','#CC3300','#880000'][idx] },
+  trace_neon:    { alphaStart:0.25, alphaDecay:0.08, color: () => '#00FFFF' },
+  trace_rainbow: { alphaStart:0.25, alphaDecay:0.08, color: (idx) => 'hsl('+((idx*20)+Date.now()*0.05)%360+',100%,50%)' },
+  trace_galaxy:  { alphaStart:0.20, alphaDecay:0.06, color: (idx) => 'hsl('+(Date.now()*0.03+idx*30)%360+',80%,60%)' },
+  trace_streak_3: { alphaStart:0.25, alphaDecay:0.08, color: () => '#FF6B35' },
+};
+
         const POWERUP_TYPES = {
-            shield: { name: 'Shield', color: '#4488FF', shape: 'circle', duration: 0 },
+            shield: { name: 'Shield', color: '#4488FF', shape: 'circle', duration: 6000 },
             magnet: { name: 'Magnet', color: '#44FF44', shape: 'star', duration: 5000 },
             slowmo: { name: 'Slow-Motion', color: '#AA44FF', shape: 'diamond', duration: 4000 },
         };
@@ -328,16 +341,16 @@
         const MODE_ORDER = ['classic', 'timeAttack', 'snap', 'zen', 'daily'];
 
         const DAILY_CHALLENGES = [
-          { desc:'Score 200+ points', check:function(s,st){return s>=200;}, reward:200 },
-          { desc:'Score 300+ points', check:function(s,st){return s>=300;}, reward:300 },
-          { desc:'Eat 5 speed foods', check:function(s,st){return st.sessionSpeedFood>=5;}, reward:150 },
-          { desc:'Eat 10 bonus foods', check:function(s,st){return st.sessionBonusFood>=10;}, reward:200 },
-          { desc:'Reach 3x combo', check:function(s,st){return st.sessionMaxCombo>=3;}, reward:150 },
-          { desc:'Reach 5x combo', check:function(s,st){return st.sessionMaxCombo>=5;}, reward:300 },
-          { desc:'Survive 2 minutes', check:function(s,st){return st.sessionTimeAlive>=120000;}, reward:200 },
-          { desc:'Eat 20 foods total', check:function(s,st){return st.sessionFoodEaten>=20;}, reward:250 },
-          { desc:'Reach snake length 15', check:function(s,st){return st.snakeLength>=15;}, reward:200 },
-          { desc:'Eat 4+ different food types', check:function(s,st){return st.sessionFoodTypes.size>=4;}, reward:250 },
+          { desc:'Score 200+ points', check:function(s,st){return s>=200;}, reward:200, progressKey:'score', progressTarget:200 },
+          { desc:'Score 300+ points', check:function(s,st){return s>=300;}, reward:300, progressKey:'score', progressTarget:300 },
+          { desc:'Eat 5 speed foods', check:function(s,st){return st.sessionSpeedFood>=5;}, reward:150, progressKey:'speed', progressTarget:5 },
+          { desc:'Eat 10 bonus foods', check:function(s,st){return st.sessionBonusFood>=10;}, reward:200, progressKey:'bonus', progressTarget:10 },
+          { desc:'Reach 3x combo', check:function(s,st){return st.sessionMaxCombo>=3;}, reward:150, progressKey:'combo', progressTarget:3 },
+          { desc:'Reach 5x combo', check:function(s,st){return st.sessionMaxCombo>=5;}, reward:300, progressKey:'combo', progressTarget:5 },
+          { desc:'Survive 2 minutes', check:function(s,st){return st.sessionTimeAlive>=120000;}, reward:200, progressKey:'time', progressTarget:120000 },
+          { desc:'Eat 20 foods total', check:function(s,st){return st.sessionFoodEaten>=20;}, reward:250, progressKey:'food', progressTarget:20 },
+          { desc:'Reach snake length 15', check:function(s,st){return st.snakeLength>=15;}, reward:200, progressKey:'length', progressTarget:15 },
+          { desc:'Eat 4+ different food types', check:function(s,st){return st.sessionFoodTypes.size>=4;}, reward:250, progressKey:'types', progressTarget:4 },
         ];
 
         function getDailySeed() {
@@ -349,6 +362,20 @@
                 hash |= 0;
             }
             return Math.abs(hash);
+        }
+
+        function getDailyProgress(challenge) {
+            switch (challenge.progressKey) {
+                case 'score': return score;
+                case 'speed': return sessionSpeedFood;
+                case 'bonus': return sessionBonusFood;
+                case 'combo': return sessionMaxCombo;
+                case 'time': return Math.min(sessionTimeAlive, challenge.progressTarget);
+                case 'food': return sessionFoodEaten;
+                case 'length': return snake.length;
+                case 'types': return sessionFoodTypes.size;
+                default: return 0;
+            }
         }
 
         let gameMode = 'classic';
@@ -381,6 +408,16 @@
             return Math.max(MIN_SPEED, BASE_SPEED - Math.floor(score / 50) * 5);
         }
 
+        function vibrate(duration) {
+            if (navigator.vibrate) {
+                const now = Date.now();
+                if (now - lastVibrateTime >= 300) {
+                    lastVibrateTime = now;
+                    navigator.vibrate(duration);
+                }
+            }
+        }
+
         function generateFood(currentSnake) {
             const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
             const rivalLength = rivalActive ? rivalSnake.length : 0;
@@ -409,7 +446,7 @@
         }
 
         function spawnPowerUpPickup() {
-            if (powerUp) return;
+            if (powerUpPickup) return;
             const types = Object.keys(POWERUP_TYPES);
             const type = types[Math.floor(Math.random() * types.length)];
             const maxAttempts = 50;
@@ -419,12 +456,14 @@
                 if (snake.some(s => s.x === x && s.y === y)) continue;
                 if (obstacles.some(o => o.x === x && o.y === y)) continue;
                 if (food && food.x === x && food.y === y) continue;
-                powerUp = { x, y, type };
+                if (rivalActive && rivalSnake.some(s => s.x === x && s.y === y)) continue;
+                powerUpPickup = { x, y, type };
                 return;
             }
         }
 
         function activatePowerUp(type) {
+            vibrate(20);
             deactivatePowerUp();
             
             powerUpType = type;
@@ -433,7 +472,7 @@
             switch (type) {
                 case 'shield':
                     shieldActive = true;
-                    powerUpTimer = 8000;
+                    powerUpTimer = POWERUP_TYPES.shield.duration;
                     break;
                 case 'magnet':
                     magnetActive = true;
@@ -443,8 +482,7 @@
                     slowMoActive = true;
                     powerUpTimer = config.duration;
                     tickInterval = getSpeed() * 2;
-                    clearInterval(gameInterval);
-                    gameInterval = setInterval(updateGame, tickInterval);
+                    restartGameInterval(tickInterval);
                     break;
             }
             
@@ -459,8 +497,7 @@
         function deactivatePowerUp() {
             if (slowMoActive) {
                 tickInterval = getSpeed();
-                clearInterval(gameInterval);
-                gameInterval = setInterval(updateGame, tickInterval);
+                restartGameInterval(tickInterval);
             }
             shieldActive = false;
             magnetActive = false;
@@ -492,7 +529,7 @@
             eatAnimTimer = 0;
             if (comboFadeTimer) clearTimeout(comboFadeTimer);
             comboFadeTimer = null;
-            powerUp = null;
+            powerUpPickup = null;
             shieldActive = false;
             magnetActive = false;
             slowMoActive = false;
@@ -508,8 +545,8 @@
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
             dy = 0;
+            generateObstacles();
             food = generateFood(snake);
-            generateObstacles();  // ADD THIS LINE
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -552,27 +589,30 @@
                 }
                 dailyAttempts--;
                 try { localStorage.setItem('snake_daily_attempts_remaining', String(dailyAttempts)); } catch(e) {}
-                // Update streak — only when a daily game actually starts
-                try {
-                    const storedDate = localStorage.getItem('snake_daily_date') || '';
-                    let streak = parseInt(localStorage.getItem('snake_streak_count')) || 0;
-                    if (storedDate) {
-                        const storedDateObj = new Date(storedDate);
-                        const diffMs = Date.now() - storedDateObj.getTime();
-                        const diffDays = Math.round(diffMs / 86400000);
-                        if (diffDays === 1) {
-                            // Consecutive day — increment streak
-                            localStorage.setItem('snake_streak_count', String(streak + 1));
-                        } else if (diffDays > 1) {
-                            // More than 1 day gap — reset streak
-                            localStorage.setItem('snake_streak_count', '0');
+                    // Update streak — only when a daily game actually starts
+                    try {
+                        const today = new Date();
+                        const storedDate = localStorage.getItem('snake_daily_date') || '';
+                        let streak = parseInt(localStorage.getItem('snake_streak_count')) || 0;
+                        const todayStr = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+                        if (storedDate) {
+                            const storedDateStr = storedDate;
+                            if (storedDateStr !== todayStr) {
+                                const parts = storedDate.split('-');
+                                const storedDateObj = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+                                const yesterday = new Date(today);
+                                yesterday.setDate(yesterday.getDate() - 1);
+                                const yesterdayStr = yesterday.getFullYear() + '-' + String(yesterday.getMonth()+1).padStart(2, '0') + '-' + String(yesterday.getDate()).padStart(2, '0');
+                                if (storedDateStr === yesterdayStr) {
+                                    localStorage.setItem('snake_streak_count', String(streak + 1));
+                                } else {
+                                    localStorage.setItem('snake_streak_count', '0');
+                                }
+                            }
+                        } else {
+                            localStorage.setItem('snake_streak_count', '1');
                         }
-                        // diffDays === 0 means same day — no change
-                    } else {
-                        // First ever game
-                        localStorage.setItem('snake_streak_count', '1');
-                    }
-                } catch(e) {}
+                    } catch(e) {}
             }
             // Check streak cosmetic unlocks
             try {
@@ -625,6 +665,11 @@
                 x: ((pos.x % CANVAS_WIDTH) + CANVAS_WIDTH) % CANVAS_WIDTH,
                 y: ((pos.y % CANVAS_HEIGHT) + CANVAS_HEIGHT) % CANVAS_HEIGHT
             };
+        }
+
+        function restartGameInterval(speed) {
+            clearInterval(gameInterval);
+            gameInterval = setInterval(updateGame, speed || tickInterval);
         }
 
         function generateObstacles() {
@@ -760,10 +805,7 @@
             }
             
             const testPos = { x: head.x + chosenDir.dx, y: head.y + chosenDir.dy };
-            const wrappedTest = {
-                x: ((testPos.x % CANVAS_WIDTH) + CANVAS_WIDTH) % CANVAS_WIDTH,
-                y: ((testPos.y % CANVAS_HEIGHT) + CANVAS_HEIGHT) % CANVAS_HEIGHT,
-            };
+            const wrappedTest = wrapPosition(testPos);
             
             const selfCollision = rivalSnake.some(function(s) { return s.x === wrappedTest.x && s.y === wrappedTest.y; });
             const obsCollision = obstacles.some(function(o) { return o.x === wrappedTest.x && o.y === wrappedTest.y; });
@@ -772,10 +814,7 @@
                 let found = false;
                 for (let i = 0; i < possibleDirs.length; i++) {
                     const dir = possibleDirs[i];
-                    const tp = {
-                        x: ((head.x + dir.dx) % CANVAS_WIDTH + CANVAS_WIDTH) % CANVAS_WIDTH,
-                        y: ((head.y + dir.dy) % CANVAS_HEIGHT + CANVAS_HEIGHT) % CANVAS_HEIGHT,
-                    };
+                    const tp = wrapPosition({ x: head.x + dir.dx, y: head.y + dir.dy });
                     const sc = rivalSnake.some(function(s) { return s.x === tp.x && s.y === tp.y; });
                     const oc = obstacles.some(function(o) { return o.x === tp.x && o.y === tp.y; });
                     if (!sc && !oc) {
@@ -794,10 +833,7 @@
             rivalDy = chosenDir.dy;
             
             const rTail = rivalSnake.pop();
-            const rNewHead = {
-                x: ((head.x + rivalDx) % CANVAS_WIDTH + CANVAS_WIDTH) % CANVAS_WIDTH,
-                y: ((head.y + rivalDy) % CANVAS_HEIGHT + CANVAS_HEIGHT) % CANVAS_HEIGHT,
-            };
+            const rNewHead = wrapPosition({ x: head.x + rivalDx, y: head.y + rivalDy });
             
             const playerBodyHit = snake.some(function(s) { return s.x === rNewHead.x && s.y === rNewHead.y; });
             if (playerBodyHit) {
@@ -819,13 +855,16 @@
             rivalSnake.unshift(rNewHead);
             
             if (food && rNewHead.x === food.x && rNewHead.y === food.y) {
-                if (rivalSnake.length < RIVAL_MAX_LENGTH) {
-                    rivalSnake.push(rTail);
-                }
                 const combinedSnake = snake.concat(rivalSnake);
-                food = generateFood(combinedSnake);
-                if (!food) { gameOver(); return; }
-                playSound('eat');
+                const newFood = generateFood(combinedSnake);
+                if (newFood) {
+                    if (rivalSnake.length < RIVAL_MAX_LENGTH) {
+                        rivalSnake.push(rTail);
+                    }
+                    food = newFood;
+                    playSound('eat');
+                }
+                // If board is full, rival doesn't eat the food — food stays on board
             }
             
             const rHeadNow = rivalSnake[0];
@@ -845,13 +884,24 @@
             rivalRespawnTimer = 10000;
         }
 
-        function gameOver() {
-            clearInterval(gameInterval);
-            gameInterval = null;
-            gameState = 'gameover';
-            rivalSnake = [];
-            rivalActive = false;
-            rivalRespawnTimer = 0;
+        function resumeGame() {
+            gameState = 'playing';
+            if (sessionPauseStart) {
+                const pauseDuration = Date.now() - sessionPauseStart;
+                sessionPausedTime += pauseDuration;
+                if (gameMode === 'timeAttack') {
+                    timeAttackEnd += pauseDuration;
+                }
+                sessionPauseStart = 0;
+            }
+    tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
+    restartGameInterval(tickInterval);
+    playSound('resume');
+            drawGame(1);
+            visualDirty = true;
+        }
+
+        function finalizeSession() {
             sessionTimeAlive = Date.now() - sessionStartTime - sessionPausedTime;
             stats.gamesPlayed++;
             stats.totalScore += score;
@@ -859,8 +909,25 @@
             stats.totalTimePlayed += sessionTimeAlive;
             if (score > stats.maxScore) stats.maxScore = score;
             if (sessionTimeAlive > stats.longestTimeAlive) stats.longestTimeAlive = sessionTimeAlive;
-            awardXP(snake.length * 10);
+            if (snake.length > stats.longestLength) stats.longestLength = snake.length;
             saveAllState();
+            if (score > (modeHighScores[gameMode] || 0)) {
+                modeHighScores[gameMode] = score;
+                try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
+            }
+            drawGame(1);
+            visualDirty = true;
+        }
+
+        function gameOver() {
+            clearInterval(gameInterval);
+            gameInterval = null;
+            gameState = 'gameover';
+            rivalSnake = [];
+            rivalActive = false;
+            rivalRespawnTimer = 0;
+            finalizeSession();
+            awardXP(snake.length * 10);
             checkAchievements(score);
             checkDailyCompletion(score, {
                 sessionSpeedFood: sessionSpeedFood,
@@ -871,11 +938,7 @@
                 sessionFoodTypes: sessionFoodTypes,
                 snakeLength: snake.length
             });
-            // Per-mode high score
-            if (score > (modeHighScores[gameMode] || 0)) {
-                modeHighScores[gameMode] = score;
-                try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
-            }
+            vibrate(30);
             const de = DEATH_EFFECTS[cosmetics.death] || DEATH_EFFECTS.death_classic;
             if (de.color === 'rainbow') {
                 const perColor = Math.floor(de.count / 3);
@@ -897,22 +960,8 @@
             gameInterval = null;
             gameState = 'gameover';
             score = snake.length;
-            sessionTimeAlive = Date.now() - sessionStartTime - sessionPausedTime;
-            stats.gamesPlayed++;
-            stats.totalScore += score;
-            stats.totalDeaths++;
-            stats.totalTimePlayed += sessionTimeAlive;
-            if (score > stats.maxScore) stats.maxScore = score;
-            if (sessionTimeAlive > stats.longestTimeAlive) stats.longestTimeAlive = sessionTimeAlive;
-            if (snake.length > stats.longestLength) stats.longestLength = snake.length;
-            saveAllState();
-            if (score > (modeHighScores[gameMode] || 0)) {
-                modeHighScores[gameMode] = score;
-                try { localStorage.setItem('snake_mode_highs', JSON.stringify(modeHighScores)); } catch(e) {}
-            }
+            finalizeSession();
             zenActive = false;
-            drawGame(1);
-            visualDirty = true;
         }
 
         function playSound(name) {
@@ -1079,21 +1128,10 @@
             if (comboEl) {
                 const mul = 1 + comboCount * 0.5;
                 comboEl.textContent = comboCount > 0 ? 'x' + mul.toFixed(1) + ' COMBO!' : '';
-                if (comboCount > 0) {
-                    clearTimeout(comboFadeTimer);
-                    comboFadeTimer = setTimeout(function() {
-                        document.getElementById('comboDisplay').textContent = '';
-                    }, 3500);
-                }
             }
             const xpEl = document.getElementById('xpDisplay');
             if (xpEl) {
-                xpEl.textContent = 'Lv.' + level + ' | XP: ' + xp.toLocaleString();
-            }
-
-// Zen mode: score = snake length
-            if (gameMode === 'zen') {
-                score = snake.length;
+                xpEl.style.display = 'none';
             }
 
             requestAnimationFrame(animateVisuals);
@@ -1321,30 +1359,27 @@
 
             ctx.restore();
 
-            // Letter labels for non-common types with dark background for contrast
-            const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
+            // Letter labels for non-common types with text outline for contrast
+            const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B' };
             if (labels[food.type]) {
                 ctx.save();
-                // Dark semicircle behind letter
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-                ctx.beginPath();
-                ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
-                ctx.fill();
-                // White letter
-                ctx.fillStyle = '#FFFFFF';
                 ctx.font = 'bold 10px Arial';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                ctx.strokeText(labels[food.type], cx, cy);
+                ctx.fillStyle = '#FFFFFF';
                 ctx.fillText(labels[food.type], cx, cy);
                 ctx.restore();
             }
         }
 
-        function drawPowerUp() {
-            if (!powerUp) return;
-            const config = POWERUP_TYPES[powerUp.type];
-            const cx = powerUp.x + TILE_SIZE / 2;
-            const cy = powerUp.y + TILE_SIZE / 2;
+        function drawPowerUpPickup() {
+            if (!powerUpPickup) return;
+            const config = POWERUP_TYPES[powerUpPickup.type];
+            const cx = powerUpPickup.x + TILE_SIZE / 2;
+            const cy = powerUpPickup.y + TILE_SIZE / 2;
             
             ctx.save();
             ctx.shadowBlur = 10;
@@ -1352,7 +1387,7 @@
             ctx.fillStyle = config.color;
             
             const r = TILE_SIZE * 0.35;
-            if (powerUp.type === 'shield') {
+            if (powerUpPickup.type === 'shield') {
                 ctx.beginPath();
                 ctx.arc(cx, cy, r, 0, 2 * Math.PI);
                 ctx.fill();
@@ -1361,7 +1396,7 @@
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText('S', cx, cy);
-            } else if (powerUp.type === 'magnet') {
+            } else if (powerUpPickup.type === 'magnet') {
                 ctx.beginPath();
                 for (let i = 0; i < 4; i++) {
                     const angle = (i * Math.PI / 2) - Math.PI / 2;
@@ -1372,7 +1407,7 @@
                 }
                 ctx.closePath();
                 ctx.fill();
-            } else if (powerUp.type === 'slowmo') {
+            } else if (powerUpPickup.type === 'slowmo') {
                 ctx.beginPath();
                 ctx.moveTo(cx, cy - r);
                 ctx.lineTo(cx + r, cy);
@@ -1383,6 +1418,29 @@
             }
             
             ctx.restore();
+        }
+
+        function drawEyes(drawX, drawY, dx, dy, scleraColor, pupilColor) {
+            let ex1, ey1, ex2, ey2;
+            if (dx > 0) {
+                ex1 = drawX + 12; ey1 = drawY + 4;
+                ex2 = drawX + 12; ey2 = drawY + 12;
+            } else if (dx < 0) {
+                ex1 = drawX + 4; ey1 = drawY + 4;
+                ex2 = drawX + 4; ey2 = drawY + 12;
+            } else if (dy < 0) {
+                ex1 = drawX + 4; ey1 = drawY + 4;
+                ex2 = drawX + 12; ey2 = drawY + 4;
+            } else {
+                ex1 = drawX + 4; ey1 = drawY + 12;
+                ex2 = drawX + 12; ey2 = drawY + 12;
+            }
+            ctx.fillStyle = scleraColor;
+            ctx.beginPath(); ctx.arc(ex1, ey1, 4, 0, 2 * Math.PI); ctx.fill();
+            ctx.beginPath(); ctx.arc(ex2, ey2, 4, 0, 2 * Math.PI); ctx.fill();
+            ctx.fillStyle = pupilColor;
+            ctx.beginPath(); ctx.arc(ex1, ey1, 2, 0, 2 * Math.PI); ctx.fill();
+            ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
         }
 
         function drawSnake(t) {
@@ -1448,26 +1506,7 @@
                 }
 
                 if (index === 0) {
-                    let ex1, ey1, ex2, ey2;
-                    if (dx > 0) {
-                        ex1 = drawX + 12; ey1 = drawY + 4;
-                        ex2 = drawX + 12; ey2 = drawY + 12;
-                    } else if (dx < 0) {
-                        ex1 = drawX + 4; ey1 = drawY + 4;
-                        ex2 = drawX + 4; ey2 = drawY + 12;
-                    } else if (dy < 0) {
-                        ex1 = drawX + 4; ey1 = drawY + 4;
-                        ex2 = drawX + 12; ey2 = drawY + 4;
-                    } else {
-                        ex1 = drawX + 4; ey1 = drawY + 12;
-                        ex2 = drawX + 12; ey2 = drawY + 12;
-                    }
-                    ctx.fillStyle = 'white';
-                    ctx.beginPath(); ctx.arc(ex1, ey1, 4, 0, 2 * Math.PI); ctx.fill();
-                    ctx.beginPath(); ctx.arc(ex2, ey2, 4, 0, 2 * Math.PI); ctx.fill();
-                    ctx.fillStyle = 'black';
-                    ctx.beginPath(); ctx.arc(ex1, ey1, 2, 0, 2 * Math.PI); ctx.fill();
-                    ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
+                    drawEyes(drawX, drawY, dx, dy, 'white', 'black');
                 }
             });
 
@@ -1488,6 +1527,13 @@
                 ctx.beginPath();
                 ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + fraction * 2 * Math.PI);
                 ctx.stroke();
+
+                // Text label for accessibility
+                ctx.fillStyle = ringColor;
+                ctx.font = 'bold 9px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText('SNAP ' + Math.round(fraction * 100) + '%', cx, cy + radius + 3);
             }
 
             // Shield aura around head
@@ -1535,98 +1581,67 @@
                 ctx.fillRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
                 
                 if (index === 0) {
-                    let ex1, ey1, ex2, ey2;
-                    if (rivalDx > 0) {
-                        ex1 = drawX + 12; ey1 = drawY + 4;
-                        ex2 = drawX + 12; ey2 = drawY + 12;
-                    } else if (rivalDx < 0) {
-                        ex1 = drawX + 4; ey1 = drawY + 4;
-                        ex2 = drawX + 4; ey2 = drawY + 12;
-                    } else if (rivalDy < 0) {
-                        ex1 = drawX + 4; ey1 = drawY + 4;
-                        ex2 = drawX + 12; ey2 = drawY + 4;
-                    } else {
-                        ex1 = drawX + 4; ey1 = drawY + 12;
-                        ex2 = drawX + 12; ey2 = drawY + 12;
-                    }
-                    ctx.fillStyle = '#FFD700';
-                    ctx.beginPath(); ctx.arc(ex1, ey1, 4, 0, 2 * Math.PI); ctx.fill();
-                    ctx.beginPath(); ctx.arc(ex2, ey2, 4, 0, 2 * Math.PI); ctx.fill();
-                    ctx.fillStyle = '#000';
-                    ctx.beginPath(); ctx.arc(ex1, ey1, 2, 0, 2 * Math.PI); ctx.fill();
-                    ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
+                    drawEyes(drawX, drawY, rivalDx, rivalDy, '#FFD700', '#000');
                 }
             });
         }
 
         function drawTrails() {
-            if (cosmetics.trace === 'trace_ghost' && snake.length >= 4) {
-                const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
-                const trailColor = skin.head === 'rainbow' ? '#00FF00' : skin.head;
-                for (let t = 0; t < 3; t++) {
-                    const idx = snake.length - 1 - t;
-                    if (idx < 0) break;
-                    const seg = snake[idx];
-                    ctx.globalAlpha = 0.15 - t * 0.05;
-                    ctx.fillStyle = trailColor;
-                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
-                }
-                ctx.globalAlpha = 1;
+            const config = TRAIL_RENDER_CONFIG[cosmetics.trace];
+            if (!config || snake.length < 4) return;
+            const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+            for (let t = 0; t < 3; t++) {
+                const idx = snake.length - 1 - t;
+                if (idx < 0) break;
+                const seg = snake[idx];
+                ctx.globalAlpha = config.alphaStart - t * config.alphaDecay;
+                ctx.fillStyle = config.color(idx, skin);
+                ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
             }
-
-            if (cosmetics.trace === 'trace_fire' && snake.length >= 4) {
-                for (let t = 0; t < 3; t++) {
-                    const idx = snake.length - 1 - t;
-                    if (idx < 0) break;
-                    const seg = snake[idx];
-                    ctx.globalAlpha = 0.3 - t * 0.1;
-                    ctx.fillStyle = t === 0 ? '#FF6600' : t === 1 ? '#CC3300' : '#880000';
-                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
-                }
-                ctx.globalAlpha = 1;
-            }
-
-            if (cosmetics.trace === 'trace_neon' && snake.length >= 4) {
-                for (let t = 0; t < 3; t++) {
-                    const idx = snake.length - 1 - t;
-                    if (idx < 0) break;
-                    const seg = snake[idx];
-                    ctx.globalAlpha = 0.25 - t * 0.08;
-                    ctx.fillStyle = '#00FFFF';
-                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
-                }
-                ctx.globalAlpha = 1;
-            }
-
-            if (cosmetics.trace === 'trace_rainbow' && snake.length >= 4) {
-                for (let t = 0; t < 3; t++) {
-                    const idx = snake.length - 1 - t;
-                    if (idx < 0) break;
-                    const seg = snake[idx];
-                    const hue = ((idx * 20) + Date.now() * 0.05) % 360;
-                    ctx.globalAlpha = 0.25 - t * 0.08;
-                    ctx.fillStyle = 'hsl(' + hue + ', 100%, 50%)';
-                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
-                }
-                ctx.globalAlpha = 1;
-            }
-
-            if (cosmetics.trace === 'trace_galaxy' && snake.length >= 4) {
-                for (let t = 0; t < 3; t++) {
-                    const idx = snake.length - 1 - t;
-                    if (idx < 0) break;
-                    const seg = snake[idx];
-                    ctx.globalAlpha = 0.2 - t * 0.06;
-                    const galaxyHue = (Date.now() * 0.03 + idx * 30) % 360;
-                    ctx.fillStyle = 'hsl(' + galaxyHue + ', 80%, 60%)';
-                    ctx.fillRect(seg.x, seg.y, TILE_SIZE - 1, TILE_SIZE - 1);
-                }
-                ctx.globalAlpha = 1;
-            }
+            ctx.globalAlpha = 1;
         }
 
         function drawGame(t) {
             drawGrid();
+
+            // Mute indicator
+            if (muted) {
+                ctx.fillStyle = '#888';
+                ctx.font = '16px Arial';
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'top';
+                ctx.fillText('🔇', CANVAS_WIDTH - 8, 8);
+            }
+
+            // XP progress bar
+            if (level < 20) {
+                const xpForThisLevel = 100 * level * (level + 1) / 2;
+                const xpForPrevLevel = level > 1 ? 100 * (level - 1) * level / 2 : 0;
+                const xpInLevel = xp - xpForPrevLevel;
+                const xpNeeded = xpForThisLevel - xpForPrevLevel;
+                const progress = xpInLevel / xpNeeded;
+                
+                const barX = 5;
+                const barY = CANVAS_HEIGHT - 22;
+                const barWidth = 120;
+                const barHeight = 12;
+                
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4);
+                
+                ctx.fillStyle = 'rgba(255,215,0,0.3)';
+                ctx.fillRect(barX, barY, barWidth * Math.min(progress, 1), barHeight);
+                
+                ctx.strokeStyle = 'rgba(255,215,0,0.5)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(barX, barY, barWidth, barHeight);
+                
+                ctx.fillStyle = '#FFD700';
+                ctx.font = 'bold 9px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('Lv.' + level + ' ' + xpInLevel + '/' + xpNeeded, barX + barWidth/2, barY + barHeight/2);
+            }
 
             // Draw prestige border
             if (cosmetics.border && cosmetics.border !== 'border_none') {
@@ -1646,7 +1661,7 @@
 
             drawObstacles();
             drawFood();
-            drawPowerUp();
+            drawPowerUpPickup();
             drawSnake(t);
             drawRival(t);
             drawTrails();
@@ -1685,10 +1700,28 @@
                 ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
             }
 
+            // Daily challenge HUD
+            if (gameMode === 'daily' && gameState === 'playing') {
+                const seed = getDailySeed();
+                const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
+                const progress = getDailyProgress(challenge);
+                ctx.fillStyle = '#FFD700';
+                ctx.font = '11px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText('\uD83C\uDFAF ' + challenge.desc, CANVAS_WIDTH / 2, 2);
+                if (challenge.progressTarget) {
+                    const fraction = Math.min(progress / challenge.progressTarget, 1);
+                    ctx.fillStyle = fraction >= 1 ? '#4CAF50' : '#AAA';
+                    ctx.font = '10px Arial';
+                    ctx.fillText('Progress: ' + Math.min(progress, challenge.progressTarget) + '/' + challenge.progressTarget, CANVAS_WIDTH / 2, 18);
+                }
+            }
+
             // Active power-up HUD
             if (powerUpType) {
                 const config = POWERUP_TYPES[powerUpType];
-                const timerDuration = powerUpType === 'shield' ? 8000 : POWERUP_TYPES[powerUpType].duration;
+                const timerDuration = POWERUP_TYPES[powerUpType].duration;
                 const fraction = Math.max(0, powerUpTimer / timerDuration);
                 const barX = 5;
                 const barY = 5;
@@ -1732,6 +1765,11 @@
 
         function updateGame() {
             if (gameState !== 'playing') return;
+
+            // Zen mode: score = snake length
+            if (gameMode === 'zen') {
+                score = snake.length;
+            }
 
             prevSnake = snake.map(s => ({ x: s.x, y: s.y }));
             snakeGrew = false;
@@ -1824,14 +1862,23 @@
                     comboCount = 0;
                 }
                 lastEatTime = now;
+                clearTimeout(comboFadeTimer);
+                comboFadeTimer = setTimeout(function() {
+                    document.getElementById('comboDisplay').textContent = '';
+                }, 3500);
                 if (comboCount > stats.maxCombo) stats.maxCombo = comboCount;
                 if (comboCount > sessionMaxCombo) sessionMaxCombo = comboCount;
 
                 // XP award for eating
                 const tier = FOOD_TIERS[eatenType] || FOOD_TIERS.common;
-                const foodXP = tier.xp;
-                const comboMul = 1 + comboCount * 0.5;
-                awardXP(Math.round(foodXP * comboMul));
+                let foodXP = tier.xp;
+                if (gameMode === 'zen') {
+                    foodXP = 10; // Flat XP in Zen mode
+                } else {
+                    const comboMul = 1 + comboCount * 0.5;
+                    foodXP = Math.round(foodXP * comboMul);
+                }
+                awardXP(foodXP);
 
                 // Track longest length
                 if (snake.length > stats.longestLength) stats.longestLength = snake.length;
@@ -1841,6 +1888,10 @@
                 eatAnimTimer = 150;
                 spawnParticles(wrappedHead.x, wrappedHead.y, tier.pCount, tierColor);
                 if (gameMode !== 'zen') score += tier.pts;
+                // Combo score bonus
+                if (comboCount > 0 && gameMode !== 'zen') {
+                    score += Math.floor(comboCount * 2);
+                }
                 if (gameMode === 'snap') {
                     shrinkTimer = snapDuration;
                     if (eatenType === 'rare' || eatenType === 'epic') {
@@ -1850,18 +1901,17 @@
                     }
                     shrinkTimer += MODE_CONFIG.snap.speed;
                 }
+                vibrate(15);
                 playSound(tier.sound);
                 // speed food still has the special speed boost behavior
                 if (eatenType === 'speed') {
                     tickInterval = Math.max(MIN_SPEED, getSpeed() - 30);
-                    clearInterval(gameInterval);
-                    gameInterval = setInterval(updateGame, tickInterval);
+                    restartGameInterval(tickInterval);
                     const ci = gameInterval;
                     setTimeout(() => {
                         if (gameInterval === ci && gameState === 'playing') {
                             tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
-                            clearInterval(gameInterval);
-                            gameInterval = setInterval(updateGame, tickInterval);
+                            restartGameInterval(tickInterval);
                         }
                     }, 2000);
                 }
@@ -1871,15 +1921,14 @@
                 if (!food) { gameOver(); return; }
                 if (eatenType !== 'speed') {
                     tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
-                    clearInterval(gameInterval);
-                    gameInterval = setInterval(updateGame, tickInterval);
+                    restartGameInterval(tickInterval);
                 }
             }
 
             // Check power-up collection
-            if (powerUp && wrappedHead.x === powerUp.x && wrappedHead.y === powerUp.y) {
-                activatePowerUp(powerUp.type);
-                powerUp = null;
+            if (powerUpPickup && wrappedHead.x === powerUpPickup.x && wrappedHead.y === powerUpPickup.y) {
+                activatePowerUp(powerUpPickup.type);
+                powerUpPickup = null;
                 spawnParticles(wrappedHead.x, wrappedHead.y, 12, '#FFFFFF');
                 playSound('bonus');
             }
@@ -1898,13 +1947,14 @@
                     playSound('eat');
                 }
                 
-                // Duration decreases by 20% every ~10 seconds of play
+                // Duration decreases every ~12 seconds of play
                 snapTimeSinceDecrease += MODE_CONFIG.snap.speed;
-                if (snapTimeSinceDecrease >= 10000) {
-                    snapDuration = Math.floor(snapDuration * 0.8);
-                    snapTimeSinceDecrease -= 10000;
+                if (snapTimeSinceDecrease >= 12000) {
+                    snapDuration = Math.floor(snapDuration * 0.88);
+                    snapTimeSinceDecrease -= 12000;
                     snapLevel++;
                     snapLevelUpFlash = 1500; // show "LEVEL N!" for 1.5s
+                    if (snapDuration < 800) snapDuration = 800;
                 }
             }
 
@@ -1931,8 +1981,9 @@
                     } else {
                         newFY += dy_food > 0 ? TILE_SIZE : -TILE_SIZE;
                     }
-                    const wrappedFX = ((newFX % CANVAS_WIDTH) + CANVAS_WIDTH) % CANVAS_WIDTH;
-                    const wrappedFY = ((newFY % CANVAS_HEIGHT) + CANVAS_HEIGHT) % CANVAS_HEIGHT;
+                    const wrappedPos = wrapPosition({ x: newFX, y: newFY });
+                    const wrappedFX = wrappedPos.x;
+                    const wrappedFY = wrappedPos.y;
                     if (!snake.some(s => s.x === wrappedFX && s.y === wrappedFY) &&
                         !obstacles.some(o => o.x === wrappedFX && o.y === wrappedFY)) {
                         food.x = wrappedFX;
@@ -1942,7 +1993,7 @@
             }
 
             // Power-up spawn timer
-            if (gameMode !== 'zen' && !powerUp && !powerUpType) {
+            if (gameMode !== 'zen' && !powerUpPickup && !powerUpType) {
                 powerUpSpawnCounter++;
                 if (powerUpSpawnCounter >= 500) {
                     powerUpSpawnCounter = 0;
@@ -2038,7 +2089,7 @@
 
         function syncDailyState() {
             const today = new Date();
-            const dateStr = today.getFullYear() + '-' + (today.getMonth()+1) + '-' + today.getDate();
+            const dateStr = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
             let lastDate;
             try { lastDate = localStorage.getItem('snake_daily_date') || ''; } catch(e) { lastDate = ''; }
             
@@ -2062,6 +2113,14 @@
                 try { done = localStorage.getItem('snake_daily_done') === 'true'; } catch(e) {}
                 dailyDone = done;
             }
+        }
+
+        function showFoodLegend() {
+            const el = document.getElementById('toast');
+            if (!el) return;
+            el.textContent = '\uD83C\uDF4E Common=10pts Epic=50pts Bonus=30pts Rare=20pts Uncommon=15pts Speed=5pts(speed!)';
+            el.style.display = 'block';
+            setTimeout(function() { el.style.display = 'none'; }, 5000);
         }
 
         function queueToast(message, duration) {
@@ -2334,9 +2393,8 @@
                     return;
                 }
                 if (gameState === 'gameover') {
-                    gameState = 'idle';
-                    drawGame(1);
-                    visualDirty = true;
+                    resetGame();
+                    startGame();
                     return;
                 }
             }
@@ -2383,6 +2441,7 @@
 
             if (e.key === 'p' || e.key === 'P' || e.key === ' ') {
                 if (gameState === 'playing') {
+                    autoPaused = false;
                     gameState = 'paused';
                     clearInterval(gameInterval);
                     gameInterval = null;
@@ -2391,20 +2450,8 @@
                     drawGame(1);
                     visualDirty = true;
                 } else if (gameState === 'paused') {
-                    gameState = 'playing';
-                    if (sessionPauseStart) {
-                        const pauseDuration = Date.now() - sessionPauseStart;
-                        sessionPausedTime += pauseDuration;
-                        if (gameMode === 'timeAttack') {
-                            timeAttackEnd += pauseDuration;
-                        }
-                        sessionPauseStart = 0;
-                    }
-                    tickInterval = slowMoActive ? getSpeed() * 2 : getSpeed();
-                    gameInterval = setInterval(updateGame, tickInterval);
-                    playSound('resume');
-                    drawGame(1);
-                    visualDirty = true;
+                    resumeGame();
+                    return;
                 }
                 return;
             }
@@ -2412,6 +2459,7 @@
             if (e.key === 'm' || e.key === 'M') {
                 muted = muted ? 0 : 1;
                 try { localStorage.setItem('snake_muted', muted); } catch(e) { /* localStorage unavailable */ }
+                queueToast(muted ? '\uD83D\uDD07 Muted' : '\uD83D\uDD0A Sound On', 1500);
                 return;
             }
 
@@ -2421,6 +2469,12 @@
                 return;
             }
             if (e.key === 'Escape') {
+                if (gameState === 'gameover') {
+                    gameState = 'idle';
+                    drawGame(1);
+                    visualDirty = true;
+                    return;
+                }
                 closeAllPanels();
                 return;
             }
@@ -2435,6 +2489,28 @@
             if (e.key === 'f' || e.key === 'F') {
                 e.preventDefault();
                 showAchievementsPanel();
+                return;
+            }
+
+            if (e.key === 'h' || e.key === 'H') {
+                const ref = 'Arrows/WASD=Move Space=Pause M=Mute H=Help Tab=Stats F=Achiev C=Cosm Esc=Back';
+                const toastEl = document.getElementById('toast');
+                if (toastEl) {
+                    toastEl.textContent = ref;
+                    toastEl.style.display = 'block';
+                    setTimeout(function() {
+                        if (toastEl && toastEl.textContent === ref) {
+                            toastEl.style.display = 'none';
+                        }
+                    }, 4000);
+                }
+                return;
+            }
+
+            if (e.key === 'l' || e.key === 'L') {
+                if (gameState === 'idle') {
+                    showFoodLegend();
+                }
                 return;
             }
 
@@ -2542,6 +2618,7 @@
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden && gameState === 'playing') {
+                autoPaused = true;
                 sessionPauseStart = Date.now();
                 gameState = 'paused';
                 clearInterval(gameInterval);
@@ -2549,6 +2626,9 @@
                 playSound('pause');
                 drawGame(1);
                 visualDirty = true;
+            } else if (!document.hidden && gameState === 'paused' && autoPaused) {
+                autoPaused = false;
+                resumeGame();
             }
         });
 
