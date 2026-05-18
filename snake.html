@@ -1491,6 +1491,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawOverlay(text, subtext) {
+            ctx.save();
             if (gameState === 'idle') {
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -1556,6 +1557,7 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.font = '12px Arial';
                     ctx.fillText('Swipe ↑↓ to change mode', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 24);
                 }
+                ctx.restore();
                 return;
             }
             ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
@@ -1585,6 +1587,7 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.font = '13px Arial';
                 ctx.fillText('Attempts remaining: ' + dailyAttempts, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 100);
             }
+            ctx.restore();
         }
 
         function drawGrid() {
@@ -2874,6 +2877,12 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
             if (e.key === 'Escape') {
+                // Close help overlay first if open
+                if (helpOverlayVisible) {
+                    helpOverlayVisible = false;
+                    visualDirty = true;
+                    return;
+                }
                 if (gameState === 'gameover') {
                     gameState = 'idle';
                     drawGame(1);
@@ -2899,11 +2908,19 @@ const TRAIL_RENDER_CONFIG = {
 
             if (e.key === 'h' || e.key === 'H') {
                 e.preventDefault();
+                if (gameState !== 'idle') {
+                    // Help overlay is only meaningful on the menu screen
+                    if (helpOverlayVisible) {
+                        helpOverlayVisible = false;
+                        visualDirty = true;
+                    }
+                    return;
+                }
                 if (helpOverlayVisible) {
                     helpOverlayVisible = false;
+                    visualDirty = true;
                 } else {
                     helpOverlayVisible = true;
-                    // Force a redraw so overlay appears immediately
                     visualDirty = true;
                 }
                 return;
