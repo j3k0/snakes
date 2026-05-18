@@ -708,23 +708,27 @@ const TRAIL_RENDER_CONFIG = {
                     const storedDate = saveManager.get('snake_daily_date', '');
                     let streak = saveManager.getInt('snake_streak_count', 0);
                     const todayStr = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
-                    if (storedDate) {
-                        const storedDateStr = storedDate;
-                        if (storedDateStr !== todayStr) {
-                            const parts = storedDate.split('-');
-                            const storedDateObj = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-                            const yesterday = new Date(today);
-                            yesterday.setDate(yesterday.getDate() - 1);
-                            const yesterdayStr = yesterday.getFullYear() + '-' + String(yesterday.getMonth()+1).padStart(2, '0') + '-' + String(yesterday.getDate()).padStart(2, '0');
-                            if (storedDateStr === yesterdayStr) {
-                                saveManager.set('snake_streak_count', streak + 1);
-                            } else {
-                                saveManager.set('snake_streak_count', 0);
-                            }
+
+                    if (storedDate && storedDate !== todayStr) {
+                        // Different day than last play — check if consecutive
+                        const parts = storedDate.split('-');
+                        const storedDateObj = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+                        const yesterday = new Date(today);
+                        yesterday.setDate(yesterday.getDate() - 1);
+                        const yesterdayStr = yesterday.getFullYear() + '-' + String(yesterday.getMonth()+1).padStart(2, '0') + '-' + String(yesterday.getDate()).padStart(2, '0');
+                        if (storedDate === yesterdayStr) {
+                            streak++;
+                        } else {
+                            streak = 1; // Broken streak, restart
                         }
-                    } else {
-                        saveManager.set('snake_streak_count', 1);
+                        saveManager.set('snake_streak_count', streak);
+                    } else if (!storedDate) {
+                        // First ever play
+                        streak = 1;
+                        saveManager.set('snake_streak_count', streak);
                     }
+                    // Always save the date so next day's comparison works
+                    saveManager.set('snake_daily_date', todayStr);
             }
             // Check streak cosmetic unlocks
             const streak = saveManager.getInt('snake_streak_count', 0);
@@ -2476,7 +2480,6 @@ const TRAIL_RENDER_CONFIG = {
                 // New day — reset attempts
                 dailyAttempts = 3;
                 dailyDone = false;
-                saveManager.set('snake_daily_date', dateStr);
                 saveManager.set('snake_daily_done', 'false');
                 saveManager.set('snake_daily_attempts_remaining', 3);
             } else {
