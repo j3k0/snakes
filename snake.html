@@ -44,11 +44,34 @@
         @media (pointer: coarse) {
           #dpad { display: flex !important; justify-content: center; }
         }
+        #menuFooter {
+            display: none;
+            margin-top: 4px;
+            text-align: center;
+            user-select: none;
+            line-height: 1.5;
+            font-family: Arial, sans-serif;
+            max-width: 400px;
+        }
+        .prestige-gold { color: #FFD700; font-weight: bold; font-size: 14px; }
+        .prestige-purple { color: #AA44FF; font-weight: bold; font-size: 13px; }
+        .prestige-gray { color: #888; font-size: 14px; }
+        .shortcut-dim { color: #555; font-size: 13px; }
+        @media (pointer: coarse) {
+            #menuFooter { font-size: 12px; line-height: 1.3; max-width: calc(100vw - 20px); }
+        }
+        @media (pointer: coarse) and (max-height: 700px) {
+            #gameCanvas { max-height: 55vh; }
+        }
     </style>
 </head>
 <body>
     <h1>Snake Game</h1>
     <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <div id="menuFooter">
+      <div id="prestigeInfo"></div>
+      <div id="shortcutInfo"></div>
+    </div>
     <div id="dpad" style="display:none;margin-top:10px;touch-action:manipulation;user-select:none;-webkit-user-select:none;">
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
         <button class="dpad-btn" data-key="ArrowUp" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▲</button>
@@ -76,6 +99,8 @@
         const CANVAS_HEIGHT = 400;
         const BASE_SPEED = 120;
         const MIN_SPEED = 50;
+        const MAX_OBSTACLE_PERCENT = 0.20;
+        const OBSTACLE_SPAWN_INTERVAL = 200;
 
         function ensureGridCache() {
             const theme = GRID_THEMES[cosmetics.grid] || GRID_THEMES.grid_classic;
@@ -189,11 +214,15 @@
         let snapLevel = 1;                 // current snap difficulty level (increments every 10s)
         let snapLevelUpFlash = 0;
         let helpOverlayVisible = false;
+        let welcomeOverlay = !saveManager.get('snake_has_played', '');
         let lastDeathCause = '';
         let lastComboMilestone = 0;
         let sessionSummary = null;
         let sessionSummaryTimer = 0;          // countdown timer for "LEVEL N!" flash display
         let levelUpFlash = 0;
+        let pauseMenuSelection = 0;
+        let pauseConfirmPending = false;
+        let pauseConfirmAction = null;
 
         let stats = loadStats();
         let xp = saveManager.getInt('snake_xp', 0);
@@ -230,6 +259,9 @@
         let rivalDy = 0;
         let rivalActive = false;
         let rivalRespawnTimer = 0;
+        let obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
+        let newObstacleFlash = [];
+        let newObstacleToastTimer = 0;
         const RIVAL_MAX_LENGTH = 20;
 
         let toastQueue = [];
@@ -415,6 +447,10 @@
             snap: {
                 name:'Snap', speed:90, selfCollision:true, wallDeath:false, wrap:true,
                 timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+            },
+            walled: {
+                name:'Walled', speed:'dynamic', selfCollision:true, wallDeath:true, wrap:false,
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
             }
         };
 
@@ -448,13 +484,21 @@ const TRAIL_RENDER_CONFIG = {
   trace_streak_3: { alphaStart:0.25, alphaDecay:0.08, color: () => '#FF6B35' },
 };
 
+        const OBSTACLE_PATTERNS = [
+            { tiles: [{dx:0, dy:0}], weight: 0.40, name: 'single' },
+            { tiles: [{dx:0, dy:0}, {dx:TILE_SIZE, dy:0}], weight: 0.15, name: 'h_left' },
+            { tiles: [{dx:0, dy:0}, {dx:-TILE_SIZE, dy:0}], weight: 0.15, name: 'h_right' },
+            { tiles: [{dx:0, dy:0}, {dx:0, dy:TILE_SIZE}], weight: 0.15, name: 'v_down' },
+            { tiles: [{dx:0, dy:0}, {dx:0, dy:-TILE_SIZE}], weight: 0.15, name: 'v_up' },
+        ];
+
         const POWERUP_TYPES = {
             shield: { name: 'Shield', color: '#4488FF', shape: 'circle', duration: 6000 },
             magnet: { name: 'Magnet', color: '#44FF44', shape: 'star', duration: 5000 },
             slowmo: { name: 'Slow-Motion', color: '#AA44FF', shape: 'diamond', duration: 4000 },
         };
 
-        const MODE_ORDER = ['classic', 'timeAttack', 'snap', 'zen', 'daily'];
+        const MODE_ORDER = ['classic', 'timeAttack', 'snap', 'walled', 'zen', 'daily'];
 
         const DAILY_CHALLENGES = [
           { desc:'Score 200+ points', check:function(s,st){return s>=200;}, reward:200, progressKey:'score', progressTarget:200 },
@@ -506,11 +550,12 @@ const TRAIL_RENDER_CONFIG = {
 
         function getModeDesc(mode) {
             const descs = {
-                classic: 'Standard Snake. Wall wrapping, speed increases with score.',
+                classic: 'Standard Snake. Speed increases with score. Board closes in over time.',
                 timeAttack: 'Score max points in 60 seconds. Fixed speed, bonus food worth +50.',
                 zen: 'No death from collisions. Relax and grow. Score = snake length.',
                 daily: 'Complete today\'s unique challenge! 3 attempts per day.',
-                snap: 'Snake shrinks every 3s — keep eating to survive!'
+                snap: 'Snake shrinks every 3s — keep eating to survive!',
+                walled: 'Classic Snake with walls. Hitting the edge kills you. No second chances.'
             };
             return descs[mode] || '';
         }
@@ -715,6 +760,12 @@ const TRAIL_RENDER_CONFIG = {
             rivalActive = false;
             rivalRespawnTimer = 0;
             speedBoostCounter = 0;
+            obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
+            newObstacleFlash = [];
+            newObstacleToastTimer = 0;
+            pauseMenuSelection = 0;
+            pauseConfirmPending = false;
+            pauseConfirmAction = null;
 
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
@@ -729,6 +780,7 @@ const TRAIL_RENDER_CONFIG = {
             gameInterval = null;
             nextDirection = null;
             updateScoreDisplay();
+            updateMenuFooter();
             drawGame(1);
             visualDirty = true;
             timeAttackEnd = 0;
@@ -748,6 +800,44 @@ const TRAIL_RENDER_CONFIG = {
                 highScoreEl.textContent = 'Best (' + MODE_CONFIG[gameMode].name + '): ' + modeHighScores[gameMode];
             } else {
                 highScoreEl.textContent = 'Best: ' + highScore;
+            }
+        }
+
+        function updateMenuFooter() {
+            var footer = document.getElementById('menuFooter');
+            if (!footer) return;
+            if (gameState !== 'idle') {
+                footer.style.display = 'none';
+                return;
+            }
+            footer.style.display = 'block';
+            var prestigeInfo = document.getElementById('prestigeInfo');
+            var shortcutInfo = document.getElementById('shortcutInfo');
+            var info = '';
+            if (pinnacleRank > 0) {
+                info += '<span class="prestige-gold">\u26A1 Pinnacle ' + pinnacleRank + ' (+' + (pinnacleRank * 2) + '%)</span> ';
+            } else if (prestigeLevel > 0) {
+                info += '<span class="prestige-gold">\u2B50 Prestige ' + prestigeLevel + '</span> ';
+            }
+            if (xpOvercharge > 0) {
+                var bonusPct = Math.min(50, Math.floor(xpOvercharge / 1000));
+                info += '<span class="prestige-purple">\u26A1 Overcharge: ' + xpOvercharge.toLocaleString() + ' (+' + bonusPct + '%)</span> ';
+            }
+            info += '<span class="prestige-gray">Lv.' + level + ' | XP: ' + xp.toLocaleString() + '</span> ';
+            if (level >= 20) {
+                if (pinnacleRank > 0) {
+                    info += '<span class="prestige-gold">X \u2192 Pinnacle Rank ' + (pinnacleRank + 1) + ' (+2% Score)</span>';
+                } else if (prestigeLevel >= 5) {
+                    info += '<span class="prestige-gold">X \u2192 Pinnacle Rank 1 (+2% Score)</span>';
+                } else {
+                    info += '<span class="prestige-gold">Press X to Prestige</span>';
+                }
+            }
+            prestigeInfo.innerHTML = info;
+            if (hasTouch) {
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap to Start | Swipe \u2191\u2193 to change mode</span>';
+            } else {
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics</span>';
             }
         }
 
@@ -815,6 +905,7 @@ const TRAIL_RENDER_CONFIG = {
             if (gameMode === 'zen') zenActive = true;
             sessionStartTime = Date.now();
             gameState = 'playing';
+            updateMenuFooter();
             tickInterval = getEffectiveSpeed();
             gameInterval = setInterval(updateGame, tickInterval);
             if (gameMode === 'classic' || gameMode === 'timeAttack') {
@@ -839,6 +930,8 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function wrapPosition(pos) {
+            const mc = MODE_CONFIG[gameMode];
+            if (!mc.wrap) return pos;
             return {
                 x: ((pos.x % CANVAS_WIDTH) + CANVAS_WIDTH) % CANVAS_WIDTH,
                 y: ((pos.y % CANVAS_HEIGHT) + CANVAS_HEIGHT) % CANVAS_HEIGHT
@@ -851,44 +944,93 @@ const TRAIL_RENDER_CONFIG = {
             gameInterval = setInterval(updateGame, speed || tickInterval);
         }
 
+        function pickWeightedPattern() {
+            const rand = Math.random();
+            let cumulative = 0;
+            for (const pattern of OBSTACLE_PATTERNS) {
+                cumulative += pattern.weight;
+                if (rand < cumulative) return pattern;
+            }
+            return OBSTACLE_PATTERNS[0];
+        }
+
+        function findFreeTile(headX, headY) {
+            const cols = CANVAS_WIDTH / TILE_SIZE, rows = CANVAS_HEIGHT / TILE_SIZE;
+            const maxObs = Math.floor((cols * rows) * MAX_OBSTACLE_PERCENT);
+            if (obstacles.length >= maxObs) return null;
+            for (let attempt = 0; attempt < 50; attempt++) {
+                const x = Math.floor(Math.random() * cols) * TILE_SIZE;
+                const y = Math.floor(Math.random() * rows) * TILE_SIZE;
+                if (Math.abs(x - headX) + Math.abs(y - headY) < 3 * TILE_SIZE) continue;
+                if (snake.some(s => s.x === x && s.y === y)) continue;
+                if (obstacles.some(o => o.x === x && o.y === y)) continue;
+                if (food && food.x === x && food.y === y) continue;
+                if (rivalActive && rivalSnake.some(s => s.x === x && s.y === y)) continue;
+                return { x, y };
+            }
+            return null;
+        }
+
         function generateObstacles() {
             obstacles = [];
-            if (gameMode === 'zen') return;
+            if (gameMode === 'zen' || gameMode === 'walled') return;
             const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
-            const count = 3 + Math.floor(Math.random() * 6); // 3-8 obstacles
-            const maxAttempts = 50;
+            const maxObs = Math.floor(totalTiles * MAX_OBSTACLE_PERCENT);
+            const count = Math.min(maxObs, 3 + Math.floor(Math.random() * 6));
             const headX = 10 * TILE_SIZE;
             const headY = 10 * TILE_SIZE;
+            
             for (let i = 0; i < count; i++) {
                 let placed = false;
-                for (let attempt = 0; attempt < maxAttempts; attempt++) {
-                    const obsX = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
-                    const obsY = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
-                    // Check minimum distance from snake head (3 tiles)
-                    const dist = Math.abs(obsX - headX) + Math.abs(obsY - headY);
+                for (let attempt = 0; attempt < 20; attempt++) {
+                    const pattern = pickWeightedPattern();
+                    const anchorX = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                    const anchorY = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                    
+                    const dist = Math.abs(anchorX - headX) + Math.abs(anchorY - headY);
                     if (dist < 3 * TILE_SIZE) continue;
-                    // Check overlap with snake
-                    if (snake.some(s => s.x === obsX && s.y === obsY)) continue;
-                    // Check overlap with food
-                    if (food && food.x === obsX && food.y === obsY) continue;
-                    // Check overlap with existing obstacles
-                    if (obstacles.some(o => o.x === obsX && o.y === obsY)) continue;
-                    obstacles.push({ x: obsX, y: obsY });
+                    
+                    let conflict = false;
+                    for (const offset of pattern.tiles) {
+                        const tx = anchorX + offset.dx;
+                        const ty = anchorY + offset.dy;
+                        if (tx < 0 || tx >= CANVAS_WIDTH || ty < 0 || ty >= CANVAS_HEIGHT) { conflict = true; break; }
+                        if (snake.some(s => s.x === tx && s.y === ty)) { conflict = true; break; }
+                        if (obstacles.some(o => o.x === tx && o.y === ty)) { conflict = true; break; }
+                        if (food && food.x === tx && food.y === ty) { conflict = true; break; }
+                    }
+                    if (conflict) continue;
+                    
+                    for (const offset of pattern.tiles) {
+                        obstacles.push({ x: anchorX + offset.dx, y: anchorY + offset.dy });
+                    }
                     placed = true;
                     break;
                 }
-                if (!placed) break; // Can't place more, continue with what we have
+                
+                if (!placed) {
+                    for (let attempt = 0; attempt < 20; attempt++) {
+                        const obsX = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                        const obsY = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                        const dist = Math.abs(obsX - headX) + Math.abs(obsY - headY);
+                        if (dist < 3 * TILE_SIZE) continue;
+                        if (snake.some(s => s.x === obsX && s.y === obsY)) continue;
+                        if (obstacles.some(o => o.x === obsX && o.y === obsY)) continue;
+                        if (food && food.x === obsX && food.y === obsY) continue;
+                        obstacles.push({ x: obsX, y: obsY });
+                        placed = true;
+                        break;
+                    }
+                }
             }
-            // Safety: if obstacles would leave < 50% of board open, reduce
-            const minOpen = totalTiles / 2;
-            if (totalTiles - obstacles.length - snake.length < minOpen) {
-                obstacles = obstacles.slice(0, Math.max(0, Math.floor(totalTiles / 4)));
+            if (obstacles.length > maxObs) {
+                obstacles = obstacles.slice(0, maxObs);
             }
         }
 
         function spawnRival() {
             if (rivalActive) return;
-            if (gameMode === 'zen' || gameMode === 'snap' || gameMode === 'daily') return;
+            if (gameMode === 'zen' || gameMode === 'snap' || gameMode === 'daily' || gameMode === 'walled') return;
             
             const startX = 10 * TILE_SIZE;
             const startY = 10 * TILE_SIZE;
@@ -1113,6 +1255,7 @@ const TRAIL_RENDER_CONFIG = {
             clearInterval(gameInterval);
             gameInterval = null;
             gameState = 'gameover';
+            updateMenuFooter();
             rivalSnake = [];
             rivalActive = false;
             rivalRespawnTimer = 0;
@@ -1161,6 +1304,7 @@ const TRAIL_RENDER_CONFIG = {
             clearInterval(gameInterval);
             gameInterval = null;
             gameState = 'gameover';
+            updateMenuFooter();
             score = snake.length;
             finalizeSession(true);
             checkAchievements(score);
@@ -1405,6 +1549,71 @@ const TRAIL_RENDER_CONFIG = {
             ctx.fillText('Press H or any action to close', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 10);
         }
 
+        function drawWelcomeOverlay() {
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.80)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            var bw = 360, bh = 250;
+            var bx = (CANVAS_WIDTH - bw) / 2, by = (CANVAS_HEIGHT - bh) / 2;
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(bx, by, bw, bh);
+            ctx.strokeStyle = '#FFD700';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(bx, by, bw, bh);
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 22px Arial';
+            ctx.fillText('🐍 Welcome to Snake!', CANVAS_WIDTH / 2, by + 30);
+
+            ctx.fillStyle = '#CCC';
+            ctx.font = '13px Arial';
+
+            var panelY = by + 70;
+            var panelSpacing = 55;
+
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 13px Arial';
+            ctx.fillText('Controls', CANVAS_WIDTH / 2, panelY);
+            ctx.fillStyle = '#CCC';
+            ctx.font = '12px Arial';
+            if (isMobile || hasTouch) {
+                ctx.fillText('👆 Swipe to move | Tap ⏸ to pause', CANVAS_WIDTH / 2, panelY + 18);
+                ctx.fillText('Tap canvas to start', CANVAS_WIDTH / 2, panelY + 34);
+            } else {
+                ctx.fillText('⌨️ Arrow keys to move | P to pause', CANVAS_WIDTH / 2, panelY + 18);
+                ctx.fillText('Enter to start', CANVAS_WIDTH / 2, panelY + 34);
+            }
+
+            var p2Y = panelY + panelSpacing;
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 13px Arial';
+            ctx.fillText('Food', CANVAS_WIDTH / 2, p2Y);
+            ctx.fillStyle = '#CCC';
+            ctx.font = '12px Arial';
+            ctx.fillText('🍎 Different colored food = different points.', CANVAS_WIDTH / 2, p2Y + 18);
+            ctx.fillText('Speed food gives a burst!', CANVAS_WIDTH / 2, p2Y + 34);
+
+            var p3Y = p2Y + panelSpacing;
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 13px Arial';
+            ctx.fillText('Progression', CANVAS_WIDTH / 2, p3Y);
+            ctx.fillStyle = '#CCC';
+            ctx.font = '12px Arial';
+            ctx.fillText('⭐ Eat food to earn XP and unlock cosmetics.', CANVAS_WIDTH / 2, p3Y + 18);
+            ctx.fillText('Press C for cosmetics!', CANVAS_WIDTH / 2, p3Y + 34);
+
+            ctx.fillStyle = '#666';
+            ctx.font = '11px Arial';
+            ctx.fillText('Press any key or tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+
+            ctx.restore();
+        }
+
         function animateVisuals(timestamp) {
             if (!lastFrameTime) lastFrameTime = timestamp;
             const delta = Math.min(timestamp - lastFrameTime, 100);
@@ -1428,6 +1637,13 @@ const TRAIL_RENDER_CONFIG = {
             if (snapLevelUpFlash > 0) snapLevelUpFlash = Math.max(0, snapLevelUpFlash - delta);
             if (sessionSummaryTimer > 0) sessionSummaryTimer = Math.max(0, sessionSummaryTimer - delta);
             if (touchIndicatorTimer > 0) touchIndicatorTimer = Math.max(0, touchIndicatorTimer - delta);
+
+            // New obstacle flash timer decay
+            for (let i = newObstacleFlash.length - 1; i >= 0; i--) {
+                newObstacleFlash[i].timer -= delta;
+                if (newObstacleFlash[i].timer <= 0) newObstacleFlash.splice(i, 1);
+            }
+            if (newObstacleToastTimer > 0) newObstacleToastTimer -= delta;
 
             if (flashOverlay) {
                 flashOverlay.alpha -= delta * 0.004;
@@ -1494,11 +1710,22 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.font = 'bold 12px Arial';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'top';
-                ctx.fillText('📊 Session Summary', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 105);
+                ctx.fillText('\uD83D\uDCCA Session Summary', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 105);
                 ctx.fillStyle = '#CCC';
                 ctx.font = '11px Arial';
                 ctx.fillText('Score: ' + sessionSummary.score + '  |  Time: ' + sessionSummary.time + 's  |  Food: ' + sessionSummary.food, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 88);
                 ctx.fillText('Best Combo: ' + sessionSummary.combo + 'x  |  XP Earned: +' + sessionSummary.xp, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 73);
+                ctx.restore();
+            }
+
+            // New obstacle toast
+            if (newObstacleToastTimer > 0 && gameState === 'playing') {
+                ctx.save();
+                ctx.font = '16px Arial';
+                ctx.fillStyle = 'rgba(255, 150, 50, ' + Math.min(1, newObstacleToastTimer / 500) + ')';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText('\u26A0 New obstacles!', CANVAS_WIDTH / 2, 10);
                 ctx.restore();
             }
 
@@ -1570,6 +1797,11 @@ const TRAIL_RENDER_CONFIG = {
         function drawOverlay(text, subtext) {
             ctx.save();
             if (gameState === 'idle') {
+                if (welcomeOverlay) {
+                    drawWelcomeOverlay();
+                    ctx.restore();
+                    return;
+                }
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
                 ctx.fillStyle = '#FFF';
@@ -1581,7 +1813,7 @@ const TRAIL_RENDER_CONFIG = {
                 for (let i = 0; i < MODE_ORDER.length; i++) {
                     const mode = MODE_ORDER[i];
                     const cfg = MODE_CONFIG[mode];
-                    const y = 130 + i * 55;
+                    const y = 120 + i * 45;
                     const isSelected = i === modeSelectIndex;
                     ctx.fillStyle = isSelected ? '#FFD700' : '#666';
                     ctx.font = isSelected ? 'bold 22px Arial' : '18px Arial';
@@ -1620,50 +1852,54 @@ const TRAIL_RENDER_CONFIG = {
                     } catch(e) {}
                 }
 
-                if (prestigeLevel > 0 || pinnacleRank > 0) {
-                    ctx.fillStyle = '#FFD700';
-                    ctx.font = 'bold 14px Arial';
-                    if (pinnacleRank > 0) {
-                        ctx.fillText('\u26A1 Pinnacle ' + pinnacleRank + ' (+' + (pinnacleRank * 2) + '%)', CANVAS_WIDTH / 2, currentY);
-                        currentY += 15;
-                    } else {
-                        ctx.fillText('\u2B50 Prestige ' + prestigeLevel, CANVAS_WIDTH / 2, currentY);
-                        currentY += 15;
-                    }
-                }
-                if (xpOvercharge > 0) {
-                    const bonusPct = Math.min(50, Math.floor(xpOvercharge / 1000));
-                    ctx.fillStyle = '#AA44FF';
-                    ctx.font = 'bold 13px Arial';
-                    ctx.fillText('\u26A1 Overcharge: ' + xpOvercharge.toLocaleString() + ' (+' + bonusPct + '%)', CANVAS_WIDTH / 2, currentY);
-                    currentY += 15;
-                }
-                ctx.fillStyle = '#888';
-                ctx.font = '14px Arial';
-                ctx.fillText('Lv.' + level + ' | XP: ' + xp.toLocaleString(), CANVAS_WIDTH / 2, currentY);
-                currentY += 16;
-                if (level >= 20) {
-                    ctx.fillStyle = '#FFD700';
-                    ctx.font = 'bold 14px Arial';
-                    if (pinnacleRank > 0) {
-                        ctx.fillText('X \u2192 Pinnacle Rank ' + (pinnacleRank + 1) + ' (+2% Score)', CANVAS_WIDTH / 2, currentY);
-                        currentY += 15;
-                    } else if (prestigeLevel >= 5) {
-                        ctx.fillText('X \u2192 Pinnacle Rank 1 (+2% Score)', CANVAS_WIDTH / 2, currentY);
-                        currentY += 15;
-                    } else {
-                        ctx.fillText('Press X to Prestige', CANVAS_WIDTH / 2, currentY);
-                        currentY += 15;
-                    }
-                }
-                // Instruction text — now part of currentY flow
-                ctx.fillStyle = '#555';
-                ctx.font = '13px Arial';
-                if (hasTouch) {
-                    ctx.fillText('👆 Tap to Start | Swipe ↑↓ to change mode', CANVAS_WIDTH / 2, currentY);
+                ctx.restore();
+                return;
+            }
+            if (gameState === 'paused') {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                ctx.save();
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                const cx = CANVAS_WIDTH / 2;
+
+                if (pauseConfirmPending) {
+                    ctx.font = 'bold 24px Arial';
+                    ctx.fillStyle = '#FFF';
+                    const confirmLabel = pauseConfirmAction === 'restart' ? 'Confirm Restart?' : 'Confirm Quit?';
+                    ctx.fillText(confirmLabel, cx, CANVAS_HEIGHT / 2 - 15);
+                    ctx.font = '16px Arial';
+                    ctx.fillStyle = '#AAA';
+                    ctx.fillText('Enter = Yes  |  Esc = No', cx, CANVAS_HEIGHT / 2 + 20);
+                    ctx.font = 'bold 22px Arial';
+                    ctx.fillStyle = '#44FF44';
+                    ctx.fillText('Yes', CANVAS_WIDTH / 2 - 60, CANVAS_HEIGHT / 2 + 35);
+                    ctx.fillStyle = '#FF4444';
+                    ctx.fillText('No', CANVAS_WIDTH / 2 + 60, CANVAS_HEIGHT / 2 + 35);
                 } else {
-                    ctx.fillText('↑↓ Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics', CANVAS_WIDTH / 2, currentY);
+                    ctx.font = 'bold 28px Arial';
+                    ctx.fillStyle = '#FFF';
+                    ctx.fillText('\u23F8 PAUSED', cx, CANVAS_HEIGHT / 2 - 65);
+
+                    const menuItems = [
+                        { label: '\u25B6 Resume', color: '#44FF44' },
+                        { label: '\uD83D\uDD04 Restart', color: '#FFD700' },
+                        { label: '\u2302 Quit to Menu', color: '#FF4444' }
+                    ];
+                    for (let i = 0; i < menuItems.length; i++) {
+                        const y = CANVAS_HEIGHT / 2 - 10 + i * 40;
+                        const isSelected = i === pauseMenuSelection;
+                        ctx.font = isSelected ? 'bold 20px Arial' : '18px Arial';
+                        ctx.fillStyle = isSelected ? menuItems[i].color : '#888';
+                        const prefix = isSelected ? '> ' : '  ';
+                        ctx.fillText(prefix + menuItems[i].label, cx, y);
+                    }
+
+                    ctx.font = '13px Arial';
+                    ctx.fillStyle = '#666';
+                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 120);
                 }
+                ctx.restore();
                 ctx.restore();
                 return;
             }
@@ -1703,13 +1939,19 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawObstacles() {
-            ctx.fillStyle = '#555';
-            ctx.strokeStyle = '#777';
-            ctx.lineWidth = 1;
             for (let i = 0; i < obstacles.length; i++) {
-                const o = obstacles[i];
-                ctx.fillRect(o.x, o.y, TILE_SIZE, TILE_SIZE);
-                ctx.strokeRect(o.x, o.y, TILE_SIZE, TILE_SIZE);
+                const obs = obstacles[i];
+                const flash = newObstacleFlash.find(f => f.x === obs.x && f.y === obs.y);
+                if (flash) {
+                    const alpha = flash.timer / 1000;
+                    ctx.fillStyle = 'rgba(255, 100, 50, ' + (0.5 + alpha * 0.5) + ')';
+                    ctx.strokeStyle = 'rgba(255, 150, 100, ' + (0.7 + alpha * 0.3) + ')';
+                } else {
+                    ctx.fillStyle = '#555';
+                    ctx.strokeStyle = '#777';
+                }
+                ctx.fillRect(obs.x + 1, obs.y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+                ctx.strokeRect(obs.x + 0.5, obs.y + 0.5, TILE_SIZE - 1, TILE_SIZE - 1);
             }
         }
 
@@ -2234,7 +2476,7 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState === 'idle') {
                 drawOverlay('SNAKE', 'Press ENTER to Start');
             } else if (gameState === 'paused') {
-                drawOverlay('PAUSED', 'Press P or SPACE to Resume');
+                drawOverlay();
             } else if (gameState === 'gameover') {
                 const deathMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
                 drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + 'Press ENTER to Restart');
@@ -2290,6 +2532,15 @@ const TRAIL_RENDER_CONFIG = {
                     playSound('bonus');
                 } else {
                     lastDeathCause = 'You ran into yourself!';
+                    snake.push(tail);
+                    gameOver();
+                    return;
+                }
+            }
+
+            if (MODE_CONFIG[gameMode].wallDeath) {
+                if (wrappedHead.x < 0 || wrappedHead.x >= CANVAS_WIDTH || wrappedHead.y < 0 || wrappedHead.y >= CANVAS_HEIGHT) {
+                    lastDeathCause = 'Hit the wall!';
                     snake.push(tail);
                     gameOver();
                     return;
@@ -2499,7 +2750,7 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Power-up spawn timer
-            if (gameMode !== 'zen' && !powerUpPickup && !powerUpType) {
+            if (gameMode !== 'zen' && gameMode !== 'walled' && !powerUpPickup && !powerUpType) {
                 powerUpSpawnCounter++;
                 if (powerUpSpawnCounter >= 500) {
                     powerUpSpawnCounter = 0;
@@ -2564,6 +2815,29 @@ const TRAIL_RENDER_CONFIG = {
                 if (speedBoostCounter <= 0) {
                     tickInterval = getEffectiveSpeed();
                     restartGameInterval(tickInterval);
+                }
+            }
+
+            // Progressive obstacle spawning
+            if (gameMode !== 'zen' && gameMode !== 'walled' && gameMode !== 'daily' && obstacles.length < Math.floor((CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE) * MAX_OBSTACLE_PERCENT)) {
+                if (obstacleSpawnTimer <= 0) {
+                    obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
+                    const head = snake.length > 0 ? snake[0] : { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE };
+                    const count = 1 + Math.floor(Math.random() * 2);
+                    let spawned = 0;
+                    for (let i = 0; i < count; i++) {
+                        const tile = findFreeTile(head.x, head.y);
+                        if (tile) {
+                            obstacles.push(tile);
+                            newObstacleFlash.push({ x: tile.x, y: tile.y, timer: 1000 });
+                            spawned++;
+                        }
+                    }
+                    if (spawned > 0) {
+                        newObstacleToastTimer = 2000;
+                    }
+                } else {
+                    obstacleSpawnTimer--;
                 }
             }
         }
@@ -2938,6 +3212,11 @@ const TRAIL_RENDER_CONFIG = {
                 e.preventDefault();
             }
 
+            if (welcomeOverlay && gameState === 'idle') {
+                welcomeOverlay = false;
+                saveManager.set('snake_has_played', '1');
+            }
+
             if (e.key === 'Enter') {
                 if (gameState === 'idle') {
                     if (gameMode === 'daily' && dailyAttempts <= 0) {
@@ -2984,6 +3263,7 @@ const TRAIL_RENDER_CONFIG = {
                     queueToast('⚡ Pinnacle Rank ' + pinnacleRank + '! Score +' + (pinnacleRank * 2) + '%', 4000);
                 }
                 drawGame(1);
+                updateMenuFooter();
                 return;
             }
 
@@ -3017,6 +3297,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (gameState === 'playing') {
                     autoPaused = false;
                     gameState = 'paused';
+                    pauseMenuSelection = 0;
+                    pauseConfirmPending = false;
+                    pauseConfirmAction = null;
                     clearInterval(gameInterval);
                     gameInterval = null;
                     sessionPauseStart = Date.now();
@@ -3051,6 +3334,7 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 if (gameState === 'gameover') {
                     gameState = 'idle';
+                    updateMenuFooter();
                     drawGame(1);
                     visualDirty = true;
                     return;
@@ -3093,7 +3377,71 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
-            if (gameState !== 'playing') return;
+            if (gameState !== 'playing') {
+                if (gameState === 'paused') {
+                    if (e.key === 'ArrowUp') {
+                        if (pauseConfirmPending) return;
+                        pauseMenuSelection = (pauseMenuSelection - 1 + 3) % 3;
+                        drawGame(1);
+                        return;
+                    }
+                    if (e.key === 'ArrowDown') {
+                        if (pauseConfirmPending) return;
+                        pauseMenuSelection = (pauseMenuSelection + 1) % 3;
+                        drawGame(1);
+                        return;
+                    }
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (pauseConfirmPending) {
+                            if (pauseConfirmAction === 'restart') {
+                                pauseConfirmPending = false;
+                                pauseConfirmAction = null;
+                                resetGame();
+                                startGame();
+                                return;
+                            }
+                            if (pauseConfirmAction === 'quit') {
+                                pauseConfirmPending = false;
+                                pauseConfirmAction = null;
+                                resetGame();
+                                drawGame(1);
+                                return;
+                            }
+                            pauseConfirmPending = false;
+                            return;
+                        }
+                        if (pauseMenuSelection === 0) {
+                            resumeGame();
+                            return;
+                        }
+                        if (pauseMenuSelection === 1) {
+                            pauseConfirmPending = true;
+                            pauseConfirmAction = 'restart';
+                            drawGame(1);
+                            return;
+                        }
+                        if (pauseMenuSelection === 2) {
+                            pauseConfirmPending = true;
+                            pauseConfirmAction = 'quit';
+                            drawGame(1);
+                            return;
+                        }
+                        return;
+                    }
+                    if (e.key === 'Escape') {
+                        if (pauseConfirmPending) {
+                            pauseConfirmPending = false;
+                            pauseConfirmAction = null;
+                            drawGame(1);
+                            return;
+                        }
+                        resumeGame();
+                        return;
+                    }
+                }
+                return;
+            }
 
             let newDx = dx;
             let newDy = dy;
@@ -3162,6 +3510,52 @@ const TRAIL_RENDER_CONFIG = {
 
           // Tap detection (small movement)
           if (Math.abs(dx_touch) < 10 && Math.abs(dy_touch) < 10) {
+            if (welcomeOverlay) {
+              welcomeOverlay = false;
+              saveManager.set('snake_has_played', '1');
+              updateMenuFooter();
+              return; // Touch/click: dismiss but don't start game
+            }
+            if (gameState === 'paused') {
+              const rect = canvas.getBoundingClientRect();
+              const scaleX = CANVAS_WIDTH / rect.width;
+              const scaleY = CANVAS_HEIGHT / rect.height;
+              const tapX = (e.changedTouches[0].clientX - rect.left) * scaleX;
+              const tapY = (e.changedTouches[0].clientY - rect.top) * scaleY;
+              if (pauseConfirmPending) {
+                const confirmYesX = CANVAS_WIDTH / 2 - 60;
+                const confirmNoX = CANVAS_WIDTH / 2 + 60;
+                const confirmY = CANVAS_HEIGHT / 2 + 35;
+                if (tapX >= confirmYesX - 40 && tapX <= confirmYesX + 40 &&
+                    tapY >= confirmY - 20 && tapY <= confirmY + 20) {
+                  pauseConfirmPending = false;
+                  const action = pauseConfirmAction;
+                  pauseConfirmAction = null;
+                  if (action === 'restart') { resetGame(); startGame(); }
+                  else if (action === 'quit') { resetGame(); drawGame(1); }
+                  return;
+                }
+                if (tapX >= confirmNoX - 40 && tapX <= confirmNoX + 40 &&
+                    tapY >= confirmY - 20 && tapY <= confirmY + 20) {
+                  pauseConfirmPending = false;
+                  pauseConfirmAction = null;
+                  drawGame(1);
+                  return;
+                }
+                return;
+              }
+              const menuTopY = CANVAS_HEIGHT / 2 - 10;
+              for (let i = 0; i < 3; i++) {
+                const itemY = menuTopY + i * 40;
+                if (tapY >= itemY - 15 && tapY <= itemY + 20 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
+                  if (i === 0) { resumeGame(); }
+                  else if (i === 1) { pauseConfirmPending = true; pauseConfirmAction = 'restart'; drawGame(1); }
+                  else if (i === 2) { pauseConfirmPending = true; pauseConfirmAction = 'quit'; drawGame(1); }
+                  return;
+                }
+              }
+              return;
+            }
             if (gameState === 'idle' || gameState === 'gameover') {
               document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
             } else if (gameState === 'playing') {
@@ -3206,6 +3600,9 @@ const TRAIL_RENDER_CONFIG = {
                 autoPaused = true;
                 sessionPauseStart = Date.now();
                 gameState = 'paused';
+                pauseMenuSelection = 0;
+                pauseConfirmPending = false;
+                pauseConfirmAction = null;
                 clearInterval(gameInterval);
                 gameInterval = null;
                 playSound('pause');
