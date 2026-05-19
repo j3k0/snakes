@@ -15,6 +15,7 @@
             background-color: #222;
             font-family: Arial, sans-serif;
             color: white;
+            overflow: hidden;
         }
         h1 {
             margin-bottom: 10px;
@@ -63,8 +64,8 @@
     <p id="highScore">Best: 0</p>
         <div id="xpDisplay" style="color:#aaa;font-size:0.9em;"></div>
         <div id="comboDisplay" style="color:#FFD700;font-size:1.2em;min-height:1.5em;"></div>
-        <div id="toast" style="display:none;position:fixed;top:20px;left:50%;transform:translateX(-50%);color:#FFD700;font-size:24px;font-weight:bold;text-shadow:2px 2px 4px rgba(0,0,0,0.8);z-index:1000;pointer-events:none;text-align:center;"></div>
-        <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.95);border:2px solid #555;border-radius:10px;padding:20px;color:white;font-family:monospace;z-index:100;min-width:300px;max-width:400px;"></div>
+        <div id="toast" style="display:none;position:fixed;top:max(20px, env(safe-area-inset-top, 0px));left:50%;transform:translateX(-50%);color:#FFD700;font-size:24px;font-weight:bold;text-shadow:2px 2px 4px rgba(0,0,0,0.8);z-index:1000;pointer-events:none;text-align:center;"></div>
+        <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.95);border:2px solid #555;border-radius:10px;padding:20px;color:white;font-family:monospace;z-index:100;min-width:300px;max-width:400px;max-height:70vh;overflow-y:auto;"></div>
         <div id="achievementsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #FFD700;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:350px;max-width:480px;"></div>
         <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
         <div id="panelBackdrop" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;touch-action:manipulation;"></div>
@@ -199,6 +200,8 @@
         let level = getLevelFromXP(xp);
         let prestigeLevel = saveManager.getInt('snake_prestige', 0);
         let sessionXP = 0; // reserved for achievements
+        let xpOvercharge = saveManager.getInt('snake_xp_overcharge', 0);
+        let pinnacleRank = saveManager.getInt('snake_pinnacle', 0);
         let gameTick = 0;
         let comboCount = 0;
         let lastEatTime = 0;
@@ -267,6 +270,19 @@
             STREAK_WEEK: { name:'Week Warrior', desc:'Reach a 7-day daily streak', xp:500, icon:'📆', check:function(s,c){var streak=saveManager.getInt('snake_streak_count',0);return streak>=7;} },
             FOODIE: { name:'Foodie', desc:'Eat 500 normal foods total', xp:500, icon:'🍴', check:function(s,c){return s.normalFoodEaten>=500;} },
             EPICURE: { name:'Epicure', desc:'Eat 30 epic foods total', xp:600, icon:'🌟', check:function(s,c){return s.epicFoodEaten>=30;} },
+            ASCENDED: { name:'Ascended', desc:'Reach Prestige 1', xp:500, icon:'⭐', check:function(s,c){return prestigeLevel>=1;} },
+            TRANSCENDED: { name:'Transcended', desc:'Reach Prestige 3', xp:750, icon:'🌟', check:function(s,c){return prestigeLevel>=3;} },
+            GODLIKE: { name:'Godlike', desc:'Reach Prestige 5', xp:1000, icon:'👑', check:function(s,c){return prestigeLevel>=5;} },
+            COMBO_10: { name:'Combo King', desc:'Reach 10x combo', xp:500, icon:'🔥', check:function(s,c){return c.maxCombo>=10;} },
+            COMBO_20: { name:'Combo God', desc:'Reach 20x combo', xp:1000, icon:'💥', check:function(s,c){return c.maxCombo>=20;} },
+            COMBO_50: { name:'Combo Deity', desc:'Reach 50x combo', xp:2000, icon:'⚡', check:function(s,c){return c.maxCombo>=50;} },
+            GLUTTON_II: { name:'Bottomless Pit', desc:'Eat 50 foods in one game', xp:300, icon:'🤤', check:function(s,c){return c.sessionFoodEaten>=50;} },
+            IMMORTAL: { name:'Immortal', desc:'Survive 5 minutes in one game', xp:400, icon:'⏱️', check:function(s,c){return c.sessionTimeAlive>=300000;} },
+            SPEED_DEMON_II: { name:'Speed Runner', desc:'Eat 25 speed foods total', xp:350, icon:'⚡', check:function(s,c){return s.speedFoodEaten>=25;} },
+            BONUS_HUNTER: { name:'Bonus Hunter', desc:'Eat 25 bonus foods total', xp:350, icon:'🎯', check:function(s,c){return s.bonusFoodEaten>=25;} },
+            EXPLORER: { name:'Explorer', desc:'Eat all 6 food types in one game', xp:250, icon:'🗺️', check:function(s,c){return c.eatAllTypes;} },
+            DEDICATED: { name:'Dedicated', desc:'Play 200 games', xp:500, icon:'🎮', check:function(s,c){return s.gamesPlayed>=200;} },
+            LEGENDARY: { name:'Legendary', desc:'Eat 1000 total food', xp:600, icon:'🏆', check:function(s,c){return s.totalFoodEaten>=1000;} },
         };
 
         let achievements = loadAchievements();
@@ -338,6 +354,23 @@
             30: 'death_fireworks'
         };
 
+        const STAT_MILESTONES = {
+            totalDistance: {
+                5000: { id: 'milestone_distance_5k', name: 'Wanderer', icon: '\u{1F6B6}', msg: 'Traveled 5,000 tiles!' },
+                25000: { id: 'milestone_distance_25k', name: 'Globetrotter', icon: '\u{1F30D}', msg: 'Traveled 25,000 tiles!' },
+            },
+            totalFoodEaten: {
+                1000: { id: 'milestone_food_1k', name: 'Gourmet', icon: '\u{1F372}', msg: 'Ate 1,000 total food!' },
+            },
+            rivalsDefeated: {
+                25: { id: 'milestone_rivals_25', name: 'Rival Hunter', icon: '\u2694', msg: 'Defeated 25 rivals!' },
+                100: { id: 'milestone_rivals_100', name: 'Rival Slayer', icon: '\u{1F5E1}', msg: 'Defeated 100 rivals!' },
+            },
+            gamesPlayed: {
+                200: { id: 'milestone_games_200', name: 'Veteran', icon: '\u{1F3AE}', msg: 'Played 200 games!' },
+            },
+        };
+
         const PRESTIGE_REWARDS = {
             1: { id: 'border_gold', name: 'Golden Border', type: 'border' },
             2: { id: 'snake_ghost', name: 'Phantom Snake', type: 'snake' },
@@ -393,6 +426,18 @@
             bonus:    { pts: 30, xp: 60, weight: 0.15, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
             speed:    { pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed' },
         };
+
+const COMBO_MILESTONES = [3, 5, 7, 10, 15, 20, 30, 50];
+const COMBO_FLASH_COLORS = {
+    3:  '#44BB44',
+    5:  '#FF8800',
+    7:  '#FF6600',
+    10: '#FF4444',
+    15: '#AA44FF',
+    20: '#FFD700',
+    30: 'rainbow',
+    50: '#FFFFFF'
+};
 
 const TRAIL_RENDER_CONFIG = {
   trace_ghost:   { alphaStart:0.15, alphaDecay:0.05, color: (idx, skin) => skin.head==='rainbow' ? '#00FF00' : skin.head },
@@ -480,6 +525,23 @@ const TRAIL_RENDER_CONFIG = {
 
         function getEffectiveSpeed() {
             return slowMoActive ? getSpeed() * 2 : getSpeed();
+        }
+
+        function getOverchargeMultiplier() {
+            if (level < 20) return 1;
+            const bonus = Math.min(0.50, Math.floor(xpOvercharge / 1000) * 0.01);
+            return 1 + bonus;
+        }
+
+        function addScore(amount) {
+            if (gameMode === 'zen') {
+                score = snake.length;
+                updateScoreDisplay();
+                return;
+            }
+            const multi = (pinnacleRank > 0 ? (1 + pinnacleRank * 0.02) : 1) * getOverchargeMultiplier();
+            score += Math.round(amount * multi);
+            updateScoreDisplay();
         }
 
         function vibrate(duration) {
@@ -690,6 +752,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function startGame() {
+            syncDailyState();
             sessionSummary = null;
             sessionSummaryTimer = 0;
             if (gameMode === 'daily') {
@@ -901,8 +964,14 @@ const TRAIL_RENDER_CONFIG = {
             const rand = Math.random();
             
             if (rand < 0.70 && nearestFood) {
-                const dx_food = nearestFood.x - head.x;
-                const dy_food = nearestFood.y - head.y;
+                let dx_food = nearestFood.x - head.x;
+                let dy_food = nearestFood.y - head.y;
+                if (Math.abs(dx_food) > CANVAS_WIDTH / 2) {
+                    dx_food = dx_food > 0 ? dx_food - CANVAS_WIDTH : dx_food + CANVAS_WIDTH;
+                }
+                if (Math.abs(dy_food) > CANVAS_HEIGHT / 2) {
+                    dy_food = dy_food > 0 ? dy_food - CANVAS_HEIGHT : dy_food + CANVAS_HEIGHT;
+                }
                 
                 if (Math.abs(dx_food) >= Math.abs(dy_food)) {
                     chosenDir = { dx: dx_food > 0 ? TILE_SIZE : -TILE_SIZE, dy: 0 };
@@ -955,8 +1024,7 @@ const TRAIL_RENDER_CONFIG = {
             if (playerBodyHit) {
                 spawnParticles(rNewHead.x, rNewHead.y, 20, '#FF4444');
                 awardXP(100);
-                if (gameMode !== 'zen') score += 50;
-                updateScoreDisplay();
+                if (gameMode !== 'zen') addScore(50);
                 stats.rivalsDefeated++;
                 const el = toastEl;
                 if (el) {
@@ -1011,7 +1079,11 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 sessionPauseStart = 0;
             }
-    tickInterval = getEffectiveSpeed();
+    if (speedBoostCounter > 0) {
+        tickInterval = Math.max(MIN_SPEED, getEffectiveSpeed() - 30);
+    } else {
+        tickInterval = getEffectiveSpeed();
+    }
     restartGameInterval(tickInterval);
     playSound('resume');
             drawGame(1);
@@ -1056,6 +1128,7 @@ const TRAIL_RENDER_CONFIG = {
                 sessionFoodTypes: sessionFoodTypes,
                 snakeLength: snake.length
             });
+            checkStatMilestones();
 
             // Session summary
             sessionSummary = {
@@ -1100,7 +1173,8 @@ const TRAIL_RENDER_CONFIG = {
                 sessionFoodTypes: sessionFoodTypes,
                 snakeLength: snake.length
             });
-            // Session summary for display
+            checkStatMilestones();
+            // Session summary
             sessionSummary = {
                 score: score,
                 time: Math.floor(sessionTimeAlive / 1000),
@@ -1363,9 +1437,9 @@ const TRAIL_RENDER_CONFIG = {
             // Level-up flash overlay
             if (levelUpFlash > 0) {
                 levelUpFlash = Math.max(0, levelUpFlash - delta);
-                if (!flashOverlay || flashOverlay.color === '#FFD700') {
-                    flashOverlay = { color: '#FFD700', alpha: Math.min(0.3, levelUpFlash / 5000) };
-                }
+            if (!flashOverlay || flashOverlay.priority !== 'critical') {
+                flashOverlay = { color: '#FFD700', alpha: Math.min(0.3, levelUpFlash / 5000), priority: 'critical' };
+            }
             }
 
             const elapsed = timestamp - lastTickTime;
@@ -1456,7 +1530,9 @@ const TRAIL_RENDER_CONFIG = {
 
             // Flash overlay — renders last on top of everything (AGENTS.md)
             if (flashOverlay) {
-                ctx.fillStyle = flashOverlay.color;
+                ctx.fillStyle = flashOverlay.color === 'rainbow'
+                    ? 'hsl(' + (Date.now() % 2000 / 2000 * 360) + ', 100%, 50%)'
+                    : flashOverlay.color;
                 ctx.globalAlpha = Math.max(0, flashOverlay.alpha);
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
                 ctx.globalAlpha = 1;
@@ -1516,47 +1592,77 @@ const TRAIL_RENDER_CONFIG = {
                         ctx.fillText(getModeDesc(mode), CANVAS_WIDTH / 2, y + 20);
                     }
                 }
-                // Daily challenge info
+                let currentY = CANVAS_HEIGHT - 95;
+                
+                // Daily challenge info — now part of the currentY flow
                 if (gameMode === 'daily') {
                     try {
                         const seed = getDailySeed();
                         const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
                         ctx.fillStyle = '#FFD700';
                         ctx.font = 'bold 16px Arial';
-                        ctx.fillText('Today: ' + challenge.desc, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 100);
+                        ctx.fillText('Today: ' + challenge.desc, CANVAS_WIDTH / 2, currentY);
+                        currentY += 18;
                         ctx.fillStyle = '#AAA';
                         ctx.font = '14px Arial';
-                        ctx.fillText('Reward: +' + challenge.reward + ' XP', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 82);
+                        ctx.fillText('Reward: +' + challenge.reward + ' XP', CANVAS_WIDTH / 2, currentY);
+                        currentY += 16;
                         ctx.fillStyle = dailyDone ? '#4CAF50' : '#FFD700';
-                        ctx.fillText('Attempts: ' + dailyAttempts + (dailyDone ? ' ✅' : ''), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 64);
+                        ctx.fillText('Attempts: ' + dailyAttempts + (dailyDone ? ' ✅' : ''), CANVAS_WIDTH / 2, currentY);
+                        currentY += 16;
                         let streak = saveManager.getInt('snake_streak_count', 0);
                         if (streak > 0) {
                             ctx.fillStyle = '#FF6B35';
                             ctx.font = '13px Arial';
-                            ctx.fillText('🔥 ' + streak + ' day streak!', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 46);
+                            ctx.fillText('🔥 ' + streak + ' day streak!', CANVAS_WIDTH / 2, currentY);
+                            currentY += 16;
                         }
                     } catch(e) {}
                 }
-                if (prestigeLevel > 0) {
+
+                if (prestigeLevel > 0 || pinnacleRank > 0) {
                     ctx.fillStyle = '#FFD700';
                     ctx.font = 'bold 14px Arial';
-                    ctx.fillText('\u2B50 Prestige ' + prestigeLevel, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 88);
+                    if (pinnacleRank > 0) {
+                        ctx.fillText('\u26A1 Pinnacle ' + pinnacleRank + ' (+' + (pinnacleRank * 2) + '%)', CANVAS_WIDTH / 2, currentY);
+                        currentY += 15;
+                    } else {
+                        ctx.fillText('\u2B50 Prestige ' + prestigeLevel, CANVAS_WIDTH / 2, currentY);
+                        currentY += 15;
+                    }
+                }
+                if (xpOvercharge > 0) {
+                    const bonusPct = Math.min(50, Math.floor(xpOvercharge / 1000));
+                    ctx.fillStyle = '#AA44FF';
+                    ctx.font = 'bold 13px Arial';
+                    ctx.fillText('\u26A1 Overcharge: ' + xpOvercharge.toLocaleString() + ' (+' + bonusPct + '%)', CANVAS_WIDTH / 2, currentY);
+                    currentY += 15;
                 }
                 ctx.fillStyle = '#888';
                 ctx.font = '14px Arial';
-                ctx.fillText('Lv.' + level + ' | XP: ' + xp.toLocaleString(), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 70);
+                ctx.fillText('Lv.' + level + ' | XP: ' + xp.toLocaleString(), CANVAS_WIDTH / 2, currentY);
+                currentY += 16;
                 if (level >= 20) {
                     ctx.fillStyle = '#FFD700';
                     ctx.font = 'bold 14px Arial';
-                    ctx.fillText('Press X to Prestige', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 55);
+                    if (pinnacleRank > 0) {
+                        ctx.fillText('X \u2192 Pinnacle Rank ' + (pinnacleRank + 1) + ' (+2% Score)', CANVAS_WIDTH / 2, currentY);
+                        currentY += 15;
+                    } else if (prestigeLevel >= 5) {
+                        ctx.fillText('X \u2192 Pinnacle Rank 1 (+2% Score)', CANVAS_WIDTH / 2, currentY);
+                        currentY += 15;
+                    } else {
+                        ctx.fillText('Press X to Prestige', CANVAS_WIDTH / 2, currentY);
+                        currentY += 15;
+                    }
                 }
+                // Instruction text — now part of currentY flow
                 ctx.fillStyle = '#555';
                 ctx.font = '13px Arial';
-                ctx.fillText('↑↓ Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 40);
                 if (hasTouch) {
-                    ctx.fillStyle = '#555';
-                    ctx.font = '12px Arial';
-                    ctx.fillText('Swipe ↑↓ to change mode', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 24);
+                    ctx.fillText('👆 Tap to Start | Swipe ↑↓ to change mode', CANVAS_WIDTH / 2, currentY);
+                } else {
+                    ctx.fillText('↑↓ Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics', CANVAS_WIDTH / 2, currentY);
                 }
                 ctx.restore();
                 return;
@@ -1703,7 +1809,7 @@ const TRAIL_RENDER_CONFIG = {
             ctx.restore();
 
             // Letter labels for non-common types with text outline for contrast
-            const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B' };
+            const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
             if (labels[food.type]) {
                 ctx.save();
                 ctx.font = 'bold 10px Arial';
@@ -1813,11 +1919,11 @@ const TRAIL_RENDER_CONFIG = {
                     const pdy = segment.y - prev.y;
                     drawX = Math.abs(pdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + pdx * t;
                     drawY = Math.abs(pdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + pdy * t;
-                } else if (prevSnake[index]) {
-                    const pdx = segment.x - prevSnake[index].x;
-                    const pdy = segment.y - prevSnake[index].y;
-                    drawX = Math.abs(pdx) > CANVAS_WIDTH / 2 ? segment.x : prevSnake[index].x + pdx * t;
-                    drawY = Math.abs(pdy) > CANVAS_HEIGHT / 2 ? segment.y : prevSnake[index].y + pdy * t;
+                } else if (index > 0 && prevSnake[index - 1]) {
+                    const pdx = segment.x - prevSnake[index - 1].x;
+                    const pdy = segment.y - prevSnake[index - 1].y;
+                    drawX = Math.abs(pdx) > CANVAS_WIDTH / 2 ? segment.x : prevSnake[index - 1].x + pdx * t;
+                    drawY = Math.abs(pdy) > CANVAS_HEIGHT / 2 ? segment.y : prevSnake[index - 1].y + pdy * t;
                 } else {
                     drawX = segment.x;
                     drawY = segment.y;
@@ -2231,9 +2337,10 @@ const TRAIL_RENDER_CONFIG = {
                 // Combo logic
                 const now = Date.now();
                 if (now - lastEatTime < 3000 && lastEatTime > 0) {
-                    comboCount = Math.min(5, comboCount + 1);
+                    comboCount = Math.min(50, comboCount + 1);
                 } else {
                     comboCount = 0;
+                    lastComboMilestone = 0;
                 }
                 lastEatTime = now;
                 clearTimeout(comboFadeTimer);
@@ -2244,9 +2351,16 @@ const TRAIL_RENDER_CONFIG = {
                 if (comboCount > sessionMaxCombo) sessionMaxCombo = comboCount;
 
                 // Combo milestone flash
-                if (comboCount >= 3 && comboCount > lastComboMilestone) {
+                if (COMBO_MILESTONES.includes(comboCount) && comboCount > lastComboMilestone) {
                     lastComboMilestone = comboCount;
-                    flashOverlay = { color: comboCount >= 5 ? '#FF8800' : '#44BB44', alpha: 0.3 };
+                    const color = COMBO_FLASH_COLORS[comboCount] || '#44BB44';
+                    const alpha = comboCount >= 20 ? 0.5 : comboCount >= 10 ? 0.4 : 0.3;
+                    if (!flashOverlay || flashOverlay.priority !== 'critical') {
+                        flashOverlay = { color, alpha, priority: comboCount >= 10 ? 'high' : 'normal' };
+                    }
+                    if (comboCount >= 10) {
+                        shakeTimer = Math.min(300, 100 + comboCount * 5);
+                    }
                     vibrate(30);
                     playSound('combo_milestone');
                 }
@@ -2266,13 +2380,23 @@ const TRAIL_RENDER_CONFIG = {
                 if (snake.length > stats.longestLength) stats.longestLength = snake.length;
 
                 const tierColor = tier.color;
-                flashOverlay = { color: tierColor, alpha: 0.4 };
+                if (!flashOverlay || (flashOverlay.priority !== 'high' && flashOverlay.priority !== 'critical')) {
+                    flashOverlay = { color: tierColor, alpha: 0.4, priority: 'normal' };
+                }
                 eatAnimTimer = 150;
                 spawnParticles(wrappedHead.x, wrappedHead.y, tier.pCount, tierColor);
-                if (gameMode !== 'zen') score += tier.pts;
+                if (gameMode !== 'zen') addScore(tier.pts);
                 // Combo score bonus
                 if (comboCount > 0 && gameMode !== 'zen') {
-                    score += Math.floor(comboCount * 2);
+                    let comboBonus;
+                    if (comboCount >= 20) {
+                        comboBonus = Math.floor(comboCount * 5);
+                    } else if (comboCount >= 10) {
+                        comboBonus = Math.floor(comboCount * 3);
+                    } else {
+                        comboBonus = Math.floor(comboCount * 2);
+                    }
+                    addScore(comboBonus);
                 }
                 if (gameMode === 'snap') {
                     shrinkTimer = snapDuration;
@@ -2291,7 +2415,6 @@ const TRAIL_RENDER_CONFIG = {
                     restartGameInterval(tickInterval);
                     speedBoostCounter = 16; // ~2 seconds at 120ms ticks
                 }
-                updateScoreDisplay();
                 checkAchievements(score);
                 const playerCombined = snake.concat(rivalActive ? rivalSnake : []);
                 food = generateFood(playerCombined);
@@ -2464,6 +2587,12 @@ const TRAIL_RENDER_CONFIG = {
         function awardXP(amount) {
             const mc = MODE_CONFIG[gameMode];
             if (!mc.earnXP) return;
+            if (level >= 20) {
+                xpOvercharge += amount;
+                sessionXP += amount;
+                saveManager.set('snake_xp_overcharge', xpOvercharge);
+                return;
+            }
             xp += amount;
             sessionXP += amount;
             const newLevel = getLevelFromXP(xp);
@@ -2496,6 +2625,10 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function saveAllState() {
+            saveManager.set('snake_pinnacle', pinnacleRank);
+            saveManager.set('snake_xp_overcharge', xpOvercharge);
+            saveManager.set('snake_xp', xp);
+            saveManager.set('snake_prestige', prestigeLevel);
             saveManager.setJSON('snake_stats', stats);
         }
 
@@ -2590,9 +2723,11 @@ const TRAIL_RENDER_CONFIG = {
                 sessionTimeAlive: sessionTimeAlive,
                 snakeLength: snake.length,
                 hatTrickEligible: sessionFoodTypes.size >= 4,
+                eatAllTypes: sessionFoodTypes.size >= 6,
                 maxCombo: sessionMaxCombo,
                 sessionScore: sessionScore || score,
                 snapLevel: snapLevel,
+                prestigeLevel: prestigeLevel,
             };
             for (const id in ACHIEVEMENTS) {
                 if (achievements[id]) continue;
@@ -2611,6 +2746,24 @@ const TRAIL_RENDER_CONFIG = {
             playSound('achievement');
             vibrate(50);
             queueToast('\u{1F3C6} ' + ach.icon + ' ' + ach.name + ': ' + ach.desc + ' (+' + ach.xp + ' XP)', 4000);
+        }
+
+        function checkStatMilestones() {
+            for (const statKey in STAT_MILESTONES) {
+                const statValue = stats[statKey];
+                if (statValue === undefined) continue;
+                const thresholds = STAT_MILESTONES[statKey];
+                for (const threshold in thresholds) {
+                    if (statValue >= parseInt(threshold)) {
+                        const milestone = thresholds[threshold];
+                        if (unlockedCosmetics.indexOf(milestone.id) === -1) {
+                            unlockedCosmetics.push(milestone.id);
+                            saveManager.setJSON('snake_unlocks', unlockedCosmetics);
+                            queueToast(milestone.icon + ' ' + milestone.name + ': ' + milestone.msg, 4000);
+                        }
+                    }
+                }
+            }
         }
 
         function checkDailyCompletion(sessionScore, checkCtx) {
@@ -2773,6 +2926,8 @@ const TRAIL_RENDER_CONFIG = {
                 '<tr><td style="padding:4px 8px;">Shield Blocks</td><td style="text-align:right;padding:4px 8px;">' + stats.shieldBlocks + '</td></tr>' +
                 '<tr><td style="padding:4px 8px;">Epic Food</td><td style="text-align:right;padding:4px 8px;">' + stats.epicFoodEaten + '</td></tr>' +
                 '<tr><td style="padding:4px 8px;">Daily Challenges</td><td style="text-align:right;padding:4px 8px;">' + stats.dailyCompleted + '</td></tr>' +
+                (pinnacleRank > 0 ? '<tr><td style="padding:4px 8px;">Pinnacle Rank</td><td style="text-align:right;padding:4px 8px;">' + pinnacleRank + '</td></tr>' : '') +
+                (xpOvercharge > 0 ? '<tr><td style="padding:4px 8px;">XP Overcharge</td><td style="text-align:right;padding:4px 8px;">' + xpOvercharge.toLocaleString() + '</td></tr>' : '') +
                 '</table>' +
                 '<p style="text-align:center;color:#888;margin-top:10px;font-size:0.9em;">Press TAB or ESC to close</p>';
             el.style.display = 'block';
@@ -2808,16 +2963,26 @@ const TRAIL_RENDER_CONFIG = {
 
             // Prestige on idle
             if ((e.key === 'x' || e.key === 'X') && gameState === 'idle' && level >= 20) {
-                if (prestigeLevel >= 5) {
-                    queueToast('⭐ Max Prestige Reached!', 3000);
-                    return;
+                if (prestigeLevel < 5) {
+                    prestigeLevel++;
+                    xp = 0;
+                    level = 1;
+                    xpOvercharge = 0;
+                    saveManager.set('snake_prestige', prestigeLevel);
+                    saveManager.set('snake_xp', '0');
+                    saveManager.set('snake_xp_overcharge', 0);
+                    checkPrestigeUnlocks();
+                    queueToast('🌟 Prestige ' + prestigeLevel + '!', 3000);
+                } else {
+                    pinnacleRank++;
+                    xp = 0;
+                    level = 1;
+                    // Overcharge preserved for pinnacle ranks
+                    saveManager.set('snake_pinnacle', pinnacleRank);
+                    saveManager.set('snake_xp', '0');
+                    saveManager.set('snake_xp_overcharge', xpOvercharge);
+                    queueToast('⚡ Pinnacle Rank ' + pinnacleRank + '! Score +' + (pinnacleRank * 2) + '%', 4000);
                 }
-                prestigeLevel++;
-                xp = 0;
-                level = 1;
-                saveManager.set('snake_prestige', prestigeLevel);
-                saveManager.set('snake_xp', '0');
-                checkPrestigeUnlocks();
                 drawGame(1);
                 return;
             }
@@ -2909,14 +3074,8 @@ const TRAIL_RENDER_CONFIG = {
 
             if (e.key === 'h' || e.key === 'H') {
                 e.preventDefault();
-                if (gameState !== 'idle') {
-                    // Help overlay is only meaningful on the menu screen
-                    if (helpOverlayVisible) {
-                        helpOverlayVisible = false;
-                        visualDirty = true;
-                    }
-                    return;
-                }
+                // Only toggle help on idle screen — prevents obscuring gameplay/gameover
+                if (gameState !== 'idle') return;
                 if (helpOverlayVisible) {
                     helpOverlayVisible = false;
                     visualDirty = true;
