@@ -1909,26 +1909,41 @@ const TRAIL_RENDER_CONFIG = {
             ctx.font = 'bold 36px Arial';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(text, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 20);
+            ctx.fillText(text, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 55);
             if (subtext) {
                 ctx.font = '18px Arial';
                 ctx.fillStyle = '#AAA';
-                ctx.fillText(subtext, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
+                const maxWidth = CANVAS_WIDTH - 40;
+                const fits = ctx.measureText(subtext).width <= maxWidth;
+                if (fits) {
+                    ctx.fillText(subtext, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
+                } else {
+                    const parts = subtext.split(' | ');
+                    if (parts.length >= 3 && lastDeathCause) {
+                        ctx.fillStyle = '#FF6B6B';
+                        ctx.fillText(parts[1], CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 15);
+                        ctx.fillStyle = '#AAA';
+                        ctx.fillText(parts[0] + ' | ' + parts.slice(2).join(' | '), CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 40);
+                    } else {
+                        ctx.fillText(parts[0], CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 15);
+                        ctx.fillText(parts.slice(1).join(' | '), CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 40);
+                    }
+                }
             }
             if (gameState === 'gameover') {
                 ctx.font = '13px Arial';
                 ctx.fillStyle = '#888';
-                ctx.fillText('Mode: ' + MODE_CONFIG[gameMode].name, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 55);
+                ctx.fillText('Mode: ' + MODE_CONFIG[gameMode].name, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 70);
             }
             if (gameMode === 'daily' && gameState === 'gameover') {
                 const seed = getDailySeed();
                 const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
                 ctx.fillStyle = dailyDone ? '#4CAF50' : '#FF6B35';
                 ctx.font = '15px Arial';
-                ctx.fillText(dailyDone ? '✅ Daily Challenge Complete!' : '❌ Daily challenge not completed', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 80);
+                ctx.fillText(dailyDone ? '✅ Daily Challenge Complete!' : '❌ Daily challenge not completed', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 95);
                 ctx.fillStyle = '#AAA';
                 ctx.font = '13px Arial';
-                ctx.fillText('Attempts remaining: ' + dailyAttempts, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 100);
+                ctx.fillText('Attempts remaining: ' + dailyAttempts, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 115);
             }
             ctx.restore();
         }
