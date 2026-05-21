@@ -94,3 +94,38 @@
 - `playSound()` can have duplicate `case` labels without a JavaScript error — the second case is simply unreachable dead code. The switch at lines ~1109-1206 had two `case 'combo_milestone':` blocks. The first (ascending C5→E5 arpeggio) always fires; the second (sustained 660Hz tone) never does. This makes the code confusing: a reader at line 1197 assumes that case is active.
 - When adding new sounds to `playSound()`, grep for the case label first to check for duplicates.
 
+## Walled Mode
+- `wrapPosition()` checks `MODE_CONFIG[gameMode].wrap`. When `wrap: false`, it returns the raw (unmodified) position. The wall death check in `updateGame()` detects out-of-bounds positions.
+- All modes with `wrap: true` (Classic, Time Attack, Zen, Daily, Snap) continue to wrap via the existing modulo arithmetic.
+- Obstacles are disabled in Walled mode — walls are the obstacle.
+- Rival snake disabled in Walled mode.
+- Power-ups disabled in Walled mode (magnet wrapping logic conflicts with non-wrapping board).
+
+## First-Time Onboarding
+- `welcomeOverlay` flag initialized from `saveManager.get('snake_has_played', '')` at page load
+- `drawWelcomeOverlay()` renders a 3-panel overlay with controls (keyboard vs touch-adapted), food info, and progression info
+- Overlay dismissed on any keypress (idle state): sets `saveManager.set('snake_has_played', '1')`, then falls through for normal key processing (Enter starts game immediately on first press)
+- On mobile: touch/click dismisses WITHOUT dispatching Enter (prevents accidental game start)
+- `drawWelcomeOverlay()` MUST use `ctx.save()`/`ctx.restore()` for all text rendering per canvas save/restore discipline
+- The welcome overlay only renders when `gameState === 'idle'` and replaces the normal idle screen entirely
+
+## Pause Menu
+- When `gameState === 'paused'`, the overlay shows three selectable options: Resume, Restart, Quit to Menu
+- `pauseMenuSelection` tracks the currently highlighted option (0-2), reset when entering pause state
+- ArrowUp/ArrowDown navigate; Enter selects; Escape cancels confirmation or resumes
+- P/Space still toggles pause regardless of menu selection
+- Confirmation sub-prompt (`pauseConfirmPending`/`pauseConfirmAction`) for Restart and Quit — shows Yes/No buttons
+- Restart and Quit from pause do NOT count as deaths (no `totalDeaths++`, no `finalizeSession()` call)
+- Touch hit regions on canvas for each menu item; also works during confirmation sub-prompt
+- `pauseMenuSelection`, `pauseConfirmPending`, `pauseConfirmAction` must be reset in both `resetGame()` AND on entering paused state
+- All pause menu text rendering must be wrapped in `ctx.save()`/`ctx.restore()`
+
+## Obstacle Patterns & Progressive Spawning
+- `OBSTACLE_PATTERNS` defines 5 pattern types (single, h_left, h_right, v_down, v_up) with weighted selection
+- `generateObstacles()` places patterns as tile groups; if placement fails, falls back to single tiles
+- `findFreeTile(headX, headY)` checks 3-tile Manhattan distance from snake head, snake body, obstacles, food, and rival
+- Progressive obstacles spawn every `OBSTACLE_SPAWN_INTERVAL` (200) game ticks in Classic and Time Attack modes (excluded in zen, walled, daily)
+- New obstacles have flash animation (1-second orange fade in `drawObstacles()`) and a toast ("⚠ New obstacles!")
+- `MAX_OBSTACLE_PERCENT` (0.20) caps total obstacle count to prevent board filling
+- `newObstacleFlash` array and `newObstacleToastTimer` are visual state (rAF-decayed), not game-logic state — follows rAF write boundary rules
+
