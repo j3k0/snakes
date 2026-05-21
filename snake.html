@@ -629,7 +629,6 @@ const TRAIL_RENDER_CONFIG = {
                             const ty = y * TILE_SIZE;
                             if (currentSnake.some(s => s.x === tx && s.y === ty)) continue;
                             if (obstacles.some(o => o.x === tx && o.y === ty)) continue;
-                            if (rivalActive && rivalSnake.some(s => s.x === tx && s.y === ty)) continue;
                             freeTiles.push({ x: tx, y: ty });
                         }
                     }
@@ -647,8 +646,7 @@ const TRAIL_RENDER_CONFIG = {
                     type: type
                 };
             } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y) ||
-                     obstacles.some(o => o.x === newFood.x && o.y === newFood.y) ||
-                     (rivalActive && rivalSnake.some(s => s.x === newFood.x && s.y === newFood.y)));
+                     obstacles.some(o => o.x === newFood.x && o.y === newFood.y));
             if (newFood.type === 'rare' || newFood.type === 'epic') playSound('rare_spawn');
             return newFood;
         }
@@ -1463,6 +1461,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawHelpOverlay() {
+            ctx.save();
             ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
             ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             
@@ -1547,6 +1546,7 @@ const TRAIL_RENDER_CONFIG = {
             ctx.font = '10px Arial';
             ctx.textAlign = 'center';
             ctx.fillText('Press H or any action to close', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 10);
+            ctx.restore();
         }
 
         function drawWelcomeOverlay() {
