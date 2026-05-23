@@ -910,6 +910,7 @@ const TRAIL_RENDER_CONFIG = {
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
             dy = 0;
+            ghostPositions = [];
             generateObstacles();
             const combinedInitial = snake.concat(rivalActive ? rivalSnake : []);
             food = generateFood(combinedInitial);
@@ -2683,7 +2684,7 @@ const TRAIL_RENDER_CONFIG = {
             drawRival(t);
 
             // Ghost snake overlay
-            if (ghostEnabled && ghostPositions.length > 0) {
+            if (ghostEnabled && activeSeed !== null && ghostPositions.length > 0) {
                 ctx.save();
                 ctx.globalAlpha = 0.3;
                 for (var gi = 0; gi < ghostPositions.length; gi++) {
@@ -2738,6 +2739,8 @@ const TRAIL_RENDER_CONFIG = {
             if (ghostEnabled && activeSeed !== null) {
                 var bestReplay = getBestReplay(gameMode);
                 ghostPositions = rebuildGhost(bestReplay, gameTick);
+            } else {
+                ghostPositions = [];
             }
             stats.totalDistance++;
             if (gameTick % 10 === 0) awardXP(1);
