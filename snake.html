@@ -86,6 +86,11 @@
     <p>Score: <span id="score">0</span></p>
     <p id="highScore">Best: 0</p>
         <div id="xpDisplay" style="color:#aaa;font-size:0.9em;"></div>
+        <div id="seedContainer" style="margin-top:6px;display:flex;align-items:center;gap:6px;justify-content:center;font-size:12px;">
+            <input type="text" id="seedField" placeholder="Seed..." style="width:120px;padding:3px 6px;background:#222;color:white;border:1px solid #555;border-radius:4px;font-family:monospace;font-size:12px;">
+            <button id="seedRandomBtn" style="padding:3px 8px;background:#333;color:white;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:11px;">🎲</button>
+            <button id="seedClearBtn" style="padding:3px 8px;background:#333;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:11px;">✕</button>
+        </div>
         <div id="comboDisplay" style="color:#FFD700;font-size:1.2em;min-height:1.5em;"></div>
         <div id="toast" style="display:none;position:fixed;top:max(20px, env(safe-area-inset-top, 0px));left:50%;transform:translateX(-50%);color:#FFD700;font-size:24px;font-weight:bold;text-shadow:2px 2px 4px rgba(0,0,0,0.8);z-index:1000;pointer-events:none;text-align:center;"></div>
         <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.95);border:2px solid #555;border-radius:10px;padding:20px;color:white;font-family:monospace;z-index:100;min-width:300px;max-width:400px;max-height:70vh;overflow-y:auto;"></div>
@@ -104,17 +109,18 @@
 
         function ensureGridCache() {
             const theme = GRID_THEMES[cosmetics.grid] || GRID_THEMES.grid_classic;
-            if (gridCacheCanvas && gridCacheTheme === cosmetics.grid) return;
+            const cacheKey = cosmetics.grid + (highContrast ? '_hc' : '');
+            if (gridCacheCanvas && gridCacheTheme === cacheKey) return;
             if (!gridCacheCanvas) {
                 gridCacheCanvas = document.createElement('canvas');
                 gridCacheCanvas.width = CANVAS_WIDTH;
                 gridCacheCanvas.height = CANVAS_HEIGHT;
             }
-            gridCacheTheme = cosmetics.grid;
+            gridCacheTheme = cacheKey;
             const gctx = gridCacheCanvas.getContext('2d');
             gctx.fillStyle = theme.bg;
             gctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-            gctx.strokeStyle = theme.stroke;
+            gctx.strokeStyle = highContrast ? 'rgba(255,255,255,0.15)' : theme.stroke;
             gctx.lineWidth = 1;
             gctx.beginPath();
             for (let x = 0; x <= CANVAS_WIDTH; x += TILE_SIZE) {
@@ -130,6 +136,7 @@
 
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
         const scoreEl = document.getElementById('score');
         const highScoreEl = document.getElementById('highScore');
         const toastEl = document.getElementById('toast');
@@ -176,11 +183,27 @@
             }
         };
         let highScore = saveManager.getInt('snake_high_score', 0);
-        let gameInterval = null;
+        let gameTimeout = null;
+
+        function scheduleNextTick() {
+            if (gameState !== 'playing') return;
+            gameTimeout = setTimeout(() => {
+                updateGame();
+                if (gameState === 'playing') {
+                    scheduleNextTick();
+                }
+            }, tickInterval);
+        }
+
+        function stopGameLoop() {
+            if (gameTimeout) { clearTimeout(gameTimeout); gameTimeout = null; }
+        }
+
         let gameState = 'idle';
         let nextDirection = null;
         let audioCtx = null;
         let muted = saveManager.getInt('snake_muted', 0);
+        let highContrast = saveManager.get('snake_high_contrast', '') === '1';
         let particles = [];
         let displayedScore = 0;
         let obstacles = [];
@@ -195,6 +218,124 @@
         let prevRivalSnake = [];
         let hasTouch = 'ontouchstart' in window;
         let isMobile = hasTouch || window.innerWidth < 600;
+
+        // === SEEDED RUNS ===
+        let activeSeed = null;
+        let seedPrng = null;
+
+        // === GHOST REPLAY SYSTEM ===
+        let replayEvents = [];
+        let ghostPositions = [];
+        let ghostEnabled = false;
+        const REPLAY_VERSION = 1;
+
+        function startReplayRecording() {
+            replayEvents = [];
+        }
+
+        function recordReplayDirection(tick, dx, dy) {
+            replayEvents.push({ tick: tick, type: 'dir', dx: dx, dy: dy });
+        }
+
+        function recordReplayGrow(tick) {
+            replayEvents.push({ tick: tick, type: 'grow' });
+        }
+
+        function saveReplay(score, maxLength) {
+            if (replayEvents.length === 0 || activeSeed === null) return;
+            if (gameMode === 'daily') return;
+            var replay = {
+                version: REPLAY_VERSION,
+                seed: activeSeed,
+                mode: gameMode,
+                score: score,
+                maxLength: maxLength,
+                timestamp: Date.now(),
+                events: replayEvents
+            };
+            var replays = loadReplays(gameMode);
+            replays.push(replay);
+            replays.sort(function(a, b) { return b.score - a.score; });
+            replays = replays.slice(0, 5);
+            saveManager.setJSON('snake_replays_' + gameMode, replays);
+        }
+
+        function loadReplays(mode) {
+            return saveManager.getJSON('snake_replays_' + mode, []);
+        }
+
+        function rebuildGhost(replay, currentTick) {
+            if (!replay || replay.seed !== activeSeed || replay.version !== REPLAY_VERSION) return [];
+            var head = { x: TILE_SIZE * 10, y: TILE_SIZE * 10 };
+            var body = [{ x: head.x, y: head.y }];
+            var dx = TILE_SIZE, dy = 0;
+            var lastEventTick = -1;
+            var advancedThisTick = false;
+
+            for (var i = 0; i < replay.events.length; i++) {
+                var evt = replay.events[i];
+                if (evt.tick > currentTick) break;
+
+                if (evt.type === 'dir') {
+                    dx = evt.dx;
+                    dy = evt.dy;
+                }
+
+                if (evt.tick !== lastEventTick && lastEventTick >= 0) {
+                    head = { x: head.x + dx, y: head.y + dy };
+                    body.unshift({ x: head.x, y: head.y });
+                    advancedThisTick = true;
+                }
+                if (lastEventTick < 0) lastEventTick = evt.tick;
+                lastEventTick = evt.tick;
+            }
+
+            // Advance for the current tick
+            if (lastEventTick <= currentTick) {
+                head = { x: head.x + dx, y: head.y + dy };
+                body.unshift({ x: head.x, y: head.y });
+            }
+
+            // Trim to proper length based on grow events
+            var growthCount = 0;
+            for (var j = 0; j < replay.events.length; j++) {
+                if (replay.events[j].tick <= currentTick && replay.events[j].type === 'grow') {
+                    growthCount++;
+                }
+            }
+            var expectedLen = growthCount + 1;
+            while (body.length > expectedLen) {
+                body.pop();
+            }
+
+            if (body.length === 0) return [];
+            return body.map(function(p) { return wrapPosition(p); });
+        }
+
+        function getBestReplay(mode) {
+            var replays = loadReplays(mode);
+            if (replays.length === 0) return null;
+            var best = null;
+            for (var i = 0; i < replays.length; i++) {
+                if (replays[i].seed === activeSeed && replays[i].version === REPLAY_VERSION) {
+                    if (!best || replays[i].score > best.score) best = replays[i];
+                }
+            }
+            return best;
+        }
+
+        function mulberry32(a) {
+            return function() {
+                a |= 0; a = a + 0x6D2B79F5 | 0;
+                var t = Math.imul(a ^ a >>> 15, 1 | a);
+                t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+                return ((t ^ t >>> 14) >>> 0) / 4294967296;
+            };
+        }
+
+        function seededRandom() {
+            return seedPrng ? seedPrng() : Math.random();
+        }
 
         function hudFont(size) {
             return (isMobile ? size * 1.3 : size) + 'px Arial';
@@ -236,6 +377,7 @@
         let lastEatTime = 0;
         let sessionStartTime = 0;
         let sessionFoodEaten = 0;
+        let sessionModeHighStart = 0;
         let sessionFoodTypes = new Set();
         let sessionSpeedFood = 0; // will be used in future achievements
         let sessionBonusFood = 0; // will be used in future achievements
@@ -600,7 +742,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function pickRandomFoodType() {
-            const rand = Math.random();
+            const rand = seededRandom();
             const tiers = FOOD_TIERS;
             let cumulative = 0;
             for (const typeKey in tiers) {
@@ -633,7 +775,7 @@ const TRAIL_RENDER_CONFIG = {
                         }
                     }
                     if (freeTiles.length === 0) return null;
-                    const tile = freeTiles[Math.floor(Math.random() * freeTiles.length)];
+                    const tile = freeTiles[Math.floor(seededRandom() * freeTiles.length)];
                     const fallbackFood = { x: tile.x, y: tile.y, type: pickRandomFoodType() };
                     if (fallbackFood.type === 'rare' || fallbackFood.type === 'epic') playSound('rare_spawn');
                     return fallbackFood;
@@ -641,8 +783,8 @@ const TRAIL_RENDER_CONFIG = {
 
                 const type = pickRandomFoodType();
                 newFood = {
-                    x: Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE,
-                    y: Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE,
+                    x: Math.floor(seededRandom() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE,
+                    y: Math.floor(seededRandom() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE,
                     type: type
                 };
             } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y) ||
@@ -654,11 +796,11 @@ const TRAIL_RENDER_CONFIG = {
         function spawnPowerUpPickup() {
             if (powerUpPickup) return;
             const types = Object.keys(POWERUP_TYPES);
-            const type = types[Math.floor(Math.random() * types.length)];
+            const type = types[Math.floor(seededRandom() * types.length)];
             const maxAttempts = 50;
             for (let attempt = 0; attempt < maxAttempts; attempt++) {
-                const x = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
-                const y = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                const x = Math.floor(seededRandom() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                const y = Math.floor(seededRandom() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                 if (snake.some(s => s.x === x && s.y === y)) continue;
                 if (obstacles.some(o => o.x === x && o.y === y)) continue;
                 if (food && food.x === x && food.y === y) continue;
@@ -690,7 +832,7 @@ const TRAIL_RENDER_CONFIG = {
                     slowMoActive = true;
                     powerUpTimer = config.duration;
                     tickInterval = getEffectiveSpeed();
-                    restartGameInterval(tickInterval);
+                    restartGameTimeout();
                     break;
             }
             
@@ -707,7 +849,7 @@ const TRAIL_RENDER_CONFIG = {
             if (slowMoActive) {
                 slowMoActive = false;
                 tickInterval = getEffectiveSpeed();
-                restartGameInterval(tickInterval);
+                restartGameTimeout();
             }
             shieldActive = false;
             magnetActive = false;
@@ -775,7 +917,7 @@ const TRAIL_RENDER_CONFIG = {
             displayedScore = 0;
             particles = [];
             gameState = 'idle';
-            gameInterval = null;
+            gameTimeout = null;
             nextDirection = null;
             updateScoreDisplay();
             updateMenuFooter();
@@ -787,8 +929,13 @@ const TRAIL_RENDER_CONFIG = {
 
         function updateScoreDisplay() {
             if (score > (modeHighScores[gameMode] || 0)) {
+                const prevBest = modeHighScores[gameMode];
                 modeHighScores[gameMode] = score;
                 saveManager.setJSON('snake_mode_highs', modeHighScores);
+                if (sessionModeHighStart > 0 && prevBest && score > prevBest) {
+                    queueToast('🏆 NEW BEST! ' + MODE_CONFIG[gameMode].name + ': ' + score, 3000);
+                    playSound('achievement');
+                }
             }
             if (score > highScore) {
                 highScore = score;
@@ -804,11 +951,14 @@ const TRAIL_RENDER_CONFIG = {
         function updateMenuFooter() {
             var footer = document.getElementById('menuFooter');
             if (!footer) return;
+            var seedContainer = document.getElementById('seedContainer');
             if (gameState !== 'idle') {
                 footer.style.display = 'none';
+                if (seedContainer) seedContainer.style.display = 'none';
                 return;
             }
             footer.style.display = 'block';
+            if (seedContainer) seedContainer.style.display = 'flex';
             var prestigeInfo = document.getElementById('prestigeInfo');
             var shortcutInfo = document.getElementById('shortcutInfo');
             var info = '';
@@ -902,10 +1052,12 @@ const TRAIL_RENDER_CONFIG = {
             if (mc.timer) timeAttackEnd = Date.now() + mc.timer;
             if (gameMode === 'zen') zenActive = true;
             sessionStartTime = Date.now();
+            sessionModeHighStart = modeHighScores[gameMode] || 0;
             gameState = 'playing';
             updateMenuFooter();
             tickInterval = getEffectiveSpeed();
-            gameInterval = setInterval(updateGame, tickInterval);
+            scheduleNextTick();
+            if (activeSeed !== null) startReplayRecording();
             if (gameMode === 'classic' || gameMode === 'timeAttack') {
                 spawnRival();
             }
@@ -936,14 +1088,15 @@ const TRAIL_RENDER_CONFIG = {
             };
         }
 
-        function restartGameInterval(speed) {
-            clearInterval(gameInterval);
-            gameInterval = null;
-            gameInterval = setInterval(updateGame, speed || tickInterval);
+        function restartGameTimeout() {
+            stopGameLoop();
+            if (gameState === 'playing') {
+                scheduleNextTick();
+            }
         }
 
         function pickWeightedPattern() {
-            const rand = Math.random();
+            const rand = seededRandom();
             let cumulative = 0;
             for (const pattern of OBSTACLE_PATTERNS) {
                 cumulative += pattern.weight;
@@ -957,8 +1110,8 @@ const TRAIL_RENDER_CONFIG = {
             const maxObs = Math.floor((cols * rows) * MAX_OBSTACLE_PERCENT);
             if (obstacles.length >= maxObs) return null;
             for (let attempt = 0; attempt < 50; attempt++) {
-                const x = Math.floor(Math.random() * cols) * TILE_SIZE;
-                const y = Math.floor(Math.random() * rows) * TILE_SIZE;
+                const x = Math.floor(seededRandom() * cols) * TILE_SIZE;
+                const y = Math.floor(seededRandom() * rows) * TILE_SIZE;
                 if (Math.abs(x - headX) + Math.abs(y - headY) < 3 * TILE_SIZE) continue;
                 if (snake.some(s => s.x === x && s.y === y)) continue;
                 if (obstacles.some(o => o.x === x && o.y === y)) continue;
@@ -974,7 +1127,7 @@ const TRAIL_RENDER_CONFIG = {
             if (gameMode === 'zen' || gameMode === 'walled') return;
             const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
             const maxObs = Math.floor(totalTiles * MAX_OBSTACLE_PERCENT);
-            const count = Math.min(maxObs, 3 + Math.floor(Math.random() * 6));
+            const count = Math.min(maxObs, 3 + Math.floor(seededRandom() * 6));
             const headX = 10 * TILE_SIZE;
             const headY = 10 * TILE_SIZE;
             
@@ -982,8 +1135,8 @@ const TRAIL_RENDER_CONFIG = {
                 let placed = false;
                 for (let attempt = 0; attempt < 20; attempt++) {
                     const pattern = pickWeightedPattern();
-                    const anchorX = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
-                    const anchorY = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                    const anchorX = Math.floor(seededRandom() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                    const anchorY = Math.floor(seededRandom() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                     
                     const dist = Math.abs(anchorX - headX) + Math.abs(anchorY - headY);
                     if (dist < 3 * TILE_SIZE) continue;
@@ -1008,8 +1161,8 @@ const TRAIL_RENDER_CONFIG = {
                 
                 if (!placed) {
                     for (let attempt = 0; attempt < 20; attempt++) {
-                        const obsX = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
-                        const obsY = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                        const obsX = Math.floor(seededRandom() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                        const obsY = Math.floor(seededRandom() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                         const dist = Math.abs(obsX - headX) + Math.abs(obsY - headY);
                         if (dist < 3 * TILE_SIZE) continue;
                         if (snake.some(s => s.x === obsX && s.y === obsY)) continue;
@@ -1052,8 +1205,8 @@ const TRAIL_RENDER_CONFIG = {
             
             if (candidatePositions.length === 0) {
                 for (let attempt = 0; attempt < 20; attempt++) {
-                    const x = Math.floor(Math.random() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
-                    const y = Math.floor(Math.random() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
+                    const x = Math.floor(seededRandom() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
+                    const y = Math.floor(seededRandom() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                     const dist = Math.abs(x - startX) + Math.abs(y - startY);
                     if (dist >= 8 * TILE_SIZE && !obstacles.some(o => o.x === x && o.y === y)) {
                         if (!snake.some(s => s.x === x && s.y === y)) {
@@ -1066,7 +1219,7 @@ const TRAIL_RENDER_CONFIG = {
             
             if (candidatePositions.length === 0) return;
             
-            const pos = candidatePositions[Math.floor(Math.random() * candidatePositions.length)];
+            const pos = candidatePositions[Math.floor(seededRandom() * candidatePositions.length)];
             
             rivalSnake = [
                 { x: pos.x, y: pos.y },
@@ -1101,7 +1254,7 @@ const TRAIL_RENDER_CONFIG = {
             ].filter(function(d) { return !(d.dx === -rivalDx && d.dy === -rivalDy); });
             
             let chosenDir = { dx: rivalDx, dy: rivalDy };
-            const rand = Math.random();
+            const rand = seededRandom();
             
             if (rand < 0.70 && nearestFood) {
                 let dx_food = nearestFood.x - head.x;
@@ -1125,7 +1278,7 @@ const TRAIL_RENDER_CONFIG = {
             } else if (rand < 0.90) {
                 chosenDir = { dx: rivalDx, dy: rivalDy };
             } else {
-                const shuffled = possibleDirs.slice().sort(function() { return Math.random() - 0.5; });
+                const shuffled = possibleDirs.slice().sort(function() { return seededRandom() - 0.5; });
                 if (shuffled.length > 0) chosenDir = shuffled[0];
             }
             
@@ -1224,7 +1377,7 @@ const TRAIL_RENDER_CONFIG = {
     } else {
         tickInterval = getEffectiveSpeed();
     }
-    restartGameInterval(tickInterval);
+    restartGameTimeout();
     playSound('resume');
             drawGame(1);
             visualDirty = true;
@@ -1250,9 +1403,9 @@ const TRAIL_RENDER_CONFIG = {
 
         function gameOver() {
             helpOverlayVisible = false;
-            clearInterval(gameInterval);
-            gameInterval = null;
+            stopGameLoop();
             gameState = 'gameover';
+            saveReplay(score, snake.length);
             updateMenuFooter();
             rivalSnake = [];
             rivalActive = false;
@@ -1299,9 +1452,9 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function endZenSession() {
-            clearInterval(gameInterval);
-            gameInterval = null;
+            stopGameLoop();
             gameState = 'gameover';
+            saveReplay(score, snake.length);
             updateMenuFooter();
             score = snake.length;
             finalizeSession(true);
@@ -1967,6 +2120,17 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 ctx.fillRect(obs.x + 1, obs.y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
                 ctx.strokeRect(obs.x + 0.5, obs.y + 0.5, TILE_SIZE - 1, TILE_SIZE - 1);
+                // High-contrast cross-hatch
+                if (highContrast) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(obs.x + 1, obs.y + 1);
+                    ctx.lineTo(obs.x + TILE_SIZE - 2, obs.y + TILE_SIZE - 2);
+                    ctx.moveTo(obs.x + TILE_SIZE - 2, obs.y + 1);
+                    ctx.lineTo(obs.x + 1, obs.y + TILE_SIZE - 2);
+                    ctx.stroke();
+                }
             }
         }
 
@@ -2066,17 +2230,32 @@ const TRAIL_RENDER_CONFIG = {
             ctx.restore();
 
             // Letter labels for non-common types with text outline for contrast
-            const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
-            if (labels[food.type]) {
+            if (!highContrast) {
+                const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
+                if (labels[food.type]) {
+                    ctx.save();
+                    ctx.font = 'bold 10px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = 2;
+                    ctx.strokeText(labels[food.type], cx, cy);
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.fillText(labels[food.type], cx, cy);
+                    ctx.restore();
+                }
+            } else {
+                // High-contrast: universal labels for ALL food types
+                const hcLabels = { common: 'C', uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
                 ctx.save();
-                ctx.font = 'bold 10px Arial';
+                ctx.font = 'bold 13px Arial';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.strokeStyle = '#000';
-                ctx.lineWidth = 2;
-                ctx.strokeText(labels[food.type], cx, cy);
+                ctx.lineWidth = 3;
+                ctx.strokeText(hcLabels[food.type] || '?', cx, cy);
                 ctx.fillStyle = '#FFFFFF';
-                ctx.fillText(labels[food.type], cx, cy);
+                ctx.fillText(hcLabels[food.type] || '?', cx, cy);
                 ctx.restore();
             }
         }
@@ -2212,6 +2391,13 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.globalAlpha = 1;
                 }
 
+                // High-contrast snake outline
+                if (highContrast && !(skin.head === 'ghost')) {
+                    ctx.strokeStyle = '#FFFFFF';
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+
                 if (index === 0) {
                     drawEyes(drawX, drawY, dx, dy, 'white', 'black');
                 }
@@ -2315,6 +2501,20 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'top';
                 ctx.fillText('🔇', CANVAS_WIDTH - 8, 8);
+            }
+            if (highContrast) {
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.font = hudFont(11);
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText('HC', CANVAS_WIDTH - 8, CANVAS_HEIGHT - 4);
+            }
+            if (ghostEnabled && activeSeed !== null && getBestReplay(gameMode) !== null) {
+                ctx.fillStyle = 'rgba(100,200,255,0.5)';
+                ctx.font = hudFont(11);
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText('👻', CANVAS_WIDTH - 8 - (highContrast ? 24 : 0), CANVAS_HEIGHT - 4);
             }
         }
 
@@ -2471,6 +2671,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawGame(t) {
+            ctx.imageSmoothingEnabled = false;
             drawGrid();
             drawMuteIndicator();
             drawXPBar();
@@ -2480,6 +2681,18 @@ const TRAIL_RENDER_CONFIG = {
             drawPowerUpPickup();
             drawSnake(t);
             drawRival(t);
+
+            // Ghost snake overlay
+            if (ghostEnabled && ghostPositions.length > 0) {
+                ctx.save();
+                ctx.globalAlpha = 0.3;
+                for (var gi = 0; gi < ghostPositions.length; gi++) {
+                    var gp = ghostPositions[gi];
+                    ctx.fillStyle = gi === 0 ? '#88DDFF' : '#66CCFF';
+                    ctx.fillRect(gp.x, gp.y, TILE_SIZE - 1, TILE_SIZE - 1);
+                }
+                ctx.restore();
+            }
             drawTrails();
             drawSlowMoTint();
             drawTimeAttackHUD();
@@ -2487,6 +2700,15 @@ const TRAIL_RENDER_CONFIG = {
             drawDailyHUD();
             drawPowerUpHUD();
             drawRivalHUD();
+
+            // Seed display
+            if (activeSeed !== null && (gameState === 'playing' || gameState === 'paused' || gameState === 'gameover')) {
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText('Seed: ' + activeSeed, CANVAS_WIDTH - 5, CANVAS_HEIGHT - 5);
+            }
 
             if (gameState === 'idle') {
                 drawOverlay('SNAKE', 'Press ENTER to Start');
@@ -2511,6 +2733,12 @@ const TRAIL_RENDER_CONFIG = {
             prevRivalSnake = rivalSnake.map(s => ({ x: s.x, y: s.y }));
 
             gameTick++;
+
+            // Rebuild ghost positions
+            if (ghostEnabled && activeSeed !== null) {
+                var bestReplay = getBestReplay(gameMode);
+                ghostPositions = rebuildGhost(bestReplay, gameTick);
+            }
             stats.totalDistance++;
             if (gameTick % 10 === 0) awardXP(1);
 
@@ -2524,6 +2752,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (nextDirection.dx !== -dx || nextDirection.dy !== -dy) {
                     dx = nextDirection.dx;
                     dy = nextDirection.dy;
+                    if (activeSeed !== null) {
+                        recordReplayDirection(gameTick, dx, dy);
+                    }
                 }
                 nextDirection = null;
             }
@@ -2584,9 +2815,10 @@ const TRAIL_RENDER_CONFIG = {
 
             snake.unshift(wrappedHead);
 
-            if (wrappedHead.x === food.x && wrappedHead.y === food.y) {
+            if (food && wrappedHead.x === food.x && wrappedHead.y === food.y) {
                 snake.push(tail);
                 snakeGrew = true;
+                if (activeSeed !== null) recordReplayGrow(gameTick);
                 const eatenType = food.type;
 
                 // Stats tracking
@@ -2677,9 +2909,10 @@ const TRAIL_RENDER_CONFIG = {
                 playSound(tier.sound);
                 // speed food still has the special speed boost behavior
                 if (eatenType === 'speed') {
-                    tickInterval = Math.max(MIN_SPEED, getEffectiveSpeed() - 30);
-                    restartGameInterval(tickInterval);
-                    speedBoostCounter = 16; // ~2 seconds at 120ms ticks
+                    if (activeSeed === null) {
+                        tickInterval = Math.max(MIN_SPEED, getEffectiveSpeed() - 30);
+                        speedBoostCounter = 16; // ~2 seconds at 120ms ticks
+                    }
                 }
                 checkAchievements(score);
                 const playerCombined = snake.concat(rivalActive ? rivalSnake : []);
@@ -2829,7 +3062,6 @@ const TRAIL_RENDER_CONFIG = {
                 speedBoostCounter--;
                 if (speedBoostCounter <= 0) {
                     tickInterval = getEffectiveSpeed();
-                    restartGameInterval(tickInterval);
                 }
             }
 
@@ -2838,7 +3070,7 @@ const TRAIL_RENDER_CONFIG = {
                 if (obstacleSpawnTimer <= 0) {
                     obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
                     const head = snake.length > 0 ? snake[0] : { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE };
-                    const count = 1 + Math.floor(Math.random() * 2);
+                    const count = 1 + Math.floor(seededRandom() * 2);
                     let spawned = 0;
                     for (let i = 0; i < count; i++) {
                         const tile = findFreeTile(head.x, head.y);
@@ -3315,8 +3547,7 @@ const TRAIL_RENDER_CONFIG = {
                     pauseMenuSelection = 0;
                     pauseConfirmPending = false;
                     pauseConfirmAction = null;
-                    clearInterval(gameInterval);
-                    gameInterval = null;
+                    stopGameLoop();
                     sessionPauseStart = Date.now();
                     playSound('pause');
                     drawGame(1);
@@ -3332,6 +3563,19 @@ const TRAIL_RENDER_CONFIG = {
                 muted = muted ? 0 : 1;
                 saveManager.set('snake_muted', muted);
                 queueToast(muted ? '\uD83D\uDD07 Muted' : '\uD83D\uDD0A Sound On', 1500);
+                return;
+            }
+
+            if (e.key === 'v' || e.key === 'V') {
+                highContrast = !highContrast;
+                saveManager.set('snake_high_contrast', highContrast ? '1' : '0');
+                visualDirty = true;
+                return;
+            }
+
+            if (e.key === 'g' || e.key === 'G') {
+                ghostEnabled = !ghostEnabled;
+                queueToast(ghostEnabled ? '👻 Ghost On' : '👻 Ghost Off', 1500);
                 return;
             }
 
@@ -3618,8 +3862,7 @@ const TRAIL_RENDER_CONFIG = {
                 pauseMenuSelection = 0;
                 pauseConfirmPending = false;
                 pauseConfirmAction = null;
-                clearInterval(gameInterval);
-                gameInterval = null;
+                stopGameLoop();
                 playSound('pause');
                 drawGame(1);
                 visualDirty = true;
@@ -3635,6 +3878,32 @@ const TRAIL_RENDER_CONFIG = {
 
         syncDailyState();
         resetGame();
+
+        // === SEED INPUT HANDLERS ===
+        document.getElementById('seedField').addEventListener('input', function() {
+            const val = this.value.trim();
+            if (val) {
+                activeSeed = val;
+                const hash = val.split('').reduce(function(h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0);
+                seedPrng = mulberry32(hash);
+            } else {
+                activeSeed = null;
+                seedPrng = null;
+            }
+        });
+        document.getElementById('seedRandomBtn').addEventListener('click', function() {
+            const seed = Math.random().toString(36).substring(2, 10).toUpperCase();
+            document.getElementById('seedField').value = seed;
+            activeSeed = seed;
+            const hash = seed.split('').reduce(function(h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0);
+            seedPrng = mulberry32(hash);
+        });
+        document.getElementById('seedClearBtn').addEventListener('click', function() {
+            document.getElementById('seedField').value = '';
+            activeSeed = null;
+            seedPrng = null;
+        });
+
         requestAnimationFrame(animateVisuals);
     </script>
 </body>
