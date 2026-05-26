@@ -218,6 +218,8 @@
         let prevRivalSnake = [];
         let hasTouch = 'ontouchstart' in window;
         let isMobile = hasTouch || window.innerWidth < 600;
+        let mutatorTokens = saveManager.getInt('snake_mutator_tokens', 0);
+        let unlockedMutators = saveManager.getJSON('snake_mutator_unlocks', ['gravity','mirror','phase_shift'], function(v) { return Array.isArray(v) && v.length > 0; });
 
         // === SEEDED RUNS ===
         let activeSeed = null;
@@ -228,6 +230,18 @@
         let ghostPositions = [];
         let ghostEnabled = false;
         const REPLAY_VERSION = 1;
+        const CHALLENGE_URL_VERSION = 1;
+        const GHOST_ARENA_MAX = 3;
+        const GHOST_ARENA_COLORS = [
+            { body: '#66CCFF', head: '#4488AA', label: '1st', alpha: 0.35 },
+            { body: '#FF8866', head: '#AA4422', label: '2nd', alpha: 0.25 },
+            { body: '#88FF88', head: '#44AA44', label: '3rd', alpha: 0.20 },
+        ];
+
+        let challengeFromUrl = null;
+        let ghostArenaMode = false;
+        let arenaGhostReplays = [];
+        let arenaGhostPositions = [];
 
         function startReplayRecording() {
             replayEvents = [];
@@ -243,11 +257,12 @@
 
         function saveReplay(score, maxLength) {
             if (replayEvents.length === 0 || activeSeed === null) return;
-            if (gameMode === 'daily') return;
+            if (gameMode === 'daily' || gameMode === 'gauntlet') return;
             var replay = {
                 version: REPLAY_VERSION,
                 seed: activeSeed,
                 mode: gameMode,
+                mutator: activeMutator,
                 score: score,
                 maxLength: maxLength,
                 timestamp: Date.now(),
@@ -264,8 +279,44 @@
             return saveManager.getJSON('snake_replays_' + mode, []);
         }
 
+        function parseChallengeUrl(hash) {
+            var parts = hash.split('~');
+            if (parts.length < 2) return null;
+            var mode = parts[0];
+            if (!MODE_CONFIG[mode]) return null;
+            if (mode === 'daily') return null;
+            var seed = decodeURIComponent(parts[1]);
+            if (!seed || seed.indexOf('~') !== -1) return null;
+            var targetScore = parts[2] ? parseInt(parts[2], 10) || null : null;
+            return { mode: mode, seed: seed, targetScore: targetScore, version: CHALLENGE_URL_VERSION };
+        }
+
+        function getArenaReplays(mode) {
+            var replays = loadReplays(mode);
+            var matched = [];
+            for (var i = 0; i < replays.length; i++) {
+                var r = replays[i];
+                if (r.seed === activeSeed) matched.push(r);
+            }
+            matched.sort(function(a, b) { return b.score - a.score; });
+            return matched.slice(0, GHOST_ARENA_MAX);
+        }
+
+        function fallbackCopy(text) {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); queueToast('Challenge link copied!', 2000); }
+            catch(e) { queueToast('Copy failed — use HTTPS', 2000); }
+            document.body.removeChild(ta);
+        }
+
         function rebuildGhost(replay, currentTick) {
             if (!replay || replay.seed !== activeSeed || replay.version !== REPLAY_VERSION) return [];
+            if (replay.mutator && replay.mutator !== activeMutator) return [];
             var head = { x: TILE_SIZE * 10, y: TILE_SIZE * 10 };
             var body = [{ x: head.x, y: head.y }];
             var dx = TILE_SIZE, dy = 0;
@@ -396,11 +447,119 @@
         let powerUpType = null;
         let powerUpSpawnCounter = 0;
         let powerUpDespawnCounter = 0;
-        let rivalSnake = [];
-        let rivalDx = 0;
-        let rivalDy = 0;
-        let rivalActive = false;
-        let rivalRespawnTimer = 0;
+        let rivals = [];
+        function anyRivalActive() {
+            for (var ri = 0; ri < rivals.length; ri++) {
+                if (rivals[ri].active) return true;
+            }
+            return false;
+        }
+        function rivalCombinedSnake() {
+            var combined = [];
+            for (var ri = 0; ri < rivals.length; ri++) {
+                if (rivals[ri].active) {
+                    for (var rj = 0; rj < rivals[ri].snake.length; rj++) {
+                        combined.push(rivals[ri].snake[rj]);
+                    }
+                }
+            }
+            return combined;
+        }
+let paintGrid = null;
+let paintCoveredCount = 0;
+let paintTotalTiles = 0;
+let paintLayers = 1;
+let currentPaintColor = '#FF4444';
+let painterFoodEaten = 0;
+let lastEatenType = 'common';
+let synesthesiaMode = saveManager.get('snake_synesthesia', '') === '1';
+
+const GAUNTLET_WAVES = [
+    { wave: 1, objective: 'survive', duration: 900, speedBase: 120, obstacles: 0, rival: false, desc: 'Survive 15 seconds' },
+    { wave: 2, objective: 'eat', target: 5, speedBase: 110, obstacles: 4, rival: false, desc: 'Eat 5 food' },
+    { wave: 3, objective: 'combo', target: 3, speedBase: 100, obstacles: 6, rival: true, desc: 'Reach 3x combo' },
+    { wave: 4, objective: 'survive', duration: 600, speedBase: 90, obstacles: 8, rival: true, desc: 'Survive 10 seconds (fast!)' },
+    { wave: 5, objective: 'score', target: 150, speedBase: 85, obstacles: 10, rival: true, desc: 'Score 150 points' },
+];
+
+const GAUNTLET_PICKS = [
+    { id: 'extra_length', name: 'Extra Length', icon: '\uD83D\uDCCF', desc: '+5 segments next wave', stackable: true },
+    { id: 'food_rush', name: 'Food Rush', icon: '\uD83C\uDF4E', desc: 'Food spawns 50% faster', stackable: true },
+    { id: 'wave_shield', name: 'Wave Shield', icon: '\uD83D\uDEE1', desc: '6-second shield at wave start', stackable: false },
+    { id: 'score_boost', name: 'Score Boost', icon: '\u2B50', desc: '+50% score next wave', stackable: true },
+    { id: 'slow_pace', name: 'Slow Pace', icon: '\uD83D\uDC0C', desc: '20% slower next wave', stackable: false },
+    { id: 'combo_save', name: 'Combo Keep', icon: '\uD83D\uDD25', desc: 'Combo carries between waves', stackable: false },
+];
+
+const GAUNTLET_MASTERY_TIERS = [
+    { points: 0,  name: 'None',     color: '#888' },
+    { points: 5,  name: 'Bronze',   color: '#CD7F32' },
+    { points: 15, name: 'Silver',   color: '#C0C0C0' },
+    { points: 30, name: 'Gold',     color: '#FFD700' },
+    { points: 50, name: 'Platinum', color: '#E5E4E2' },
+    { points: 75, name: 'Diamond',  color: '#B9F2FF' },
+];
+
+let gauntletWave = 0;
+let gauntletScore = 0;
+let gauntletPicks = [];
+let gauntletObjective = null;
+let gauntletIntermission = false;
+let gauntletSelection = 0;
+let gauntletPickOptions = [];
+let gauntletMasteryPoints = saveManager.getInt('snake_gauntlet_mastery', 0);
+let gauntletWaveScore = 0;
+let sessionUsedShield = false;
+
+const MUTATOR_DEFS = {
+    gravity:     { name: 'Gravity',      icon: '\u2B07', desc: 'Snake falls when you stop pressing keys',    tokenCost: 0 },
+    mirror:      { name: 'Mirror',       icon: '\uD83D\uDE00', desc: 'Left and right controls are reversed', tokenCost: 0 },
+    phase_shift: { name: 'Phase Shift',  icon: '\uD83D\uDC7B', desc: 'Snake phases through itself every 5 ticks', tokenCost: 0 },
+    hunger_clock:{ name: 'Hunger Clock', icon: '\u231B', desc: 'Lose 1 length every 50 ticks. Die at length 0.', tokenCost: 3 },
+    double_rival:{ name: 'Double Rival', icon: '\uD83D\uDC0D\uD83D\uDC0D', desc: 'Two rival snakes compete for food', tokenCost: 5 },
+    golden_food: { name: 'Golden Age',   icon: '\u2728', desc: 'All food gives 3x points but spawns half as often', tokenCost: 4 },
+    shrink_zone: { name: 'Shrink Zone',  icon: '\uD83D\uDCCD', desc: 'Board shrinks by 1 row/column every 30 seconds', tokenCost: 6 },
+    chaos_seed:  { name: 'Chaos Seed',   icon: '\uD83C\uDFB2', desc: 'Food type probability reshuffles every 20 ticks', tokenCost: 8 },
+};
+const MUTATOR_BASE_POOL = ['gravity', 'mirror', 'phase_shift'];
+const MUTATOR_DRAFT_SIZE = 3;
+let activeMutator = null;
+let draftOptions = [];
+let draftScreenVisible = false;
+let draftSelection = 0;
+let draftModeEnabled = false;
+let shrinkRows = 0;
+let shrinkCols = 0;
+let hungerStarted = false;
+let hungerTickCounter = 0;
+let chaosShuffleTick = 0;
+let chaosCurrentWeights = null;
+
+const SYNESTHESIA_NOTES = {
+    common:   { note: 'C', freq: 261.63 },
+    uncommon: { note: 'E', freq: 329.63 },
+    rare:     { note: 'G', freq: 392.00 },
+    epic:     { note: 'B', freq: 493.88 },
+    bonus:    { note: 'A', freq: 440.00 },
+    speed:    { note: 'D', freq: 293.66 },
+};
+
+const SYNESTHESIA_COMBO_OCTAVES = [
+    { minCombo: 0,  octave: 4 },
+    { minCombo: 5,  octave: 5 },
+    { minCombo: 10, octave: 6 },
+    { minCombo: 20, octave: 7 },
+];
+
+let droneOsc = null;
+let droneGain = null;
+let droneActive = false;
+let padOsc1 = null;
+let padOsc2 = null;
+let padGain = null;
+let padActive = false;
+let padRootNote = 261.63;
+let padChangeTick = 0;
         let obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
         let newObstacleFlash = [];
         let newObstacleToastTimer = 0;
@@ -593,7 +752,15 @@
             walled: {
                 name:'Walled', speed:'dynamic', selfCollision:true, wallDeath:true, wrap:false,
                 timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
-            }
+            },
+            painter: {
+                name:'Painter', speed:80, selfCollision:false, wallDeath:false, wrap:true,
+                timer:null, scoreIs:'coverage', earnXP:true, achievementsEnabled:true
+            },
+            gauntlet: {
+                name:'Gauntlet', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+            },
         };
 
         const FOOD_TIERS = {
@@ -640,7 +807,7 @@ const TRAIL_RENDER_CONFIG = {
             slowmo: { name: 'Slow-Motion', color: '#AA44FF', shape: 'diamond', duration: 4000 },
         };
 
-        const MODE_ORDER = ['classic', 'timeAttack', 'snap', 'walled', 'zen', 'daily'];
+        const MODE_ORDER = ['classic', 'timeAttack', 'snap', 'walled', 'zen', 'painter', 'gauntlet', 'daily'];
 
         const DAILY_CHALLENGES = [
           { desc:'Score 200+ points', check:function(s,st){return s>=200;}, reward:200, progressKey:'score', progressTarget:200 },
@@ -697,7 +864,9 @@ const TRAIL_RENDER_CONFIG = {
                 zen: 'No death from collisions. Relax and grow. Score = snake length.',
                 daily: 'Complete today\'s unique challenge! 3 attempts per day.',
                 snap: 'Snake shrinks every 3s — keep eating to survive!',
-                walled: 'Classic Snake with walls. Hitting the edge kills you. No second chances.'
+                walled: 'Classic Snake with walls. Hitting the edge kills you. No second chances.',
+                painter: 'Paint the board! Eat food to grow. Your trail is permanent. No self-collision. Score = coverage %.',
+                gauntlet: '5 waves, each with a unique objective. Pick bonuses between waves. Death ends the run!',
             };
             return descs[mode] || '';
         }
@@ -721,12 +890,23 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function addScore(amount) {
-            if (gameMode === 'zen') {
-                score = snake.length;
+            if (gameMode === 'zen' || gameMode === 'painter') {
+                if (gameMode === 'zen') score = snake.length;
                 updateScoreDisplay();
                 return;
             }
             const multi = (pinnacleRank > 0 ? (1 + pinnacleRank * 0.02) : 1) * getOverchargeMultiplier();
+            if (gameMode === 'gauntlet') {
+                for (var gpi = 0; gpi < gauntletPicks.length; gpi++) {
+                    if (gauntletPicks[gpi].id === 'score_boost') {
+                        amount = Math.floor(amount * 1.5);
+                        break;
+                    }
+                }
+            }
+            if (activeMutator === 'golden_food') {
+                amount = Math.round(amount * 3);
+            }
             score += Math.round(amount * multi);
             updateScoreDisplay();
         }
@@ -743,6 +923,13 @@ const TRAIL_RENDER_CONFIG = {
 
         function pickRandomFoodType() {
             const rand = seededRandom();
+            if (activeMutator === 'chaos_seed' && chaosCurrentWeights) {
+                var chaosCum = 0;
+                for (var ck in chaosCurrentWeights) {
+                    chaosCum += chaosCurrentWeights[ck];
+                    if (rand < chaosCum) return ck;
+                }
+            }
             const tiers = FOOD_TIERS;
             let cumulative = 0;
             for (const typeKey in tiers) {
@@ -804,7 +991,8 @@ const TRAIL_RENDER_CONFIG = {
                 if (snake.some(s => s.x === x && s.y === y)) continue;
                 if (obstacles.some(o => o.x === x && o.y === y)) continue;
                 if (food && food.x === x && food.y === y) continue;
-                if (rivalActive && rivalSnake.some(s => s.x === x && s.y === y)) continue;
+                var rivalSegsFree = rivalCombinedSnake();
+                if (rivalSegsFree.some(s => s.x === x && s.y === y)) continue;
                 powerUpPickup = { x, y, type };
                 powerUpDespawnCounter = 125; // ~15 seconds at 120ms per tick
                 return;
@@ -886,6 +1074,12 @@ const TRAIL_RENDER_CONFIG = {
             eatAnimTimer = 0;
             if (comboFadeTimer) clearTimeout(comboFadeTimer);
             comboFadeTimer = null;
+            paintGrid = null;
+            paintCoveredCount = 0;
+            paintTotalTiles = 0;
+            paintLayers = 1;
+            currentPaintColor = '#FF4444';
+            painterFoodEaten = 0;
             powerUpPickup = null;
             shieldActive = false;
             magnetActive = false;
@@ -894,11 +1088,18 @@ const TRAIL_RENDER_CONFIG = {
             powerUpType = null;
             powerUpSpawnCounter = 0;
             powerUpDespawnCounter = 0;
-            rivalSnake = [];
-            rivalDx = 0;
-            rivalDy = 0;
-            rivalActive = false;
-            rivalRespawnTimer = 0;
+            rivals = [];
+            activeMutator = null;
+            draftScreenVisible = false;
+            draftModeEnabled = false;
+            draftOptions = [];
+            draftSelection = 0;
+            shrinkRows = 0;
+            shrinkCols = 0;
+            hungerStarted = false;
+            hungerTickCounter = 0;
+            chaosShuffleTick = 0;
+            chaosCurrentWeights = null;
             speedBoostCounter = 0;
             obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
             newObstacleFlash = [];
@@ -908,11 +1109,39 @@ const TRAIL_RENDER_CONFIG = {
             pauseConfirmAction = null;
 
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
+            if (gameMode === 'painter') {
+                snake = [
+                    { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE },
+                    { x: 9 * TILE_SIZE, y: 10 * TILE_SIZE },
+                    { x: 8 * TILE_SIZE, y: 10 * TILE_SIZE }
+                ];
+            }
             dx = TILE_SIZE;
             dy = 0;
             ghostPositions = [];
+            ghostArenaMode = false;
+            arenaGhostReplays = [];
+            arenaGhostPositions = [];
             generateObstacles();
-            const combinedInitial = snake.concat(rivalActive ? rivalSnake : []);
+            if (gameMode === 'painter') {
+                var cols = CANVAS_WIDTH / TILE_SIZE;
+                var rows = CANVAS_HEIGHT / TILE_SIZE;
+                paintGrid = [];
+                for (var c = 0; c < cols; c++) {
+                    paintGrid[c] = [];
+                    for (var r = 0; r < rows; r++) {
+                        paintGrid[c][r] = null;
+                    }
+                }
+                paintCoveredCount = 0;
+                paintTotalTiles = (cols * rows) - obstacles.length;
+                paintLayers = 1;
+                currentPaintColor = '#FF4444';
+                painterFoodEaten = 0;
+            }
+            stopDrone();
+            stopPad();
+             const combinedInitial = snake.concat(rivalCombinedSnake());
             food = generateFood(combinedInitial);
             score = 0;
             displayedScore = 0;
@@ -1059,8 +1288,25 @@ const TRAIL_RENDER_CONFIG = {
             tickInterval = getEffectiveSpeed();
             scheduleNextTick();
             if (activeSeed !== null) startReplayRecording();
-            if (gameMode === 'classic' || gameMode === 'timeAttack') {
-                spawnRival();
+            if (synesthesiaMode) startPad();
+            if ((gameMode === 'classic' || gameMode === 'timeAttack') && gameMode !== 'painter') {
+                spawnRival(0);
+            }
+            if (activeMutator === 'double_rival' && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+                spawnRival(1);
+            }
+            if (gameMode === 'gauntlet') {
+                gauntletWave = 0;
+                gauntletScore = 0;
+                gauntletPicks = [];
+                gauntletIntermission = false;
+                gauntletSelection = 0;
+                gauntletPickOptions = [];
+                gauntletWaveScore = 0;
+                resetWaveState();
+                var firstWave = GAUNTLET_WAVES[0];
+                if (firstWave.rival) spawnRival(0);
+                tickInterval = firstWave.speedBase;
             }
             drawGame(1);
             visualDirty = true;
@@ -1117,7 +1363,8 @@ const TRAIL_RENDER_CONFIG = {
                 if (snake.some(s => s.x === x && s.y === y)) continue;
                 if (obstacles.some(o => o.x === x && o.y === y)) continue;
                 if (food && food.x === x && food.y === y) continue;
-                if (rivalActive && rivalSnake.some(s => s.x === x && s.y === y)) continue;
+                var rivalSegsFree = rivalCombinedSnake();
+                if (rivalSegsFree.some(s => s.x === x && s.y === y)) continue;
                 return { x, y };
             }
             return null;
@@ -1125,7 +1372,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function generateObstacles() {
             obstacles = [];
-            if (gameMode === 'zen' || gameMode === 'walled') return;
+            if (gameMode === 'zen' || gameMode === 'walled' || gameMode === 'painter' || gameMode === 'gauntlet') return;
             const totalTiles = (CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE);
             const maxObs = Math.floor(totalTiles * MAX_OBSTACLE_PERCENT);
             const count = Math.min(maxObs, 3 + Math.floor(seededRandom() * 6));
@@ -1180,187 +1427,120 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
 
-        function spawnRival() {
-            if (rivalActive) return;
-            if (gameMode === 'zen' || gameMode === 'snap' || gameMode === 'daily' || gameMode === 'walled') return;
-            
-            const startX = 10 * TILE_SIZE;
-            const startY = 10 * TILE_SIZE;
-            const candidatePositions = [];
-            
-            const corners = [
-                { x: 2 * TILE_SIZE, y: 2 * TILE_SIZE },
-                { x: 17 * TILE_SIZE, y: 2 * TILE_SIZE },
-                { x: 2 * TILE_SIZE, y: 17 * TILE_SIZE },
-                { x: 17 * TILE_SIZE, y: 17 * TILE_SIZE },
-            ];
-            
-            for (const corner of corners) {
-                const dist = Math.abs(corner.x - startX) + Math.abs(corner.y - startY);
-                if (dist >= 8 * TILE_SIZE) {
-                    if (!obstacles.some(o => o.x === corner.x && o.y === corner.y)) {
-                        candidatePositions.push(corner);
-                    }
-                }
+        function spawnRival(idx) {
+            if (idx === undefined) idx = 0;
+            while (rivals.length <= idx) {
+                rivals.push({ snake: [], dx: TILE_SIZE, dy: 0, active: false, respawnTimer: 0, color: idx === 0 ? '#FF4444' : '#FF8844' });
             }
-            
-            if (candidatePositions.length === 0) {
-                for (let attempt = 0; attempt < 20; attempt++) {
-                    const x = Math.floor(seededRandom() * (CANVAS_WIDTH / TILE_SIZE)) * TILE_SIZE;
-                    const y = Math.floor(seededRandom() * (CANVAS_HEIGHT / TILE_SIZE)) * TILE_SIZE;
-                    const dist = Math.abs(x - startX) + Math.abs(y - startY);
-                    if (dist >= 8 * TILE_SIZE && !obstacles.some(o => o.x === x && o.y === y)) {
-                        if (!snake.some(s => s.x === x && s.y === y)) {
-                            candidatePositions.push({ x: x, y: y });
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (candidatePositions.length === 0) return;
-            
-            const pos = candidatePositions[Math.floor(seededRandom() * candidatePositions.length)];
-            
-            rivalSnake = [
-                { x: pos.x, y: pos.y },
-                { x: pos.x, y: pos.y + TILE_SIZE },
-                { x: pos.x, y: pos.y + 2 * TILE_SIZE },
-            ];
-            rivalDx = 0;
-            rivalDy = -TILE_SIZE;
-            rivalActive = true;
+            if (rivals[idx].active) return;
+            if (gameMode === 'zen' || gameMode === 'snap' || gameMode === 'daily' || gameMode === 'walled' || gameMode === 'painter') return;
+            var r = rivals[idx];
+            r.snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
+            r.dx = TILE_SIZE;
+            r.dy = 0;
+            r.active = true;
+            r.respawnTimer = 0;
         }
 
-        function updateRival() {
-            if (!rivalActive || rivalSnake.length === 0) return;
-            
-            const head = rivalSnake[0];
-            
-            let nearestFood = null;
-            let nearestDist = Infinity;
+        function updateRival(idx) {
+            if (idx === undefined) idx = 0;
+            if (idx >= rivals.length) return;
+            var r = rivals[idx];
+            if (!r.active) return;
+
             if (food) {
-                const dist = Math.abs(food.x - head.x) + Math.abs(food.y - head.y);
-                if (dist < nearestDist) {
-                    nearestDist = dist;
-                    nearestFood = food;
-                }
-            }
-            
-            const possibleDirs = [
-                { dx: TILE_SIZE, dy: 0 },
-                { dx: -TILE_SIZE, dy: 0 },
-                { dx: 0, dy: TILE_SIZE },
-                { dx: 0, dy: -TILE_SIZE },
-            ].filter(function(d) { return !(d.dx === -rivalDx && d.dy === -rivalDy); });
-            
-            let chosenDir = { dx: rivalDx, dy: rivalDy };
-            const rand = seededRandom();
-            
-            if (rand < 0.70 && nearestFood) {
-                let dx_food = nearestFood.x - head.x;
-                let dy_food = nearestFood.y - head.y;
-                if (Math.abs(dx_food) > CANVAS_WIDTH / 2) {
-                    dx_food = dx_food > 0 ? dx_food - CANVAS_WIDTH : dx_food + CANVAS_WIDTH;
-                }
-                if (Math.abs(dy_food) > CANVAS_HEIGHT / 2) {
-                    dy_food = dy_food > 0 ? dy_food - CANVAS_HEIGHT : dy_food + CANVAS_HEIGHT;
-                }
-                
-                if (Math.abs(dx_food) >= Math.abs(dy_food)) {
-                    chosenDir = { dx: dx_food > 0 ? TILE_SIZE : -TILE_SIZE, dy: 0 };
+                var rand = seededRandom();
+                if (rand < 0.7) {
+                    var head = r.snake[0];
+                    var dx_food = food.x - head.x;
+                    var dy_food = food.y - head.y;
+                    if (MODE_CONFIG[gameMode].wrap) {
+                        if (Math.abs(dx_food) > CANVAS_WIDTH / 2) {
+                            dx_food = dx_food > 0 ? dx_food - CANVAS_WIDTH : dx_food + CANVAS_WIDTH;
+                        }
+                        if (Math.abs(dy_food) > CANVAS_HEIGHT / 2) {
+                            dy_food = dy_food > 0 ? dy_food - CANVAS_HEIGHT : dy_food + CANVAS_HEIGHT;
+                        }
+                    }
+                    var possible = [];
+                    if (dx_food > 0) possible.push({ dx: TILE_SIZE, dy: 0 });
+                    else if (dx_food < 0) possible.push({ dx: -TILE_SIZE, dy: 0 });
+                    if (dy_food > 0) possible.push({ dx: 0, dy: TILE_SIZE });
+                    else if (dy_food < 0) possible.push({ dx: 0, dy: -TILE_SIZE });
+                    if (possible.length > 0) {
+                        var chosen = possible[Math.floor(seededRandom() * possible.length)];
+                        r.dx = chosen.dx;
+                        r.dy = chosen.dy;
+                    }
+                } else if (rand < 0.9) {
+                    // continue straight
                 } else {
-                    chosenDir = { dx: 0, dy: dy_food > 0 ? TILE_SIZE : -TILE_SIZE };
-                }
-                
-                if (chosenDir.dx === -rivalDx && chosenDir.dy === -rivalDy) {
-                    chosenDir = { dx: rivalDx, dy: rivalDy };
-                }
-            } else if (rand < 0.90) {
-                chosenDir = { dx: rivalDx, dy: rivalDy };
-            } else {
-                const shuffled = possibleDirs.slice().sort(function() { return seededRandom() - 0.5; });
-                if (shuffled.length > 0) chosenDir = shuffled[0];
-            }
-            
-            const testPos = { x: head.x + chosenDir.dx, y: head.y + chosenDir.dy };
-            const wrappedTest = wrapPosition(testPos);
-            
-            const selfCollision = rivalSnake.some(function(s) { return s.x === wrappedTest.x && s.y === wrappedTest.y; });
-            const obsCollision = obstacles.some(function(o) { return o.x === wrappedTest.x && o.y === wrappedTest.y; });
-            
-            if (selfCollision || obsCollision) {
-                let found = false;
-                for (let i = 0; i < possibleDirs.length; i++) {
-                    const dir = possibleDirs[i];
-                    const tp = wrapPosition({ x: head.x + dir.dx, y: head.y + dir.dy });
-                    const sc = rivalSnake.some(function(s) { return s.x === tp.x && s.y === tp.y; });
-                    const oc = obstacles.some(function(o) { return o.x === tp.x && o.y === tp.y; });
-                    if (!sc && !oc) {
-                        chosenDir = dir;
-                        found = true;
-                        break;
+                    var dirs = [{dx:TILE_SIZE,dy:0},{dx:-TILE_SIZE,dy:0},{dx:0,dy:TILE_SIZE},{dx:0,dy:-TILE_SIZE}];
+                    var rchosen = dirs[Math.floor(seededRandom() * dirs.length)];
+                    if (rchosen.dx !== -r.dx || rchosen.dy !== -r.dy) {
+                        r.dx = rchosen.dx;
+                        r.dy = rchosen.dy;
                     }
                 }
-                if (!found) {
-                    removeRival();
+            }
+
+            var head = r.snake[0];
+            var newHead = {
+                x: head.x + r.dx,
+                y: head.y + r.dy
+            };
+            if (MODE_CONFIG[gameMode].wrap) {
+                newHead.x = ((newHead.x % CANVAS_WIDTH) + CANVAS_WIDTH) % CANVAS_WIDTH;
+                newHead.y = ((newHead.y % CANVAS_HEIGHT) + CANVAS_HEIGHT) % CANVAS_HEIGHT;
+            }
+
+            var selfHit = false;
+            for (var rs = 0; rs < r.snake.length; rs++) {
+                if (r.snake[rs].x === newHead.x && r.snake[rs].y === newHead.y) {
+                    selfHit = true; break;
+                }
+            }
+            if (selfHit) {
+                removeRival(idx);
+                return;
+            }
+
+            r.snake.unshift(newHead);
+            if (r.snake.length > RIVAL_MAX_LENGTH) r.snake.pop();
+
+            if (food && newHead.x === food.x && newHead.y === food.y) {
+                r.snake.push({ x: newHead.x, y: newHead.y });
+                if (r.snake.length > RIVAL_MAX_LENGTH) r.snake.pop();
+                var combinedSnake = snake.slice();
+                var rivalSegs = rivalCombinedSnake();
+                for (var rs2 = 0; rs2 < rivalSegs.length; rs2++) combinedSnake.push(rivalSegs[rs2]);
+                var newFood = generateFood(combinedSnake);
+                if (newFood) {
+                    food = newFood;
+                } else {
+                    food = null;
+                }
+            }
+
+            if (snake.length > 0) {
+                var playerHead = snake[0];
+                if (playerHead.x === newHead.x && playerHead.y === newHead.y) {
+                    removeRival(idx);
                     return;
                 }
             }
-            
-            rivalDx = chosenDir.dx;
-            rivalDy = chosenDir.dy;
-            
-            const rTail = rivalSnake.pop();
-            const rNewHead = wrapPosition({ x: head.x + rivalDx, y: head.y + rivalDy });
-            
-            const playerBodyHit = snake.some(function(s) { return s.x === rNewHead.x && s.y === rNewHead.y; });
-            if (playerBodyHit) {
-                spawnParticles(rNewHead.x, rNewHead.y, 20, '#FF4444');
-                awardXP(100);
-                if (gameMode !== 'zen') addScore(50);
-                stats.rivalsDefeated++;
-                const el = toastEl;
-                if (el) {
-                    el.textContent = '\u{1F480} Rival Defeated! +50 pts +100 XP';
-                    el.style.display = 'block';
-                    setTimeout(function() { el.style.display = 'none'; }, 3000);
-                }
-                removeRival();
-                return;
-            }
-            
-            rivalSnake.unshift(rNewHead);
-            
-            if (food && rNewHead.x === food.x && rNewHead.y === food.y) {
-                const combinedSnake = snake.concat(rivalSnake);
-                const newFood = generateFood(combinedSnake);
-                if (newFood) {
-                    if (rivalSnake.length < RIVAL_MAX_LENGTH) {
-                        rivalSnake.push(rTail);
-                    }
-                    food = newFood;
-                    playSound('eat');
-                } else {
-                    food = null; // Board full — set food to null so it's not stuck at rival position
-                }
-            }
-            
-            const rHeadNow = rivalSnake[0];
-            const selfHit = rivalSnake.slice(1).some(function(s) { return s.x === rHeadNow.x && s.y === rHeadNow.y; });
-            if (selfHit) {
-                removeRival();
-                return;
-            }
         }
 
-        function removeRival() {
-            if (rivalActive && rivalSnake.length > 0) {
-                spawnParticles(rivalSnake[0].x, rivalSnake[0].y, 20, '#FF4444');
+        function removeRival(idx) {
+            if (idx === undefined) idx = 0;
+            if (idx >= rivals.length) return;
+            var r = rivals[idx];
+            if (r.active && r.snake.length > 0) {
+                spawnParticles(r.snake[0].x, r.snake[0].y, 20, r.color);
             }
-            rivalSnake = [];
-            rivalActive = false;
-            rivalRespawnTimer = 10000;
+            r.snake = [];
+            r.active = false;
+            r.respawnTimer = 10000;
         }
 
         function resumeGame() {
@@ -1406,11 +1586,10 @@ const TRAIL_RENDER_CONFIG = {
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
+            if (shieldActive) sessionUsedShield = true;
             saveReplay(score, snake.length);
             updateMenuFooter();
-            rivalSnake = [];
-            rivalActive = false;
-            rivalRespawnTimer = 0;
+            rivals = [];
             finalizeSession(false);
             awardXP(snake.length * 10);
             checkAchievements(score);
@@ -1446,6 +1625,8 @@ const TRAIL_RENDER_CONFIG = {
             } else {
                 spawnParticles(snake[0].x, snake[0].y, de.count, de.color);
             }
+            stopDrone();
+            stopPad();
             playSound('gameover');
             shakeTimer = 200;
             drawGame(1);
@@ -1479,6 +1660,8 @@ const TRAIL_RENDER_CONFIG = {
                 xp: sessionXP,
             };
             sessionSummaryTimer = 4000;
+            stopDrone();
+            stopPad();
             zenActive = false;
         }
 
@@ -1587,6 +1770,230 @@ const TRAIL_RENDER_CONFIG = {
                     osc.start(now);
                     osc.stop(now + 0.05);
                     break;
+            }
+            // Synesthesia layer
+            if (synesthesiaMode) {
+                playSynesthesiaLayer(name, now);
+            }
+        }
+
+        function playSynesthesiaLayer(name, now) {
+            if (!audioCtx) return;
+            if (name === 'eat' || name === 'bonus' || name === 'speed') {
+                var tierInfo = SYNESTHESIA_NOTES[lastEatenType] || SYNESTHESIA_NOTES.common;
+                var oct = getSynesthesiaOctave();
+                var freq = tierInfo.freq * Math.pow(2, oct - 4);
+                var noteOsc = audioCtx.createOscillator();
+                var noteGain = audioCtx.createGain();
+                noteOsc.type = 'sine';
+                noteOsc.frequency.value = freq;
+                noteGain.gain.setValueAtTime(0.15, now);
+                noteGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+                noteOsc.connect(noteGain);
+                noteGain.connect(audioCtx.destination);
+                noteOsc.start(now);
+                noteOsc.stop(now + 0.4);
+                // Fifth harmonic
+                var harmOsc = audioCtx.createOscillator();
+                var harmGain = audioCtx.createGain();
+                harmOsc.type = 'sine';
+                harmOsc.frequency.value = freq * 1.5;
+                harmGain.gain.setValueAtTime(0.05, now);
+                harmGain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+                harmOsc.connect(harmGain);
+                harmGain.connect(audioCtx.destination);
+                harmOsc.start(now);
+                harmOsc.stop(now + 0.3);
+            }
+            if (name === 'combo_milestone') {
+                playSynesthesiaChord(now);
+            }
+            if (name === 'gameover') {
+                playSynesthesiaResolution(now);
+            }
+        }
+
+        function getSynesthesiaOctave() {
+            var oct = 4;
+            for (var i = SYNESTHESIA_COMBO_OCTAVES.length - 1; i >= 0; i--) {
+                if (comboCount >= SYNESTHESIA_COMBO_OCTAVES[i].minCombo) {
+                    oct = SYNESTHESIA_COMBO_OCTAVES[i].octave;
+                    break;
+                }
+            }
+            return oct;
+        }
+
+        function playSynesthesiaChord(now) {
+            if (!audioCtx) return;
+            var notes = [261.63, 329.63, 392.00];
+            if (comboCount >= 5) notes.push(493.88);
+            if (comboCount >= 10) notes.push(293.66 * 2);
+            if (comboCount >= 20) notes.push(261.63 * 2);
+            var stagger = 0.05;
+            for (var i = 0; i < notes.length; i++) {
+                var chordOsc = audioCtx.createOscillator();
+                var chordGain = audioCtx.createGain();
+                chordOsc.type = 'sine';
+                chordOsc.frequency.value = notes[i];
+                var startTime = now + i * stagger;
+                chordGain.gain.setValueAtTime(0, startTime);
+                chordGain.gain.linearRampToValueAtTime(0.08, startTime + 0.05);
+                chordGain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+                chordOsc.connect(chordGain);
+                chordGain.connect(audioCtx.destination);
+                chordOsc.start(startTime);
+                chordOsc.stop(now + 0.6);
+            }
+        }
+
+        function playSynesthesiaResolution(now) {
+            if (!audioCtx) return;
+            var resOsc = audioCtx.createOscillator();
+            var resGain = audioCtx.createGain();
+            resOsc.type = 'sine';
+            resOsc.frequency.value = 261.63;
+            resGain.gain.setValueAtTime(0.12, now);
+            resGain.gain.exponentialRampToValueAtTime(0.001, now + 1.0);
+            resOsc.connect(resGain);
+            resGain.connect(audioCtx.destination);
+            resOsc.start(now);
+            resOsc.stop(now + 1.0);
+        }
+
+        function playSynesthesiaPulse() {
+            if (!audioCtx) return;
+            var now = audioCtx.currentTime;
+            var pulseOsc = audioCtx.createOscillator();
+            var pulseGain = audioCtx.createGain();
+            pulseOsc.type = 'triangle';
+            pulseOsc.frequency.value = 55;
+            pulseGain.gain.setValueAtTime(0.04, now);
+            pulseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+            pulseOsc.connect(pulseGain);
+            pulseGain.connect(audioCtx.destination);
+            pulseOsc.start(now);
+            pulseOsc.stop(now + 0.1);
+        }
+
+        function playSynesthesiaArp() {
+            if (!audioCtx) return;
+            var now = audioCtx.currentTime;
+            var arpNotes = [261.63, 329.63, 392.00, 493.88];
+            var freq = arpNotes[gameTick % arpNotes.length];
+            var oct = getSynesthesiaOctave();
+            freq = freq * Math.pow(2, oct - 4);
+            var arpOsc = audioCtx.createOscillator();
+            var arpGain = audioCtx.createGain();
+            arpOsc.type = 'sine';
+            arpOsc.frequency.value = freq;
+            arpGain.gain.setValueAtTime(0.06, now);
+            arpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+            arpOsc.connect(arpGain);
+            arpGain.connect(audioCtx.destination);
+            arpOsc.start(now);
+            arpOsc.stop(now + 0.12);
+        }
+
+        function startPad() {
+            if (!audioCtx || padActive) return;
+            padActive = true;
+            padChangeTick = gameTick;
+            var now = audioCtx.currentTime;
+            padOsc1 = audioCtx.createOscillator();
+            padOsc2 = audioCtx.createOscillator();
+            padGain = audioCtx.createGain();
+            padOsc1.type = 'sine';
+            padOsc2.type = 'sine';
+            padOsc1.frequency.value = padRootNote;
+            padOsc2.frequency.value = padRootNote * 1.005;
+            padGain.gain.value = 0.09;
+            padOsc1.connect(padGain);
+            padOsc2.connect(padGain);
+            padGain.connect(audioCtx.destination);
+            padOsc1.start(now);
+            padOsc2.start(now);
+        }
+
+        function stopPad() {
+            if (!padActive) return;
+            padActive = false;
+            try { if (padOsc1) { padOsc1.stop(); padOsc1 = null; } } catch(e) {}
+            try { if (padOsc2) { padOsc2.stop(); padOsc2 = null; } } catch(e) {}
+            padGain = null;
+        }
+
+        function updatePad() {
+            if (!synesthesiaMode || muted || !padActive) return;
+            if (gameTick - padChangeTick >= 50) {
+                padChangeTick = gameTick;
+                var regions = [261.63, 293.66, 329.63, 349.23, 392.00];
+                var regionIdx = Math.floor((snake[0].y / CANVAS_HEIGHT) * regions.length);
+                padRootNote = regions[Math.min(regionIdx, regions.length - 1)];
+                var now = audioCtx.currentTime;
+                if (padOsc1) padOsc1.frequency.linearRampToValueAtTime(padRootNote, now + 0.5);
+                if (padOsc2) padOsc2.frequency.linearRampToValueAtTime(padRootNote * 1.005, now + 0.5);
+            }
+        }
+
+        function startDrone() {
+            if (!audioCtx || droneActive) return;
+            droneActive = true;
+            var now = audioCtx.currentTime;
+            droneOsc = audioCtx.createOscillator();
+            droneGain = audioCtx.createGain();
+            droneOsc.type = 'sawtooth';
+            droneOsc.frequency.value = 55;
+            droneGain.gain.value = 0;
+            droneOsc.connect(droneGain);
+            droneGain.connect(audioCtx.destination);
+            droneOsc.start(now);
+        }
+
+        function stopDrone() {
+            if (!droneActive) return;
+            droneActive = false;
+            try { if (droneOsc) { droneOsc.stop(); droneOsc = null; } } catch(e) {}
+            droneGain = null;
+        }
+
+        function updateDrone() {
+            if (!synesthesiaMode || muted) return;
+            if (obstacles.length === 0) {
+                stopDrone();
+                return;
+            }
+            var head = snake[0];
+            var nearestDist = Infinity;
+            for (var i = 0; i < obstacles.length; i++) {
+                var dist = Math.abs(head.x - obstacles[i].x) + Math.abs(head.y - obstacles[i].y);
+                if (dist < nearestDist) nearestDist = dist;
+            }
+            var tileDist = nearestDist / TILE_SIZE;
+            var now = audioCtx.currentTime;
+            if (tileDist <= 3) {
+                if (!droneActive) startDrone();
+                if (droneGain) droneGain.gain.linearRampToValueAtTime(0.08, now + 0.3);
+            } else {
+                if (droneActive && droneGain) {
+                    droneGain.gain.linearRampToValueAtTime(0, now + 0.5);
+                }
+            }
+        }
+
+        function spawnSynesthesiaRing(x, y, color) {
+            for (var i = 0; i < 6; i++) {
+                var angle = (Math.PI * 2 / 6) * i;
+                particles.push({
+                    x: x + TILE_SIZE / 2,
+                    y: y + TILE_SIZE / 2,
+                    vx: Math.cos(angle) * 3,
+                    vy: Math.sin(angle) * 3,
+                    life: 1.0,
+                    maxLife: 0.4,
+                    color: color,
+                    size: 3
+                });
             }
         }
 
@@ -2446,38 +2853,16 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawRival(t) {
-            if (!rivalActive || rivalSnake.length === 0) return;
-            
-            rivalSnake.forEach(function(segment, index) {
-                let drawX, drawY;
-                
-                if (t >= 1 || prevRivalSnake.length === 0 || !rivalActive) {
-                    drawX = segment.x;
-                    drawY = segment.y;
-                } else if (index === 0 && prevRivalSnake[0]) {
-                    const prev = prevRivalSnake[0];
-                    const rdx = segment.x - prev.x;
-                    const rdy = segment.y - prev.y;
-                    drawX = Math.abs(rdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + rdx * t;
-                    drawY = Math.abs(rdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + rdy * t;
-                } else if (prevRivalSnake[index]) {
-                    const prev = prevRivalSnake[index];
-                    const rdx = segment.x - prev.x;
-                    const rdy = segment.y - prev.y;
-                    drawX = Math.abs(rdx) > CANVAS_WIDTH / 2 ? segment.x : prev.x + rdx * t;
-                    drawY = Math.abs(rdy) > CANVAS_HEIGHT / 2 ? segment.y : prev.y + rdy * t;
-                } else {
-                    drawX = segment.x;
-                    drawY = segment.y;
+            for (var ri = 0; ri < rivals.length; ri++) {
+                var r = rivals[ri];
+                if (!r.active || r.snake.length === 0) continue;
+                ctx.save();
+                for (var rj = 0; rj < r.snake.length; rj++) {
+                    ctx.fillStyle = rj === 0 ? '#FF6666' : r.color;
+                    ctx.fillRect(r.snake[rj].x + 1, r.snake[rj].y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
                 }
-                
-                ctx.fillStyle = index === 0 ? '#FF6600' : '#CC3300';
-                ctx.fillRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
-                
-                if (index === 0) {
-                    drawEyes(drawX, drawY, rivalDx, rivalDy, '#FFD700', '#000');
-                }
-            });
+                ctx.restore();
+            }
         }
 
         function drawTrails() {
@@ -2660,21 +3045,417 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawRivalHUD() {
-            if (rivalActive) {
-                ctx.fillStyle = '#FF6600';
-                ctx.font = hudFont(12);
-                ctx.textAlign = 'right';
-                ctx.textBaseline = 'bottom';
-                ctx.fillText('Rival: ' + rivalSnake.length, CANVAS_WIDTH - 5, CANVAS_HEIGHT - 60);
-                ctx.fillStyle = '#00FF00';
-                ctx.fillText('You: ' + snake.length, CANVAS_WIDTH - 5, CANVAS_HEIGHT - 45);
+            if (rivals.length === 0) return;
+            var rivalLen = 0;
+            for (var ri = 0; ri < rivals.length; ri++) {
+                if (rivals[ri].active) rivalLen = Math.max(rivalLen, rivals[ri].snake.length);
             }
+            if (rivalLen === 0) return;
+            ctx.save();
+            ctx.fillStyle = '#FF8888';
+            ctx.font = hudFont(10);
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText('Rival: ' + rivalLen, 5, 40);
+            ctx.restore();
+        }
+
+        function drawPaintGrid() {
+            if (gameMode !== 'painter' || !paintGrid) return;
+            var cols = CANVAS_WIDTH / TILE_SIZE;
+            var rows = CANVAS_HEIGHT / TILE_SIZE;
+            var now = Date.now();
+            ctx.save();
+            for (var c = 0; c < cols; c++) {
+                for (var r = 0; r < rows; r++) {
+                    var tile = paintGrid[c][r];
+                    if (!tile) continue;
+                    var age = now - tile.timestamp;
+                    var flashAlpha = age < 500 ? 0.15 : 0;
+                    ctx.globalAlpha = 0.85 + flashAlpha;
+                    ctx.shadowBlur = 6;
+                    ctx.shadowColor = tile.color;
+                    ctx.fillStyle = tile.color;
+                    ctx.fillRect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                }
+            }
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = 'transparent';
+            ctx.globalAlpha = 1;
+            ctx.restore();
+        }
+
+        function drawChallengeOverlay() {
+            if (!challengeFromUrl || gameState !== 'idle') return;
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            var title = 'Challenge!';
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 20px Arial';
+            ctx.fillText(title, CANVAS_WIDTH / 2, 60);
+            
+            var modeName = MODE_CONFIG[challengeFromUrl.mode] ? MODE_CONFIG[challengeFromUrl.mode].name : challengeFromUrl.mode;
+            ctx.fillStyle = '#FFF';
+            ctx.font = '14px Arial';
+            ctx.fillText('Mode: ' + modeName, CANVAS_WIDTH / 2, 100);
+            ctx.fillText('Seed: ' + challengeFromUrl.seed, CANVAS_WIDTH / 2, 125);
+            
+            if (challengeFromUrl.targetScore) {
+                ctx.fillStyle = '#FFD700';
+                ctx.font = 'bold 16px Arial';
+                ctx.fillText('Target: ' + challengeFromUrl.targetScore + ' points', CANVAS_WIDTH / 2, 155);
+            }
+            
+            ctx.fillStyle = '#AAA';
+            ctx.font = '13px Arial';
+            ctx.fillText('Press Enter to accept challenge', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 60);
+            ctx.fillText('Press Escape to dismiss', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+            ctx.restore();
+        }
+
+        function generateObstaclesForWave(wave) {
+            if (wave.obstacles === 0) return;
+            var headX = 10 * TILE_SIZE;
+            var headY = 10 * TILE_SIZE;
+            for (var i = 0; i < wave.obstacles; i++) {
+                var tile = findFreeTile(headX, headY);
+                if (tile) obstacles.push(tile);
+            }
+        }
+
+        function applyGauntletPicks() {
+            for (var i = 0; i < gauntletPicks.length; i++) {
+                var pick = gauntletPicks[i];
+                switch (pick.id) {
+                    case 'extra_length':
+                        for (var j = 0; j < 5; j++) {
+                            snake.push({ x: snake[0].x, y: snake[0].y });
+                        }
+                        break;
+                    case 'wave_shield':
+                        shieldActive = true;
+                        powerUpTimer = 6000;
+                        powerUpType = 'shield';
+                        break;
+                    case 'slow_pace':
+                        tickInterval = Math.floor(tickInterval * 1.2);
+                        break;
+                }
+            }
+        }
+
+        function resetWaveState() {
+            var wave = GAUNTLET_WAVES[gauntletWave];
+            snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
+            dx = TILE_SIZE;
+            dy = 0;
+            nextDirection = null;
+            food = null;
+            score = 0;
+            gauntletWaveScore = 0;
+            displayedScore = 0;
+            sessionFoodEaten = 0;
+            sessionFoodTypes = new Set();
+            sessionSpeedFood = 0;
+            sessionBonusFood = 0;
+            comboCount = 0;
+            lastEatTime = 0;
+            lastComboMilestone = 0;
+            var hasComboSave = false;
+            for (var cp = 0; cp < gauntletPicks.length; cp++) {
+                if (gauntletPicks[cp].id === 'combo_save') hasComboSave = true;
+            }
+            if (!hasComboSave) sessionMaxCombo = 0;
+            gameTick = 0;
+            particles = [];
+            flashOverlay = null;
+            shakeTimer = 0;
+            eatAnimTimer = 0;
+            touchIndicatorTimer = 0;
+            speedBoostCounter = 0;
+            shieldActive = false;
+            magnetActive = false;
+            slowMoActive = false;
+            powerUpTimer = 0;
+            powerUpType = null;
+            powerUpPickup = null;
+            powerUpSpawnCounter = 0;
+            powerUpDespawnCounter = 0;
+            rivals = [];
+            obstacles = [];
+            generateObstaclesForWave(wave);
+            applyGauntletPicks();
+            var combined = snake.concat(rivalCombinedSnake());
+            food = generateFood(combined);
+            tickInterval = wave.speedBase;
+        }
+
+        function completeGauntletWave() {
+            gauntletWaveScore = score;
+            gauntletScore += score;
+            gauntletMasteryPoints++;
+            saveManager.set('snake_gauntlet_mastery', gauntletMasteryPoints);
+            if (gauntletWave >= GAUNTLET_WAVES.length - 1) {
+                score = gauntletScore;
+                queueToast('Gauntlet Complete! Total: ' + gauntletScore, 4000);
+                gameOver();
+                return;
+            }
+            gauntletIntermission = true;
+            gauntletPickOptions = pickRandomGauntletPicks(3);
+            gauntletSelection = 0;
+            playSound('achievement');
+            queueToast('Wave ' + (gauntletWave + 1) + ' Complete! +' + gauntletWaveScore + ' pts', 2000);
+        }
+
+        function pickRandomGauntletPicks(count) {
+            var pool = GAUNTLET_PICKS.slice();
+            var options = [];
+            var safety = 0;
+            while (options.length < count && safety < 100) {
+                var idx = Math.floor(Math.random() * pool.length);
+                var pick = pool[idx];
+                var dup = false;
+                for (var pi = 0; pi < options.length; pi++) {
+                    if (options[pi].id === pick.id) { dup = true; break; }
+                }
+                if (!dup) options.push(pick);
+                safety++;
+            }
+            return options;
+        }
+
+        function startNextWave() {
+            gauntletWave++;
+            gauntletIntermission = false;
+            resetWaveState();
+             var wave = GAUNTLET_WAVES[gauntletWave];
+             if (wave.rival && gameMode === 'gauntlet') {
+                 spawnRival(0);
+             }
+             tickInterval = wave.speedBase;
+             restartGameTimeout();
+         }
+
+        function getMasteryTier() {
+            var tier = GAUNTLET_MASTERY_TIERS[0];
+            for (var ti = GAUNTLET_MASTERY_TIERS.length - 1; ti >= 0; ti--) {
+                if (gauntletMasteryPoints >= GAUNTLET_MASTERY_TIERS[ti].points) {
+                    tier = GAUNTLET_MASTERY_TIERS[ti];
+                    break;
+                }
+            }
+            return tier;
+        }
+
+        function drawGauntletIntermission() {
+            if (!gauntletIntermission) return;
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 18px Arial';
+            ctx.fillText('Wave ' + (gauntletWave + 1) + ' — Choose your bonus', CANVAS_WIDTH / 2, 40);
+            var cardY = 70;
+            var cardH = 80;
+            for (var gi = 0; gi < gauntletPickOptions.length; gi++) {
+                var py = cardY + gi * (cardH + 8);
+                var selected = gi === gauntletSelection;
+                ctx.strokeStyle = selected ? '#FFD700' : '#555';
+                ctx.lineWidth = selected ? 2 : 1;
+                ctx.fillStyle = selected ? 'rgba(255,215,0,0.1)' : 'rgba(0,0,0,0.5)';
+                ctx.fillRect(15, py, CANVAS_WIDTH - 30, cardH);
+                ctx.strokeRect(15, py, CANVAS_WIDTH - 30, cardH);
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 13px Arial';
+                ctx.fillText(gauntletPickOptions[gi].icon + ' ' + gauntletPickOptions[gi].name, 25, py + 8);
+                ctx.fillStyle = '#AAA';
+                ctx.font = '11px Arial';
+                ctx.fillText(gauntletPickOptions[gi].desc, 25, py + 30);
+            }
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = '#666';
+            ctx.font = '11px Arial';
+            ctx.fillText('Enter to select | Arrows to navigate | Escape to skip', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 10);
+            ctx.restore();
+        }
+
+        function drawGauntletHUD() {
+            if (gameMode !== 'gauntlet' || gameState !== 'playing') return;
+            ctx.save();
+            var wave = GAUNTLET_WAVES[gauntletWave];
+            ctx.fillStyle = '#FFD700';
+            ctx.font = hudFont(11);
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText('Wave ' + (gauntletWave + 1) + '/5: ' + wave.desc, 5, 50);
+            var barW = 120;
+            var barH = 8;
+            var barX = 5;
+            var barY = 72;
+            var progress = 0;
+            if (wave.objective === 'survive') {
+                progress = Math.min(1, gameTick / wave.duration);
+            } else if (wave.objective === 'eat') {
+                progress = Math.min(1, sessionFoodEaten / wave.target);
+            } else if (wave.objective === 'combo') {
+                progress = Math.min(1, comboCount / wave.target);
+            } else if (wave.objective === 'score') {
+                progress = Math.min(1, score / wave.target);
+            }
+            ctx.fillStyle = '#333';
+            ctx.fillRect(barX, barY, barW, barH);
+            ctx.fillStyle = '#FFD700';
+            ctx.fillRect(barX, barY, barW * progress, barH);
+            ctx.strokeStyle = '#555';
+            ctx.strokeRect(barX, barY, barW, barH);
+            if (gauntletPicks.length > 0) {
+                var picksText = '';
+                for (var pi = 0; pi < gauntletPicks.length; pi++) {
+                    picksText += gauntletPicks[pi].icon;
+                }
+                ctx.fillStyle = '#AAA';
+                ctx.font = hudFont(9);
+                ctx.fillText('Picks: ' + picksText, 5, 88);
+            }
+            ctx.restore();
+        }
+
+        function drawGauntletCompleteScreen() {
+            if (gameMode !== 'gauntlet' || gameState !== 'gameover') return;
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 22px Arial';
+            ctx.fillText('Gauntlet Complete!', CANVAS_WIDTH / 2, 60);
+            ctx.fillStyle = '#FFF';
+            ctx.font = '16px Arial';
+            ctx.fillText('Total Score: ' + gauntletScore, CANVAS_WIDTH / 2, 100);
+            var masteryTier = getMasteryTier();
+            ctx.fillStyle = masteryTier.color;
+            ctx.font = '14px Arial';
+            ctx.fillText('Mastery: ' + masteryTier.name + ' (' + gauntletMasteryPoints + ' pts)', CANVAS_WIDTH / 2, 130);
+            ctx.fillStyle = '#AAA';
+            ctx.font = '12px Arial';
+            ctx.fillText('Press Enter for menu', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 30);
+            ctx.restore();
+        }
+
+        function checkMutatorUnlocks() {
+            for (var key in MUTATOR_DEFS) {
+                var def = MUTATOR_DEFS[key];
+                if (unlockedMutators.indexOf(key) === -1 && mutatorTokens >= def.tokenCost) {
+                    unlockedMutators.push(key);
+                    saveManager.setJSON('snake_mutator_unlocks', unlockedMutators);
+                    queueToast('\uD83D\uDD13 New mutator unlocked: ' + def.name + '!', 3000);
+                }
+            }
+        }
+
+        function pickDraftOptions(count) {
+            var pool = unlockedMutators.slice();
+            if (pool.length <= count) return pool;
+            var options = [];
+            var safety = 0;
+            while (options.length < count && safety < 100) {
+                var idx = Math.floor(Math.random() * pool.length);
+                var key = pool[idx];
+                if (options.indexOf(key) === -1) options.push(key);
+                safety++;
+            }
+            return options;
+        }
+
+        function shuffleFoodWeights() {
+            var keys = Object.keys(FOOD_TIERS);
+            var weights = keys.map(function() { return Math.random(); });
+            var total = weights.reduce(function(a,b) { return a+b; }, 0);
+            var result = {};
+            for (var i = 0; i < keys.length; i++) {
+                result[keys[i]] = weights[i] / total;
+            }
+            return result;
+        }
+
+        function drawDraftScreen() {
+            if (!draftScreenVisible) return;
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 18px Arial';
+            ctx.fillText('Draft a Mutator', CANVAS_WIDTH / 2, 40);
+            var cardW = Math.min(110, (CANVAS_WIDTH - 40) / 3);
+            var cardH = 130;
+            var totalW = draftOptions.length * (cardW + 10) - 10;
+            var startX = (CANVAS_WIDTH - totalW) / 2;
+            for (var mi = 0; mi < draftOptions.length; mi++) {
+                var cx = startX + mi * (cardW + 10);
+                var cy = 70;
+                var selected = mi === draftSelection;
+                ctx.strokeStyle = selected ? '#FFD700' : '#555';
+                ctx.lineWidth = selected ? 2 : 1;
+                ctx.fillStyle = selected ? 'rgba(255,215,0,0.1)' : 'rgba(0,0,0,0.5)';
+                ctx.fillRect(cx, cy, cardW, cardH);
+                ctx.strokeRect(cx, cy, cardW, cardH);
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                var def = MUTATOR_DEFS[draftOptions[mi]];
+                if (def) {
+                    ctx.fillStyle = '#FFF';
+                    ctx.font = '24px Arial';
+                    ctx.fillText(def.icon, cx + cardW / 2, cy + 8);
+                    ctx.fillStyle = '#FFD700';
+                    ctx.font = 'bold 12px Arial';
+                    ctx.fillText(def.name, cx + cardW / 2, cy + 38);
+                    ctx.fillStyle = '#AAA';
+                    ctx.font = '10px Arial';
+                    ctx.fillText(def.desc, cx + cardW / 2, cy + 58);
+                }
+            }
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = '#666';
+            ctx.font = '11px Arial';
+            ctx.fillText('Enter to select | Arrows to navigate | Escape to skip', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+            if (mutatorTokens > 0) {
+                ctx.fillStyle = '#FFD700';
+                ctx.fillText('R to re-roll (1 token) | Tokens: ' + mutatorTokens, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 12);
+            }
+            ctx.restore();
         }
 
         function drawGame(t) {
             ctx.imageSmoothingEnabled = false;
             drawGrid();
+            drawPaintGrid();
             drawMuteIndicator();
+            // Synesthesia indicator
+            if (synesthesiaMode) {
+                ctx.save();
+                var synAlpha = 0.5 + 0.5 * Math.sin(renderTime * 0.005);
+                ctx.globalAlpha = synAlpha;
+                ctx.fillStyle = '#FFD700';
+                ctx.font = hudFont(10);
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillText('\u266B SYN', 5, 15);
+                ctx.restore();
+            }
             drawXPBar();
             drawPrestigeBorder();
             drawObstacles();
@@ -2694,6 +3475,27 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 ctx.restore();
             }
+            // Ghost Arena
+            if (ghostArenaMode && activeSeed !== null && arenaGhostReplays.length > 0) {
+                for (var gai = 0; gai < arenaGhostReplays.length && gai < GHOST_ARENA_MAX; gai++) {
+                    var ghostBody = arenaGhostPositions[gai] || [];
+                    if (ghostBody.length === 0) continue;
+                    ctx.save();
+                    ctx.globalAlpha = GHOST_ARENA_COLORS[gai].alpha;
+                    for (var gaj = 0; gaj < ghostBody.length; gaj++) {
+                        ctx.fillStyle = gaj === 0 ? GHOST_ARENA_COLORS[gai].head : GHOST_ARENA_COLORS[gai].body;
+                        ctx.fillRect(ghostBody[gaj].x, ghostBody[gaj].y, TILE_SIZE - 1, TILE_SIZE - 1);
+                    }
+                    if (ghostBody.length > 0) {
+                        ctx.fillStyle = GHOST_ARENA_COLORS[gai].body;
+                        ctx.font = hudFont(9);
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'bottom';
+                        ctx.fillText(GHOST_ARENA_COLORS[gai].label, ghostBody[0].x + TILE_SIZE / 2, ghostBody[0].y - 2);
+                    }
+                    ctx.restore();
+                }
+            }
             drawTrails();
             drawSlowMoTint();
             drawTimeAttackHUD();
@@ -2701,6 +3503,25 @@ const TRAIL_RENDER_CONFIG = {
             drawDailyHUD();
             drawPowerUpHUD();
             drawRivalHUD();
+            drawGauntletHUD();
+            if (draftScreenVisible) {
+                drawDraftScreen();
+                return;
+            }
+
+            if (activeMutator) {
+                var mutDef = MUTATOR_DEFS[activeMutator];
+                if (mutDef) {
+                    ctx.save();
+                    ctx.fillStyle = '#FFD700';
+                    ctx.font = hudFont(10);
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'top';
+                    var mutY = synesthesiaMode ? 28 : 15;
+                    ctx.fillText(mutDef.icon + ' ' + mutDef.name, 5, mutY);
+                    ctx.restore();
+                }
+            }
 
             // Seed display
             if (activeSeed !== null && (gameState === 'playing' || gameState === 'paused' || gameState === 'gameover')) {
@@ -2711,13 +3532,44 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.fillText('Seed: ' + activeSeed, CANVAS_WIDTH - 5, CANVAS_HEIGHT - 5);
             }
 
+            // Target score display for challenge URLs
+            if (challengeFromUrl && challengeFromUrl.targetScore !== null && (gameState === 'playing' || gameState === 'paused')) {
+                ctx.save();
+                var targetReached = score >= challengeFromUrl.targetScore;
+                ctx.fillStyle = targetReached ? '#FFFFFF' : '#FFD700';
+                ctx.font = hudFont(11);
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillText('Target: ' + challengeFromUrl.targetScore, 5, synesthesiaMode ? 28 : 15);
+                ctx.restore();
+            }
+
+            // Gauntlet intermission overlay
+            if (gauntletIntermission) {
+                drawGauntletIntermission();
+            }
+
+            // Gauntlet complete screen
+            if (gameState === 'gameover' && gameMode === 'gauntlet' && gauntletWave >= GAUNTLET_WAVES.length - 1) {
+                drawGauntletCompleteScreen();
+            }
+
             if (gameState === 'idle') {
-                drawOverlay('SNAKE', 'Press ENTER to Start');
+                if (challengeFromUrl) {
+                    drawChallengeOverlay();
+                } else {
+                    drawOverlay('SNAKE', 'Press ENTER to Start');
+                }
             } else if (gameState === 'paused') {
                 drawOverlay();
             } else if (gameState === 'gameover') {
-                const deathMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
-                drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + 'Press ENTER to Restart');
+                if (gameMode === 'gauntlet' && !(gauntletWave >= GAUNTLET_WAVES.length - 1)) {
+                    var runOverMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
+                    drawOverlay('Run Over — Wave ' + (gauntletWave + 1) + '/5', 'Score: ' + (gauntletScore + score) + ' | ' + runOverMsg + 'Press ENTER to Restart');
+                } else {
+                    const deathMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
+                    drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + 'Press ENTER to Restart');
+                }
             }
         }
 
@@ -2728,19 +3580,109 @@ const TRAIL_RENDER_CONFIG = {
             if (gameMode === 'zen') {
                 score = snake.length;
             }
+            // Painter mode: score = coverage %
+            if (gameMode === 'painter' && paintTotalTiles > 0) {
+                var coveragePct = Math.floor((paintCoveredCount / paintTotalTiles) * 100);
+                score = coveragePct;
+                if (paintLayers > 1) {
+                    score = coveragePct + ((paintLayers - 1) * 100);
+                }
+            }
+
+            // Gauntlet mode: wave objective checking
+            if (gameMode === 'gauntlet') {
+                if (gauntletIntermission) return;
+                var wave = GAUNTLET_WAVES[gauntletWave];
+                if (wave.objective === 'survive' && gameTick >= wave.duration) {
+                    completeGauntletWave();
+                    return;
+                } else if (wave.objective === 'eat' && sessionFoodEaten >= wave.target) {
+                    completeGauntletWave();
+                    return;
+                } else if (wave.objective === 'combo' && comboCount >= wave.target) {
+                    completeGauntletWave();
+                    return;
+                } else if (wave.objective === 'score' && score >= wave.target) {
+                    completeGauntletWave();
+                    return;
+                }
+            }
+
+            // === MUTATOR LOGIC ===
+            if (activeMutator === 'gravity' && dy !== -TILE_SIZE && dy !== TILE_SIZE) {
+                dx = 0;
+                dy = TILE_SIZE;
+            }
+
+            var skipSelfCollision = false;
+            if (activeMutator === 'phase_shift' && gameTick % 5 === 0) {
+                skipSelfCollision = true;
+            }
+
+            if (activeMutator === 'hunger_clock') {
+                if (!hungerStarted && sessionFoodEaten > 0) {
+                    hungerStarted = true;
+                    hungerTickCounter = 0;
+                }
+                if (hungerStarted) {
+                    hungerTickCounter++;
+                    if (hungerTickCounter > 0 && hungerTickCounter % 50 === 0) {
+                        if (snake.length > 1) {
+                            snake.pop();
+                        } else {
+                            lastDeathCause = 'Starvation!';
+                            gameOver();
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (activeMutator === 'shrink_zone') {
+                var ticksPerShrink = Math.floor(30000 / getEffectiveSpeed());
+                if (gameTick > 0 && gameTick % ticksPerShrink === 0) {
+                    if (shrinkCols < CANVAS_WIDTH / TILE_SIZE / 2 - 1) {
+                        shrinkCols++;
+                    } else if (shrinkRows < CANVAS_HEIGHT / TILE_SIZE / 2 - 1) {
+                        shrinkRows++;
+                    }
+                    var headNow = snake[0];
+                    var minSX = shrinkCols * TILE_SIZE;
+                    var maxSX = CANVAS_WIDTH - shrinkCols * TILE_SIZE;
+                    var minSY = shrinkRows * TILE_SIZE;
+                    var maxSY = CANVAS_HEIGHT - shrinkRows * TILE_SIZE;
+                    if (headNow.x < minSX || headNow.x >= maxSX || headNow.y < minSY || headNow.y >= maxSY) {
+                        lastDeathCause = 'Caught by the shrinking zone!';
+                        gameOver();
+                        return;
+                    }
+                }
+            }
+
+            if (activeMutator === 'chaos_seed' && gameTick % 20 === 0) {
+                chaosCurrentWeights = shuffleFoodWeights();
+                chaosShuffleTick = gameTick;
+            }
 
             prevSnake = snake.map(s => ({ x: s.x, y: s.y }));
             snakeGrew = false;
-            prevRivalSnake = rivalSnake.map(s => ({ x: s.x, y: s.y }));
+            prevRivalSnake = rivalCombinedSnake().map(s => ({ x: s.x, y: s.y }));
 
             gameTick++;
 
             // Rebuild ghost positions
-            if (ghostEnabled && activeSeed !== null) {
+            if (ghostArenaMode && activeSeed !== null) {
+                arenaGhostPositions = [];
+                for (var agi = 0; agi < arenaGhostReplays.length; agi++) {
+                    arenaGhostPositions.push(rebuildGhost(arenaGhostReplays[agi], gameTick));
+                }
+                ghostPositions = [];
+            } else if (ghostEnabled && activeSeed !== null) {
                 var bestReplay = getBestReplay(gameMode);
                 ghostPositions = rebuildGhost(bestReplay, gameTick);
             } else {
                 ghostPositions = [];
+                arenaGhostPositions = [];
             }
             stats.totalDistance++;
             if (gameTick % 10 === 0) awardXP(1);
@@ -2763,6 +3705,21 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             const tail = snake.pop();
+            // Painter mode: paint the tail position
+            if (gameMode === 'painter' && paintGrid) {
+                var pcol = Math.floor(tail.x / TILE_SIZE);
+                var prow = Math.floor(tail.y / TILE_SIZE);
+                var cols = CANVAS_WIDTH / TILE_SIZE;
+                var rows = CANVAS_HEIGHT / TILE_SIZE;
+                if (pcol >= 0 && pcol < cols && prow >= 0 && prow < rows) {
+                    if (!paintGrid[pcol][prow]) {
+                        paintGrid[pcol][prow] = { color: currentPaintColor, layer: paintLayers, timestamp: Date.now() };
+                        paintCoveredCount++;
+                    } else {
+                        paintGrid[pcol][prow] = { color: currentPaintColor, layer: paintGrid[pcol][prow].layer + 1, timestamp: Date.now() };
+                    }
+                }
+            }
 
             const headRef = snake.length > 0 ? snake[0] : tail;
             const newHead = {
@@ -2771,7 +3728,7 @@ const TRAIL_RENDER_CONFIG = {
             };
             const wrappedHead = wrapPosition(newHead);
 
-            if (checkCollision(wrappedHead)) {
+            if (checkCollision(wrappedHead) && !skipSelfCollision) {
                 if (shieldActive) {
                     shieldActive = false;
                     powerUpTimer = 0;
@@ -2797,9 +3754,18 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Check player head vs rival body
-            if (rivalActive) {
-                const rivalBodyHit = rivalSnake.some(function(s) { return s.x === wrappedHead.x && s.y === wrappedHead.y; });
-                if (rivalBodyHit) {
+            var rivalBodyHit = false;
+            for (var rci = 0; rci < rivals.length; rci++) {
+                if (rivals[rci].active) {
+                    for (var rcj = 0; rcj < rivals[rci].snake.length; rcj++) {
+                        if (rivals[rci].snake[rcj].x === wrappedHead.x && rivals[rci].snake[rcj].y === wrappedHead.y) {
+                            rivalBodyHit = true; break;
+                        }
+                    }
+                }
+                if (rivalBodyHit) break;
+            }
+            if (rivalBodyHit) {
                     if (shieldActive) {
                         shieldActive = false;
                         powerUpTimer = 0;
@@ -2814,9 +3780,23 @@ const TRAIL_RENDER_CONFIG = {
                         return;
                     }
                 }
-            }
 
             snake.unshift(wrappedHead);
+            // Painter mode: paint the head position too
+            if (gameMode === 'painter' && paintGrid) {
+                var hcol = Math.floor(wrappedHead.x / TILE_SIZE);
+                var hrow = Math.floor(wrappedHead.y / TILE_SIZE);
+                var cols = CANVAS_WIDTH / TILE_SIZE;
+                var rows = CANVAS_HEIGHT / TILE_SIZE;
+                if (hcol >= 0 && hcol < cols && hrow >= 0 && hrow < rows) {
+                    if (!paintGrid[hcol][hrow]) {
+                        paintGrid[hcol][hrow] = { color: currentPaintColor, layer: paintLayers, timestamp: Date.now() };
+                        paintCoveredCount++;
+                    } else {
+                        paintGrid[hcol][hrow] = { color: currentPaintColor, layer: paintGrid[hcol][hrow].layer + 1, timestamp: Date.now() };
+                    }
+                }
+            }
 
             if (food && wrappedHead.x === food.x && wrappedHead.y === food.y) {
                 snake.push(tail);
@@ -2886,9 +3866,12 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 eatAnimTimer = 150;
                 spawnParticles(wrappedHead.x, wrappedHead.y, tier.pCount, tierColor);
-                if (gameMode !== 'zen') addScore(tier.pts);
+                if (synesthesiaMode) {
+                    spawnSynesthesiaRing(wrappedHead.x, wrappedHead.y, tierColor);
+                }
+                if (gameMode !== 'zen' && gameMode !== 'painter') addScore(tier.pts);
                 // Combo score bonus
-                if (comboCount > 0 && gameMode !== 'zen') {
+                if (comboCount > 0 && gameMode !== 'zen' && gameMode !== 'painter') {
                     let comboBonus;
                     if (comboCount >= 20) {
                         comboBonus = Math.floor(comboCount * 5);
@@ -2908,6 +3891,8 @@ const TRAIL_RENDER_CONFIG = {
                     }
                     shrinkTimer += MODE_CONFIG.snap.speed;
                 }
+                // Track last eaten type BEFORE playSound (synesthesia and painter depend on it)
+                lastEatenType = eatenType;
                 vibrate(15);
                 playSound(tier.sound);
                 // speed food still has the special speed boost behavior
@@ -2917,8 +3902,35 @@ const TRAIL_RENDER_CONFIG = {
                         speedBoostCounter = 16; // ~2 seconds at 120ms ticks
                     }
                 }
+                // Painter mode: 100% coverage check
+                if (gameMode === 'painter' && paintTotalTiles > 0 && paintCoveredCount >= paintTotalTiles && !flashOverlay) {
+                    paintLayers++;
+                    paintCoveredCount = 0;
+                    flashOverlay = { color: '#FFFFFF', alpha: 0.6, priority: 'high' };
+                    queueToast('100% Coverage! Layer ' + paintLayers + '!', 3000);
+                    playSound('achievement');
+                    vibrate(50);
+                }
+                // Painter mode: update paint color
+                if (gameMode === 'painter') {
+                    painterFoodEaten++;
+                    if (comboCount >= 30) {
+                        currentPaintColor = 'hsl(' + ((renderTime * 0.1) % 360) + ',100%,50%)';
+                    } else if (comboCount >= 10) {
+                        var tierKeys = Object.keys(FOOD_TIERS);
+                        currentPaintColor = FOOD_TIERS[tierKeys[painterFoodEaten % tierKeys.length]].color;
+                    } else {
+                        var paintTier = FOOD_TIERS[eatenType] || FOOD_TIERS.common;
+                        currentPaintColor = paintTier.color;
+                    }
+                    if (painterFoodEaten % 50 === 0) {
+                        var painterSpeed = Math.max(MIN_SPEED, getEffectiveSpeed() - 5);
+                        tickInterval = painterSpeed;
+                        restartGameTimeout();
+                    }
+                }
                 checkAchievements(score);
-                const playerCombined = snake.concat(rivalActive ? rivalSnake : []);
+                const playerCombined = snake.concat(rivalCombinedSnake());
                 food = generateFood(playerCombined);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
             }
@@ -3018,16 +4030,19 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Rival respawn timer
-            if (!rivalActive && rivalRespawnTimer > 0) {
-                rivalRespawnTimer -= getEffectiveSpeed();
-                if (rivalRespawnTimer <= 0) {
-                    spawnRival();
+            var anyRivalAlive = anyRivalActive();
+            if (!anyRivalAlive && rivals.length > 0 && rivals[0].respawnTimer > 0) {
+                rivals[0].respawnTimer -= getEffectiveSpeed();
+                if (rivals[0].respawnTimer <= 0) {
+                    spawnRival(0);
                 }
             }
 
             // Update rival
-            if (rivalActive) {
-                updateRival();
+            if (anyRivalActive()) {
+                for (var rii = 0; rii < rivals.length; rii++) {
+                    if (rivals[rii].active) updateRival(rii);
+                }
             }
 
             // Sparkle trail spawn
@@ -3050,11 +4065,28 @@ const TRAIL_RENDER_CONFIG = {
                 spawnParticles(tail.x, tail.y, 2, '#FF6600');
             }
 
-            // Passive food regeneration (amendment C: only every 10th tick to avoid O(n*m) churn)
-            if (!food && gameTick % 10 === 0 && gameState === 'playing') {
-                const combinedSnake = snake.concat(rivalActive ? rivalSnake : []);
+            // Passive food regeneration
+            var foodRegenInterval = 10;
+            if (activeMutator === 'golden_food') foodRegenInterval = 20;
+            if (gameMode === 'gauntlet') {
+                for (var gfpi = 0; gfpi < gauntletPicks.length; gfpi++) {
+                    if (gauntletPicks[gfpi].id === 'food_rush') { foodRegenInterval = Math.floor(foodRegenInterval / 2); break; }
+                }
+            }
+            if (!food && gameTick % foodRegenInterval === 0 && gameState === 'playing') {
+                const combinedSnake = snake.concat(rivalCombinedSnake());
                 const newFood = generateFood(combinedSnake);
                 if (newFood) food = newFood;
+            }
+
+            // Synesthesia: rhythmic pulse, drone, pad, arpeggiator
+            if (synesthesiaMode && !muted) {
+                if (gameTick % 4 === 0) playSynesthesiaPulse();
+                if (gameTick % 10 === 0) updateDrone();
+                updatePad();
+                if (comboCount > 0 && gameTick % Math.max(1, 4 - Math.min(3, Math.floor(comboCount / 5))) === 0) {
+                    playSynesthesiaArp();
+                }
             }
 
             lastTickTime = performance.now();
@@ -3069,7 +4101,7 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Progressive obstacle spawning
-            if (gameMode !== 'zen' && gameMode !== 'walled' && gameMode !== 'daily' && obstacles.length < Math.floor((CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE) * MAX_OBSTACLE_PERCENT)) {
+            if (gameMode !== 'zen' && gameMode !== 'walled' && gameMode !== 'daily' && gameMode !== 'painter' && obstacles.length < Math.floor((CANVAS_WIDTH / TILE_SIZE) * (CANVAS_HEIGHT / TILE_SIZE) * MAX_OBSTACLE_PERCENT)) {
                 if (obstacleSpawnTimer <= 0) {
                     obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
                     const head = snake.length > 0 ? snake[0] : { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE };
@@ -3090,6 +4122,7 @@ const TRAIL_RENDER_CONFIG = {
                     obstacleSpawnTimer--;
                 }
             }
+
         }
 
         function getLevelFromXP(xp) {
@@ -3262,6 +4295,9 @@ const TRAIL_RENDER_CONFIG = {
                     awardXP(ach.xp);
                     showAchievementToast(ach);
                     unlockedAny = true;
+                    mutatorTokens++;
+                    saveManager.set('snake_mutator_tokens', mutatorTokens);
+                    checkMutatorUnlocks();
                 }
             }
         }
@@ -3467,8 +4503,108 @@ const TRAIL_RENDER_CONFIG = {
                 saveManager.set('snake_has_played', '1');
             }
 
+            // Gauntlet intermission navigation
+            if (gauntletIntermission) {
+                if (e.key === 'ArrowLeft' || e.key === 'a') {
+                    gauntletSelection = (gauntletSelection - 1 + gauntletPickOptions.length) % gauntletPickOptions.length;
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'ArrowRight' || e.key === 'd') {
+                    gauntletSelection = (gauntletSelection + 1) % gauntletPickOptions.length;
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'ArrowUp' || e.key === 'w') {
+                    gauntletSelection = (gauntletSelection - 1 + gauntletPickOptions.length) % gauntletPickOptions.length;
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'ArrowDown' || e.key === 's') {
+                    gauntletSelection = (gauntletSelection + 1) % gauntletPickOptions.length;
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'Enter') {
+                    gauntletPicks.push(gauntletPickOptions[gauntletSelection]);
+                    startNextWave();
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'Escape') {
+                    startNextWave();
+                    drawGame(1);
+                    return;
+                }
+                return;
+            }
+
+            if (draftScreenVisible) {
+                if (e.key === 'ArrowLeft' || e.key === 'a') {
+                    draftSelection = (draftSelection - 1 + draftOptions.length) % draftOptions.length;
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'ArrowRight' || e.key === 'd') {
+                    draftSelection = (draftSelection + 1) % draftOptions.length;
+                    drawGame(1);
+                    return;
+                }
+                if (e.key === 'Enter') {
+                    activeMutator = draftOptions[draftSelection];
+                    draftScreenVisible = false;
+                    draftModeEnabled = false;
+                    var mutDef = MUTATOR_DEFS[activeMutator];
+                    if (activeMutator === 'double_rival' && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+                        spawnRival(1);
+                    }
+                    startGame();
+                    if (mutDef) queueToast(mutDef.icon + ' ' + mutDef.name + '!', 2000);
+                    return;
+                }
+                if (e.key === 'Escape') {
+                    activeMutator = null;
+                    draftScreenVisible = false;
+                    draftModeEnabled = false;
+                    startGame();
+                    return;
+                }
+                if ((e.key === 'r' || e.key === 'R') && mutatorTokens > 0) {
+                    mutatorTokens--;
+                    saveManager.set('snake_mutator_tokens', mutatorTokens);
+                    draftOptions = pickDraftOptions(MUTATOR_DRAFT_SIZE);
+                    draftSelection = 0;
+                    queueToast('Re-rolled! (Tokens: ' + mutatorTokens + ')', 1500);
+                    drawGame(1);
+                    return;
+                }
+                return;
+            }
+
             if (e.key === 'Enter') {
                 if (gameState === 'idle') {
+                    if (challengeFromUrl) {
+                        gameMode = challengeFromUrl.mode;
+                        var seedField = document.getElementById('seedField');
+                        seedField.value = challengeFromUrl.seed;
+                        activeSeed = challengeFromUrl.seed;
+                        var hash = challengeFromUrl.seed.split('').reduce(function(h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0);
+                        seedPrng = mulberry32(hash);
+                        try { history.replaceState(null, '', window.location.pathname); } catch(e) {}
+                        challengeFromUrl = null;
+                        resetGame();
+                        startGame();
+                        visualDirty = true;
+                        return;
+                    }
+                    if (draftModeEnabled && unlockedMutators.length > 0 && gameMode !== 'daily') {
+                        resetGame();
+                        draftOptions = pickDraftOptions(MUTATOR_DRAFT_SIZE);
+                        draftSelection = 0;
+                        draftScreenVisible = true;
+                        drawGame(1);
+                        return;
+                    }
                     if (gameMode === 'daily' && dailyAttempts <= 0) {
                         const el = toastEl;
                         if (el) {
@@ -3569,10 +4705,55 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
+            if (e.key === 'y' || e.key === 'Y') {
+                synesthesiaMode = !synesthesiaMode;
+                saveManager.set('snake_synesthesia', synesthesiaMode ? '1' : '0');
+                if (synesthesiaMode) {
+                    if (gameState === 'playing') startPad();
+                    queueToast('\u266B Synesthesia On', 1500);
+                } else {
+                    stopDrone();
+                    stopPad();
+                    queueToast('Synesthesia Off', 1500);
+                }
+                return;
+            }
+
+            if ((e.key === 'd' || e.key === 'D') && gameState === 'idle') {
+                draftModeEnabled = !draftModeEnabled;
+                queueToast(draftModeEnabled ? 'Draft Mode ON \u2014 start game to draft a mutator' : 'Draft Mode OFF', 2000);
+                drawGame(1);
+                return;
+            }
+
             if (e.key === 'v' || e.key === 'V') {
                 highContrast = !highContrast;
                 saveManager.set('snake_high_contrast', highContrast ? '1' : '0');
                 visualDirty = true;
+                return;
+            }
+
+            if (e.key === 'G' && e.shiftKey) {
+                e.preventDefault();
+                if (activeSeed === null) {
+                    queueToast('Ghost Arena requires a seeded run', 2000);
+                    return;
+                }
+                ghostArenaMode = !ghostArenaMode;
+                if (ghostArenaMode) {
+                    arenaGhostReplays = getArenaReplays(gameMode);
+                    if (arenaGhostReplays.length === 0) {
+                        ghostArenaMode = false;
+                        queueToast('No ghosts found for this seed', 2000);
+                        return;
+                    }
+                    ghostEnabled = false;
+                    queueToast('Ghost Arena: ' + arenaGhostReplays.length + ' of ' + GHOST_ARENA_MAX + ' ghosts', 2000);
+                } else {
+                    arenaGhostReplays = [];
+                    arenaGhostPositions = [];
+                    queueToast('Ghost Arena Off', 1500);
+                }
                 return;
             }
 
@@ -3628,6 +4809,20 @@ const TRAIL_RENDER_CONFIG = {
                 } else {
                     helpOverlayVisible = true;
                     visualDirty = true;
+                }
+                return;
+            }
+
+            if ((e.key === 'k' || e.key === 'K') && gameState === 'gameover' && activeSeed !== null) {
+                var url = window.location.origin + window.location.pathname + '#' + gameMode + '~' + encodeURIComponent(activeSeed) + (score > 0 ? '~' + score : '');
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(url).then(function() {
+                        queueToast('Challenge link copied!', 2000);
+                    }).catch(function() {
+                        fallbackCopy(url);
+                    });
+                } else {
+                    fallbackCopy(url);
                 }
                 return;
             }
@@ -3732,6 +4927,11 @@ const TRAIL_RENDER_CONFIG = {
                 default:
                     return;
             }
+
+                // Mirror mutator: flip left-right controls
+                if (activeMutator === 'mirror') {
+                    newDx = -newDx;
+                }
 
             setNextDirection(newDx, newDy);
         });
@@ -3880,11 +5080,30 @@ const TRAIL_RENDER_CONFIG = {
         });
 
         syncDailyState();
+
+        window.addEventListener('load', function() {
+            var hash = window.location.hash.slice(1);
+            if (hash) {
+                challengeFromUrl = parseChallengeUrl(hash);
+            }
+        });
+
+        window.addEventListener('hashchange', function() {
+            if (gameState === 'idle') {
+                var hash = window.location.hash.slice(1);
+                challengeFromUrl = hash ? parseChallengeUrl(hash) : null;
+                visualDirty = true;
+            }
+        });
+
         resetGame();
 
         // === SEED INPUT HANDLERS ===
         document.getElementById('seedField').addEventListener('input', function() {
-            const val = this.value.trim();
+            var rawVal = this.value;
+            rawVal = rawVal.replace(/~/g, '');
+            if (rawVal !== this.value) this.value = rawVal;
+            const val = rawVal.trim();
             if (val) {
                 activeSeed = val;
                 const hash = val.split('').reduce(function(h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0);
