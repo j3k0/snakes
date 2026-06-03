@@ -2575,7 +2575,7 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.translate((Math.random() - 0.5) * 2 * intensity, (Math.random() - 0.5) * 2 * intensity);
                     didShake = true;
                 }
-                drawGame(t);
+                drawGame(1); // no interpolation — snake head was 1 block behind
                 if (didShake) ctx.restore();
             }
 
