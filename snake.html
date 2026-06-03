@@ -2565,7 +2565,7 @@ const TRAIL_RENDER_CONFIG = {
             const elapsed = timestamp - lastTickTime;
             const t = lastTickTime > 0 ? Math.min(elapsed / tickInterval, 1) : 1;
 
-            const needsRedraw = visualDirty || particles.length > 0 || flashOverlay || shakeTimer > 0 || eatAnimTimer > 0 || snapLevelUpFlash > 0 || (gameMode === 'snap' && gameState === 'playing');
+            const needsRedraw = gameState === 'playing' || visualDirty || particles.length > 0 || flashOverlay || shakeTimer > 0 || eatAnimTimer > 0 || snapLevelUpFlash > 0 || (gameMode === 'snap' && gameState === 'playing');
             if (needsRedraw) {
                 visualDirty = false;
                 let didShake = false;
@@ -2575,7 +2575,7 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.translate((Math.random() - 0.5) * 2 * intensity, (Math.random() - 0.5) * 2 * intensity);
                     didShake = true;
                 }
-                drawGame(1); // no interpolation — snake head was 1 block behind
+                drawGame(t);
                 if (didShake) ctx.restore();
             }
 
