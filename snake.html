@@ -25,6 +25,8 @@
             background-color: #111;
             display: block;
             max-width: 100%;
+            height: auto;
+            aspect-ratio: 440 / 600;
             touch-action: none;
         }
         #score {
@@ -3832,6 +3834,10 @@ const TRAIL_RENDER_CONFIG = {
 
                 function drawGame(t) {
             ctx.imageSmoothingEnabled = false;
+
+            // Clear entire canvas (including margin areas) before drawing
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
             // Play area margin — translate all game elements into the margin-bounded box
             ctx.save();
