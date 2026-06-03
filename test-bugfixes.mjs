@@ -40,9 +40,9 @@ async function run() {
     if (!hasCounter) throw new Error('speedBoostCounter missing');
   });
 
-  test('B1/B2: restartGameInterval nulls gameInterval', async () => {
-    const source = await page.evaluate(() => restartGameInterval.toString());
-    if (!source.includes('gameInterval = null')) throw new Error('restartGameInterval does not null gameInterval');
+  test('B1/B2: restartGameTimeout nulls gameTimeout', async () => {
+    const source = await page.evaluate(() => restartGameTimeout.toString());
+    if (!source.includes('gameTimeout = null') && !source.includes('stopGameLoop')) throw new Error('restartGameTimeout does not null gameTimeout');
   });
 
   test('B1/B2: eat speed food, verify speed boost counter starts at 16', async () => {
@@ -65,7 +65,7 @@ async function run() {
     if (result.counter !== 15) throw new Error(`Expected speedBoostCounter=15 after one eat-tick, got ${result.counter}`);
     if (typeof result.interval !== 'number' || result.interval <= 0) throw new Error(`Bad tickInterval: ${result.interval}`);
     // Clean up
-    await page.evaluate(() => { clearInterval(gameInterval); gameInterval = null; gameState = 'idle'; });
+    await page.evaluate(() => { stopGameLoop(); gameState = 'idle'; });
   });
 
   // Test: Canvas renders pixels after game starts
@@ -91,7 +91,7 @@ async function run() {
     if (!hasPixels) throw new Error('Canvas has no rendered pixels after game start');
 
     // Clean up
-    await page.evaluate(() => { clearInterval(gameInterval); gameInterval = null; gameState = 'idle'; });
+    await page.evaluate(() => { stopGameLoop(); gameState = 'idle'; });
   });
 
   // Test B3: Daily streak

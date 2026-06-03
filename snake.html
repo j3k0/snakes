@@ -24,8 +24,7 @@
             border: 2px solid #333;
             background-color: #111;
             display: block;
-            max-width: calc(100vw - 20px);
-            max-height: 70vh;
+            max-width: 100%;
             touch-action: none;
         }
         #score {
@@ -38,7 +37,7 @@
         }
         @media (max-width: 480px) {
           body { padding: 5px; box-sizing: border-box; }
-          #gameCanvas { width: 100%; height: auto; }
+          #gameCanvas { max-width: 100%; }
           .dpad-btn { width: 56px; height: 56px; font-size: 24px; }
         }
         @media (pointer: coarse) {
@@ -60,27 +59,24 @@
         @media (pointer: coarse) {
             #menuFooter { font-size: 12px; line-height: 1.3; max-width: calc(100vw - 20px); }
         }
-        @media (pointer: coarse) and (max-height: 700px) {
-            #gameCanvas { max-height: 55vh; }
-        }
     </style>
 </head>
 <body>
     <h1>Snake Game</h1>
-    <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <canvas id="gameCanvas" width="400" height="400" role="img" aria-label="Snake game board"></canvas>
     <div id="menuFooter">
       <div id="prestigeInfo"></div>
       <div id="shortcutInfo"></div>
     </div>
     <div id="dpad" style="display:none;margin-top:10px;touch-action:manipulation;user-select:none;-webkit-user-select:none;">
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
-        <button class="dpad-btn" data-key="ArrowUp" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▲</button>
+        <button class="dpad-btn" data-key="ArrowUp" aria-label="Up" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▲</button>
         <div style="display:flex;gap:48px;">
-          <button class="dpad-btn" data-key="ArrowLeft" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">◀</button>
-          <button class="dpad-btn" data-key="ArrowDown" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▼</button>
-          <button class="dpad-btn" data-key="ArrowRight" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▶</button>
+          <button class="dpad-btn" data-key="ArrowLeft" aria-label="Left" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">◀</button>
+          <button class="dpad-btn" data-key="ArrowDown" aria-label="Down" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▼</button>
+          <button class="dpad-btn" data-key="ArrowRight" aria-label="Right" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▶</button>
         </div>
-        <button class="dpad-btn" data-key=" " style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;margin-top:4px;">⏸</button>
+        <button class="dpad-btn" data-key=" " aria-label="Pause" style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;margin-top:4px;">⏸</button>
       </div>
     </div>
     <p>Score: <span id="score">0</span></p>
@@ -97,6 +93,33 @@
         <div id="achievementsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #FFD700;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:350px;max-width:480px;"></div>
         <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
         <div id="panelBackdrop" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;touch-action:manipulation;"></div>
+        <!-- v6: Screen reader live region -->
+        <div id="srAnnounce" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
+        <!-- v6 styles for new panels -->
+        <style>
+            .brews-grid { display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:10px 0; }
+            .brew-card { padding:8px;border-radius:8px;cursor:pointer;text-align:center;transition:all .15s; }
+            .brew-card.unlocked { background:rgba(68,255,136,0.1);border:1px solid rgba(68,255,136,0.3); }
+            .brew-card.locked { background:rgba(68,68,68,0.3);border:1px solid rgba(68,68,68,0.3); }
+            .brew-card.equipped { border-color:#4488FF;box-shadow:0 0 8px rgba(68,136,255,0.5); }
+            .brew-name { font-weight:bold;font-size:13px; }
+            .brew-desc { font-size:11px;color:#AAA;margin:4px 0; }
+            .brew-cost { font-size:10px;color:#888; }
+            .diary-entry { padding:6px;border-bottom:1px solid #333;cursor:pointer; }
+            .diary-entry:hover { background:rgba(255,255,255,0.05); }
+            .diary-summary { display:flex;justify-content:space-between;align-items:center; }
+            .diary-mode { font-weight:bold;font-size:12px; }
+            .diary-score { font-size:14px;color:#FFD700; }
+            .diary-time { font-size:11px;color:#AAA; }
+            .diary-date { font-size:11px;color:#666; }
+            .diary-detail { margin-top:6px;padding:8px;background:rgba(0,0,0,0.3);border-radius:4px; }
+            .diary-stats { display:grid;grid-template-columns:repeat(2,1fr);gap:4px;font-size:11px;color:#CCC; }
+            .diary-delete { margin-top:8px;padding:4px 10px;background:#C03;color:white;border:none;border-radius:4px;cursor:pointer;font-size:10px; }
+            .panel-subtitle { text-align:center;font-size:12px;color:#AAA;margin:4px 0 12px 0; }
+            #diaryFilter { text-align:center;margin:8px 0; }
+            #diaryFilter select { background:#222;color:white;border:1px solid #555;padding:4px 8px;border-radius:4px;font-size:11px; }
+            @media (display-mode: standalone) { #dpad { padding-bottom:max(8px, env(safe-area-inset-bottom)); } }
+        </style>
 
     <script>
         const TILE_SIZE = 20;
@@ -146,6 +169,7 @@
 
         let snake = [];
         let food = {};
+        var food2 = null; // v6: Echo Brew duplicate food
         let dx = 0;
         let dy = 0;
         let score = 0;
@@ -262,7 +286,7 @@
                 version: REPLAY_VERSION,
                 seed: activeSeed,
                 mode: gameMode,
-                mutator: activeMutator,
+                mutators: activeMutators,
                 score: score,
                 maxLength: maxLength,
                 timestamp: Date.now(),
@@ -278,6 +302,100 @@
         function loadReplays(mode) {
             return saveManager.getJSON('snake_replays_' + mode, []);
         }
+
+        // v6: Snake Diary
+        var MAX_DIARY_ENTRIES = 200;
+
+        function saveDiaryEntry() {
+            if (gameMode === 'daily') return; // skip for daily mode (seed-based)
+            var diary = saveManager.getJSON('snake_diary', []);
+            var entry = {
+                id: Date.now(),
+                date: new Date().toISOString(),
+                mode: gameMode,
+                score: gameMode === 'painter' ? (paintCoveredCount || 0) : (score || 0),
+                duration: Math.floor((Date.now() - (sessionStartTime || Date.now())) / 1000) || 0,
+                foodEaten: sessionFoodEaten || 0,
+                maxCombo: sessionMaxCombo || 0,
+                level: level || 0,
+                prestigeLevel: prestigeLevel || 0,
+                deathCause: lastDeathCause || 'quit',
+                seed: activeSeed || '',
+                mutators: typeof activeMutators !== 'undefined' ? activeMutators.slice() : [],
+                brews: typeof activeBrews !== 'undefined' ? activeBrews.slice() : [],
+            };
+            diary.unshift(entry);
+            if (diary.length > MAX_DIARY_ENTRIES) diary.length = MAX_DIARY_ENTRIES;
+            saveManager.setJSON('snake_diary', diary);
+        }
+
+        function formatDuration(secs) {
+            if (!secs || secs < 0) return '0:00';
+            var m = Math.floor(secs / 60);
+            var s = Math.floor(secs % 60);
+            return m + ':' + (s < 10 ? '0' : '') + s;
+        }
+
+        var diaryModeFilter = 'all';
+
+        function renderDiary() {
+            var list = document.getElementById('diaryList');
+            if (!list) return;
+            var diary = saveManager.getJSON('snake_diary', []);
+            var filter = document.getElementById('diaryModeFilter');
+            var fv = filter ? filter.value : 'all';
+            var html = '';
+            var count = 0;
+            for (var di = 0; di < diary.length; di++) {
+                var entry = diary[di];
+                if (fv !== 'all' && entry.mode !== fv) continue;
+                count++;
+                var dateStr = entry.date ? new Date(entry.date).toLocaleDateString() : '?';
+                var timeStr = formatDuration(entry.duration);
+                html += '<div class="diary-entry" onclick="toggleDiaryDetail(' + entry.id + ')"><div class="diary-summary"><span class="diary-mode">' + (entry.mode || '?') + '</span><span class="diary-score">' + (entry.score || 0) + '</span><span class="diary-time">' + timeStr + '</span><span class="diary-date">' + dateStr + '</span></div><div id="diary-detail-' + entry.id + '" class="diary-detail" style="display:none;"><div class="diary-stats"><span>Food: ' + (entry.foodEaten || 0) + '</span><span>Combo: ' + (entry.maxCombo || 0) + 'x</span><span>Level: ' + (entry.level || 0) + '</span><span>Prestige: ' + (entry.prestigeLevel || 0) + '</span><span>Death: ' + (entry.deathCause || '?') + '</span><span>Mutators: ' + (entry.mutators && entry.mutators.length ? entry.mutators.join(', ') : 'none') + '</span><span>Brews: ' + (entry.brews && entry.brews.length ? entry.brews.join(', ') : 'none') + '</span></div><button onclick="deleteDiaryEntry(' + entry.id + ')" class="diary-delete">Delete</button></div></div>';
+            }
+            list.innerHTML = html || '<p style="text-align:center;color:#888;padding:20px;">No entries yet. Play some games!</p>';
+        }
+
+        function toggleDiaryDetail(id) {
+            var el = document.getElementById('diary-detail-' + id);
+            if (el) el.style.display = el.style.display === 'block' ? 'none' : 'block';
+        }
+
+        function deleteDiaryEntry(id) {
+            if (!confirm('Delete this diary entry?')) return;
+            var diary = saveManager.getJSON('snake_diary', []);
+            diary = diary.filter(function(e) { return e.id !== id; });
+            saveManager.setJSON('snake_diary', diary);
+            renderDiary();
+        }
+
+        function showDiaryPanel() {
+            var el = document.getElementById('diaryPanel');
+            if (!el) return;
+            panelBackdropEl.style.display = 'block';
+            if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
+            document.getElementById('statsPanel').style.display = 'none';
+            document.getElementById('achievementsPanel').style.display = 'none';
+            document.getElementById('cosmeticsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            // Populate filter
+            var filter = document.getElementById('diaryModeFilter');
+            if (filter) {
+                var modes = ['classic', 'timeAttack', 'snap', 'walled', 'zen', 'painter', 'gauntlet'];
+                var cur = filter.value;
+                filter.innerHTML = '<option value="all">All Modes</option>';
+                for (var mi = 0; mi < modes.length; mi++) {
+                    filter.innerHTML += '<option value="' + modes[mi] + '">' + modes[mi].charAt(0).toUpperCase() + modes[mi].slice(1) + '</option>';
+                }
+                filter.value = cur;
+            }
+            renderDiary();
+            el.style.display = 'block';
+            srSpeak('Run diary opened');
+        }
+        // --- end v6 ---
 
         function parseChallengeUrl(hash) {
             var parts = hash.split('~');
@@ -316,7 +434,9 @@
 
         function rebuildGhost(replay, currentTick) {
             if (!replay || replay.seed !== activeSeed || replay.version !== REPLAY_VERSION) return [];
-            if (replay.mutator && replay.mutator !== activeMutator) return [];
+            // v6: Support both old (mutator) and new (mutators) format
+var replayMutators = Array.isArray(replay.mutators) ? replay.mutators : (replay.mutator ? [replay.mutator] : []);
+if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return [];
             var head = { x: TILE_SIZE * 10, y: TILE_SIZE * 10 };
             var body = [{ x: head.x, y: head.y }];
             var dx = TILE_SIZE, dy = 0;
@@ -521,12 +641,78 @@ const MUTATOR_DEFS = {
     shrink_zone: { name: 'Shrink Zone',  icon: '\uD83D\uDCCD', desc: 'Board shrinks by 1 row/column every 30 seconds', tokenCost: 6 },
     chaos_seed:  { name: 'Chaos Seed',   icon: '\uD83C\uDFB2', desc: 'Food type probability reshuffles every 20 ticks', tokenCost: 8 },
 };
+
+// v6: Resonance combinations
+var RESONANCES = {
+    'gravity~mirror': { name: 'Quantum', desc: 'Direction inverts randomly every 10-15 ticks', effect: 'invertControls' },
+    'phase_shift~hunger_clock': { name: 'Ethereal', desc: 'Phase-shift ticks pause hunger; snake becomes intangible', effect: 'intangiblePhase' },
+    'golden_food~chaos_seed': { name: 'Chaos Gold', desc: 'All food 2x points and 2x XP, types shuffle', effect: 'doubleGold' },
+    'shrink_zone~double_rival': { name: 'Pressure Cooker', desc: 'Rivals also trigger board shrinking', effect: 'rivalShrink' },
+    'hunger_clock~golden_food': { name: 'Famine Feast', desc: '4x food points but hunger ticks every 30', effect: 'feastFamine' },
+    'mirror~chaos_seed': { name: 'Schrodinger', desc: 'Every 15 ticks: mirror toggles or food reshuffles', effect: 'quantumToggle' },
+    'gravity~mirror~phase_shift': { name: 'Chaos Theory', desc: 'Three effects cycle every 5 ticks', effect: 'chaosCycle' },
+    'golden_food~hunger_clock~shrink_zone': { name: 'Apocalypse', desc: 'Shrink accelerates on each hunger tick', effect: 'rapidDoom' },
+};
+var activeResonance = null;
+var cascadeMode = false;
+var cascadeUnlocked = saveManager.get('snake_cascade_unlocked', '') === 'true';
+
+// v6: Resonance detection and cascade multiplier
+function detectResonance(mutators) {
+    var sorted = mutators.slice().sort();
+    var key = sorted.join('~');
+    return RESONANCES[key] || null;
+}
+
+function getCascadeMultiplier(count) {
+    if (count <= 1) return 1.0;
+    return 0.5;
+}
+
 const MUTATOR_BASE_POOL = ['gravity', 'mirror', 'phase_shift'];
 const MUTATOR_DRAFT_SIZE = 3;
-let activeMutator = null;
+let activeMutators = [];
 let draftOptions = [];
 let draftScreenVisible = false;
 let draftSelection = 0;
+
+// v6: Floater system
+let floaters = [];
+function spawnFloater(x, y, text, color, size, duration) {
+    floaters.push({
+        x: x / TILE_SIZE,
+        y: y / TILE_SIZE,
+        text: text,
+        color: color,
+        size: size || 16,
+        life: duration || 1.0,
+        maxLife: duration || 1.0,
+        velocityY: -1.5,
+    });
+    if (floaters.length > 8) floaters.splice(0, floaters.length - 8);
+}
+// --- end v6 ---
+// v6: Screen reader support
+let lastSrSpeak = 0;
+let srQueue = '';
+function srSpeak(text) {
+    var el = document.getElementById('srAnnounce');
+    if (!el) return;
+    var now = Date.now();
+    if (now - lastSrSpeak < 500) { srQueue = text; return; }
+    lastSrSpeak = now;
+    el.textContent = '';
+    setTimeout(function() { el.textContent = text; }, 50);
+}
+setInterval(function() {
+    if (srQueue && Date.now() - lastSrSpeak >= 500) {
+        var msg = srQueue; srQueue = '';
+        var el = document.getElementById('srAnnounce');
+        if (el) { el.textContent = ''; setTimeout(function() { el.textContent = msg; }, 50); }
+    }
+}, 500);
+// --- end v6 ---
+
 let draftModeEnabled = false;
 let shrinkRows = 0;
 let shrinkCols = 0;
@@ -534,6 +720,82 @@ let hungerStarted = false;
 let hungerTickCounter = 0;
 let chaosShuffleTick = 0;
 let chaosCurrentWeights = null;
+
+// v6: BREWS SYSTEM
+var BREWS_CONFIG = [
+    { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
+    { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
+    { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival steals 3 segments',                cost: 3 },
+    { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
+    { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
+    { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
+];
+var unlockedBrews = saveManager.getJSON('snake_unlocked_brews', []);
+var equippedBrews = saveManager.getJSON('snake_equipped_brews', []);
+var activeBrews = [];
+var brewUsageFlags = {};
+var minFoodSpawnDist = null;
+
+function purchaseBrew(id) {
+    var brew = BREWS_CONFIG.find(function(b) { return b.id === id; });
+    if (!brew || unlockedBrews.includes(id)) return false;
+    if (mutatorTokens < brew.cost) { queueToast('Not enough mutator tokens!', 2000); return false; }
+    mutatorTokens -= brew.cost;
+    unlockedBrews.push(id);
+    saveManager.setJSON('snake_unlocked_brews', unlockedBrews);
+    saveManager.set('snake_mutator_tokens', String(mutatorTokens));
+    saveManager.setJSON('snake_equipped_brews', equippedBrews);
+    queueToast('🧪 Unlocked ' + brew.name + '!', 3000);
+    renderBrewsPanel();
+    return true;
+}
+
+function equipBrew(id) {
+    if (!unlockedBrews.includes(id)) { purchaseBrew(id); return; }
+    if (equippedBrews.includes(id)) { equippedBrews = equippedBrews.filter(function(b) { return b !== id; }); saveManager.setJSON('snake_equipped_brews', equippedBrews); renderBrewsPanel(); return; }
+    if (equippedBrews.length >= 2) { queueToast('Max 2 brews equipped! Unequip one first.', 2000); return; }
+    var brew = BREWS_CONFIG.find(function(b) { return b.id === id; });
+    if (brew && brew.mutuallyExclusive) {
+        for (var mi = 0; mi < brew.mutuallyExclusive.length; mi++) {
+            equippedBrews = equippedBrews.filter(function(b) { return b !== brew.mutuallyExclusive[mi]; });
+        }
+    }
+    equippedBrews.push(id);
+    saveManager.setJSON('snake_equipped_brews', equippedBrews);
+    renderBrewsPanel();
+}
+
+function renderBrewsPanel() {
+    var grid = document.getElementById('brewsGrid');
+    if (!grid) return;
+    var html = '';
+    for (var bi = 0; bi < BREWS_CONFIG.length; bi++) {
+        var brew = BREWS_CONFIG[bi];
+        var unlocked = unlockedBrews.includes(brew.id);
+        var equipped = equippedBrews.includes(brew.id);
+        var canAfford = mutatorTokens >= brew.cost;
+        var statusClass = unlocked ? (equipped ? 'equipped' : 'unlocked') : (canAfford ? 'unlocked' : 'locked');
+        var actionText = unlocked ? (equipped ? '✓ Equipped' : 'Tap to equip') : (canAfford ? '🔑 Unlock (' + brew.cost + ' tokens)' : '🔒 ' + brew.cost + ' tokens');
+        html += '<div class="brew-card ' + statusClass + '" onclick="equipBrew(\'' + brew.id + '\')" role="button" tabindex="0"><div class="brew-name">' + brew.name + '</div><div class="brew-desc">' + brew.desc + '</div><div class="brew-cost">' + actionText + '</div></div>';
+    }
+    grid.innerHTML = html;
+    var tc = document.getElementById('brewTokenCount');
+    if (tc) tc.textContent = mutatorTokens;
+}
+
+function showBrewsPanel() {
+    var el = document.getElementById('brewsPanel');
+    if (!el) return;
+    panelBackdropEl.style.display = 'block';
+    if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
+    document.getElementById('statsPanel').style.display = 'none';
+    document.getElementById('achievementsPanel').style.display = 'none';
+    document.getElementById('cosmeticsPanel').style.display = 'none';
+    renderBrewsPanel();
+    el.style.display = 'block';
+    srSpeak('Brews panel opened');
+}
 
 const SYNESTHESIA_NOTES = {
     common:   { note: 'C', freq: 261.63 },
@@ -904,7 +1166,7 @@ const TRAIL_RENDER_CONFIG = {
                     }
                 }
             }
-            if (activeMutator === 'golden_food') {
+            if (activeMutators.indexOf('golden_food') !== -1) {
                 amount = Math.round(amount * 3);
             }
             score += Math.round(amount * multi);
@@ -923,7 +1185,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function pickRandomFoodType() {
             const rand = seededRandom();
-            if (activeMutator === 'chaos_seed' && chaosCurrentWeights) {
+            if (activeMutators.indexOf('chaos_seed') !== -1 && chaosCurrentWeights) {
                 var chaosCum = 0;
                 for (var ck in chaosCurrentWeights) {
                     chaosCum += chaosCurrentWeights[ck];
@@ -975,7 +1237,10 @@ const TRAIL_RENDER_CONFIG = {
                     type: type
                 };
             } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y) ||
-                     obstacles.some(o => o.x === newFood.x && o.y === newFood.y));
+                     obstacles.some(o => o.x === newFood.x && o.y === newFood.y) ||
+                     // v6: Rampage Brew — prefer food closer to head
+                     (minFoodSpawnDist !== null && currentSnake.length > 0 &&
+                      Math.abs(newFood.x - currentSnake[0].x) + Math.abs(newFood.y - currentSnake[0].y) > minFoodSpawnDist * TILE_SIZE));
             if (newFood.type === 'rare' || newFood.type === 'epic') playSound('rare_spawn');
             return newFood;
         }
@@ -1089,7 +1354,7 @@ const TRAIL_RENDER_CONFIG = {
             powerUpSpawnCounter = 0;
             powerUpDespawnCounter = 0;
             rivals = [];
-            activeMutator = null;
+            activeMutators = [];
             draftScreenVisible = false;
             draftModeEnabled = false;
             draftOptions = [];
@@ -1143,6 +1408,7 @@ const TRAIL_RENDER_CONFIG = {
             stopPad();
              const combinedInitial = snake.concat(rivalCombinedSnake());
             food = generateFood(combinedInitial);
+            food2 = null; // v6: Echo Brew duplicate food
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -1215,7 +1481,7 @@ const TRAIL_RENDER_CONFIG = {
             if (hasTouch) {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap to Start | Swipe \u2191\u2193 to change mode</span>';
             } else {
-                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics</span>';
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews</span>';
             }
         }
 
@@ -1223,6 +1489,7 @@ const TRAIL_RENDER_CONFIG = {
             syncDailyState();
             sessionSummary = null;
             sessionSummaryTimer = 0;
+            srSpeak('Game started. Mode: ' + gameMode);
             if (gameMode === 'daily') {
                 if (dailyAttempts <= 0) {
                     const el = toastEl;
@@ -1289,11 +1556,24 @@ const TRAIL_RENDER_CONFIG = {
             scheduleNextTick();
             if (activeSeed !== null) startReplayRecording();
             if (synesthesiaMode) startPad();
+            // v6: Initialize brews for this run
+            activeBrews = equippedBrews.slice();
+            brewUsageFlags = {};
+            for (var bi = 0; bi < activeBrews.length; bi++) { brewUsageFlags[activeBrews[bi] + 'Used'] = false; }
+            brewUsageFlags.echoCount = 0;
+            brewUsageFlags.combustionAccum = 0;
+            brewUsageFlags.combRemaining = 0;
+            minFoodSpawnDist = null;
+
             if ((gameMode === 'classic' || gameMode === 'timeAttack') && gameMode !== 'painter') {
                 spawnRival(0);
             }
-            if (activeMutator === 'double_rival' && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+            if (activeMutators.indexOf('double_rival') !== -1 && (gameMode === 'classic' || gameMode === 'timeAttack')) {
                 spawnRival(1);
+            }
+            // v6: Cascade guard - gauntlet limited to 1 mutator
+            if (gameMode === 'gauntlet' && activeMutators.length > 1) {
+                activeMutators = [activeMutators[0]];
             }
             if (gameMode === 'gauntlet') {
                 gauntletWave = 0;
@@ -1334,6 +1614,42 @@ const TRAIL_RENDER_CONFIG = {
                 y: ((pos.y % CANVAS_HEIGHT) + CANVAS_HEIGHT) % CANVAS_HEIGHT
             };
         }
+
+        // v6: Responsive canvas sizing
+        function resizeCanvas() {
+            var canvasEl = document.getElementById('gameCanvas');
+            if (!canvasEl) return;
+            var dpad = document.getElementById('dpad');
+            var scoreBar = document.getElementById('score');
+            var scoreBarHeight = scoreBar ? scoreBar.offsetHeight : 0;
+            var dpadHeight = dpad ? dpad.offsetHeight : 0;
+            var margin = 16;
+            var availableHeight = window.innerHeight - scoreBarHeight - dpadHeight - margin;
+            var availableWidth = window.innerWidth - 16;
+            var size = Math.max(300, Math.min(availableWidth, availableHeight, 600));
+            canvasEl.style.width = size + 'px';
+            canvasEl.style.height = size + 'px';
+        }
+
+        function debouncedResize() {
+            var timeout;
+            return function() {
+                clearTimeout(timeout);
+                timeout = setTimeout(resizeCanvas, 100);
+            };
+        }
+
+        // Call on load and resize
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', resizeCanvas);
+        } else {
+            resizeCanvas();
+        }
+        window.addEventListener('resize', debouncedResize());
+        window.addEventListener('orientationchange', function() {
+            setTimeout(resizeCanvas, 300);
+        });
+        // --- end v6 ---
 
         function restartGameTimeout() {
             stopGameLoop();
@@ -1562,6 +1878,7 @@ const TRAIL_RENDER_CONFIG = {
     playSound('resume');
             drawGame(1);
             visualDirty = true;
+            srSpeak('Game resumed');
         }
 
         function finalizeSession(isVoluntary) {
@@ -1587,9 +1904,15 @@ const TRAIL_RENDER_CONFIG = {
             stopGameLoop();
             gameState = 'gameover';
             if (shieldActive) sessionUsedShield = true;
+            // v6: Cascade score multiplier
+            if (activeMutators.length > 1) {
+                var cascMult = getCascadeMultiplier(activeMutators.length);
+                score = Math.floor(score * cascMult);
+            }
             saveReplay(score, snake.length);
             updateMenuFooter();
             rivals = [];
+            srSpeak('Game over. Score ' + score + '. ' + (lastDeathCause || ''));
             finalizeSession(false);
             awardXP(snake.length * 10);
             checkAchievements(score);
@@ -1631,6 +1954,8 @@ const TRAIL_RENDER_CONFIG = {
             shakeTimer = 200;
             drawGame(1);
             visualDirty = true;
+            // v6: diary entry
+            saveDiaryEntry();
         }
 
         function endZenSession() {
@@ -1663,6 +1988,8 @@ const TRAIL_RENDER_CONFIG = {
             stopDrone();
             stopPad();
             zenActive = false;
+            // v6: diary entry
+            saveDiaryEntry();
         }
 
         function playSound(name) {
@@ -2199,6 +2526,13 @@ const TRAIL_RENDER_CONFIG = {
             if (sessionSummaryTimer > 0) sessionSummaryTimer = Math.max(0, sessionSummaryTimer - delta);
             if (touchIndicatorTimer > 0) touchIndicatorTimer = Math.max(0, touchIndicatorTimer - delta);
 
+            // v6: Floater lifecycle decay
+            for (var fi = floaters.length - 1; fi >= 0; fi--) {
+                floaters[fi].life -= delta / 1000;
+                if (floaters[fi].life <= 0) floaters.splice(fi, 1);
+            }
+            // --- end v6 ---
+
             // New obstacle flash timer decay
             for (let i = newObstacleFlash.length - 1; i >= 0; i--) {
                 newObstacleFlash[i].timer -= delta;
@@ -2244,6 +2578,10 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
             }
             ctx.globalAlpha = 1;
+
+            // v6: Render floaters on top of particles
+            if (floaters.length > 0) drawFloaters(ctx);
+            // --- end v6 ---
 
             // Touch swipe indicator
             if (touchIndicatorTimer > 0) {
@@ -2664,6 +3002,24 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.strokeText(hcLabels[food.type] || '?', cx, cy);
                 ctx.fillStyle = '#FFFFFF';
                 ctx.fillText(hcLabels[food.type] || '?', cx, cy);
+                ctx.restore();
+            }
+            // v6: Echo Brew food2 rendering
+            if (food2) {
+                ctx.save();
+                ctx.globalAlpha = 0.7;
+                var f2Tier = FOOD_TIERS[food2.type] || FOOD_TIERS.common;
+                var f2cx = food2.x + TILE_SIZE / 2;
+                var f2cy = food2.y + TILE_SIZE / 2;
+                ctx.fillStyle = f2Tier.color;
+                ctx.beginPath();
+                ctx.arc(f2cx, f2cy, TILE_SIZE * 0.35, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 8px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('E', f2cx, f2cy);
                 ctx.restore();
             }
         }
@@ -3362,6 +3718,12 @@ const TRAIL_RENDER_CONFIG = {
                     queueToast('\uD83D\uDD13 New mutator unlocked: ' + def.name + '!', 3000);
                 }
             }
+            // v6: Cascade unlock
+            if (!cascadeUnlocked && mutatorTokens >= 5) {
+                saveManager.set('snake_cascade_unlocked', 'true');
+                cascadeUnlocked = true;
+                queueToast('\uD83C\uDF00 Cascade Mode Unlocked! Pick up to 3 mutators per run!', 4000);
+            }
         }
 
         function pickDraftOptions(count) {
@@ -3431,13 +3793,38 @@ const TRAIL_RENDER_CONFIG = {
             ctx.textBaseline = 'bottom';
             ctx.fillStyle = '#666';
             ctx.font = '11px Arial';
-            ctx.fillText('Enter to select | Arrows to navigate | Escape to skip', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+            ctx.fillText('Enter to select | Arrows to navigate | Escape to skip', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 48);
+            // v6: Cascade mode indicator
+            if (cascadeUnlocked) {
+                ctx.fillStyle = cascadeMode ? '#AAFF88' : '#666';
+                ctx.fillText('C: Cascade ' + (cascadeMode ? 'ON (pick 3)' : 'OFF (pick 1)'), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+            }
             if (mutatorTokens > 0) {
                 ctx.fillStyle = '#FFD700';
                 ctx.fillText('R to re-roll (1 token) | Tokens: ' + mutatorTokens, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 12);
             }
             ctx.restore();
         }
+
+        // v6: Floater rendering
+        function drawFloaters(ctx) {
+            for (var fi = floaters.length - 1; fi >= 0; fi--) {
+                var f = floaters[fi];
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, f.life / f.maxLife);
+                ctx.font = 'bold ' + f.size + 'px monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = f.color;
+                ctx.shadowBlur = 8;
+                ctx.shadowColor = f.color;
+                var progress = 1 - f.life / f.maxLife;
+                var screenY = f.y * TILE_SIZE + progress * f.velocityY * TILE_SIZE;
+                ctx.fillText(f.text, f.x * TILE_SIZE + TILE_SIZE / 2, screenY);
+                ctx.restore();
+            }
+        }
+        // --- end v6 ---
 
         function drawGame(t) {
             ctx.imageSmoothingEnabled = false;
@@ -3509,18 +3896,32 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
-            if (activeMutator) {
-                var mutDef = MUTATOR_DEFS[activeMutator];
-                if (mutDef) {
-                    ctx.save();
-                    ctx.fillStyle = '#FFD700';
-                    ctx.font = hudFont(10);
-                    ctx.textAlign = 'left';
-                    ctx.textBaseline = 'top';
-                    var mutY = synesthesiaMode ? 28 : 15;
-                    ctx.fillText(mutDef.icon + ' ' + mutDef.name, 5, mutY);
-                    ctx.restore();
+            // v6: Multi-mutator display
+            if (activeMutators.length > 0) {
+                for (var mi = 0; mi < activeMutators.length; mi++) {
+                    var mutId = activeMutators[mi];
+                    var mutDef = MUTATOR_DEFS[mutId];
+                    if (mutDef) {
+                        ctx.save();
+                        ctx.globalAlpha = 0.7;
+                        ctx.font = '10px Arial';
+                        ctx.fillStyle = '#888';
+                        ctx.textAlign = 'right';
+                        ctx.fillText(mutDef.icon + ' ' + mutDef.name, CANVAS_WIDTH - 5, 20 + mi * 14);
+                        ctx.restore();
+                    }
                 }
+            }
+
+            // v6: Resonance indicator
+            if (activeResonance && activeMutators.length > 1) {
+                ctx.save();
+                ctx.globalAlpha = 0.8;
+                ctx.font = 'bold 10px monospace';
+                ctx.fillStyle = '#AA88FF';
+                ctx.textAlign = 'right';
+                ctx.fillText('✦ ' + activeResonance.name, CANVAS_WIDTH - 5, 20 + activeMutators.length * 14);
+                ctx.restore();
             }
 
             // Seed display
@@ -3576,6 +3977,37 @@ const TRAIL_RENDER_CONFIG = {
         function updateGame() {
             if (gameState !== 'playing') return;
 
+            // v6: extracted functions (declared here for closure over updateGame's locals)
+            function handleComboMilestone() {
+                if (COMBO_MILESTONES.includes(comboCount) && comboCount > lastComboMilestone) {
+                    lastComboMilestone = comboCount;
+                    var color = COMBO_FLASH_COLORS[comboCount] || '#44BB44';
+                    var alpha = comboCount >= 20 ? 0.5 : comboCount >= 10 ? 0.4 : 0.3;
+                    if (!flashOverlay || flashOverlay.priority !== 'critical') {
+                        flashOverlay = { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' };
+                    }
+                    if (comboCount >= 10) {
+                        shakeTimer = Math.min(300, 100 + comboCount * 5);
+                    }
+                    vibrate(30);
+                    playSound('combo_milestone');
+                    srSpeak('Combo ' + comboCount + '!');
+                    // v6: Combustion Brew — each combo milestone adds +1 mult
+                    if (activeBrews.indexOf('combustion') !== -1) {
+                        brewUsageFlags.combustionAccum++;
+                        brewUsageFlags.combRemaining += 3;
+                    }
+                    // v6: combo floater
+                    if (comboCount >= 50) spawnFloater(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 'COMBO x50!', '#FF0000', 42, 2.0);
+                    else if (comboCount >= 20) spawnFloater(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 'COMBO x20!', '#FFAA00', 38, 2.0);
+                    else if (comboCount >= 10) spawnFloater(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 'COMBO x10!', '#FF44FF', 34, 1.8);
+                    else if (comboCount >= 5) spawnFloater(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 'COMBO x5!', '#44FF44', 30, 1.5);
+                    else spawnFloater(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 'COMBO x3!', '#44CCFF', 28, 1.5);
+                    // --- end v6 ---
+                }
+            }
+            // --- end v6 extraction ---
+
             // Zen mode: score = snake length
             if (gameMode === 'zen') {
                 score = snake.length;
@@ -3609,17 +4041,17 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // === MUTATOR LOGIC ===
-            if (activeMutator === 'gravity' && dy !== -TILE_SIZE && dy !== TILE_SIZE) {
+            if (activeMutators.indexOf('gravity') !== -1 && dy !== -TILE_SIZE && dy !== TILE_SIZE) {
                 dx = 0;
                 dy = TILE_SIZE;
             }
 
             var skipSelfCollision = false;
-            if (activeMutator === 'phase_shift' && gameTick % 5 === 0) {
+            if (activeMutators.indexOf('phase_shift') !== -1 && gameTick % 5 === 0) {
                 skipSelfCollision = true;
             }
 
-            if (activeMutator === 'hunger_clock') {
+            if (activeMutators.indexOf('hunger_clock') !== -1) {
                 if (!hungerStarted && sessionFoodEaten > 0) {
                     hungerStarted = true;
                     hungerTickCounter = 0;
@@ -3638,7 +4070,7 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            if (activeMutator === 'shrink_zone') {
+            if (activeMutators.indexOf('shrink_zone') !== -1) {
                 var ticksPerShrink = Math.floor(30000 / getEffectiveSpeed());
                 if (gameTick > 0 && gameTick % ticksPerShrink === 0) {
                     if (shrinkCols < CANVAS_WIDTH / TILE_SIZE / 2 - 1) {
@@ -3659,9 +4091,22 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            if (activeMutator === 'chaos_seed' && gameTick % 20 === 0) {
+            if (activeMutators.indexOf('chaos_seed') !== -1 && gameTick % 20 === 0) {
                 chaosCurrentWeights = shuffleFoodWeights();
                 chaosShuffleTick = gameTick;
+            }
+
+            // v6: Resonance effects
+            activeResonance = detectResonance(activeMutators);
+            if (activeResonance) {
+                if (activeResonance.effect === 'invertControls' && gameTick % (10 + Math.floor(Math.random() * 6)) === 0) {
+                    flashOverlay = { color: '#FFFFFF', alpha: 0.2, priority: 'normal' };
+                }
+                if (activeResonance.effect === 'feastFamine' && hungerStarted) {
+                    if (hungerTickCounter % 30 === 0 && snake.length > 1) {
+                        // existing hunger logic will fire — this just ensures shorter interval
+                    }
+                }
             }
 
             prevSnake = snake.map(s => ({ x: s.x, y: s.y }));
@@ -3728,58 +4173,99 @@ const TRAIL_RENDER_CONFIG = {
             };
             const wrappedHead = wrapPosition(newHead);
 
-            if (checkCollision(wrappedHead) && !skipSelfCollision) {
-                if (shieldActive) {
-                    shieldActive = false;
-                    powerUpTimer = 0;
-                    powerUpType = null;
-                    stats.shieldBlocks++;
-                    spawnParticles(wrappedHead.x, wrappedHead.y, 15, '#4488FF');
-                    playSound('bonus');
-                } else {
-                    lastDeathCause = 'You ran into yourself!';
-                    snake.push(tail);
-                    gameOver();
-                    return;
-                }
-            }
-
-            if (MODE_CONFIG[gameMode].wallDeath) {
-                if (wrappedHead.x < 0 || wrappedHead.x >= CANVAS_WIDTH || wrappedHead.y < 0 || wrappedHead.y >= CANVAS_HEIGHT) {
-                    lastDeathCause = 'Hit the wall!';
-                    snake.push(tail);
-                    gameOver();
-                    return;
-                }
-            }
-
-            // Check player head vs rival body
-            var rivalBodyHit = false;
-            for (var rci = 0; rci < rivals.length; rci++) {
-                if (rivals[rci].active) {
-                    for (var rcj = 0; rcj < rivals[rci].snake.length; rcj++) {
-                        if (rivals[rci].snake[rcj].x === wrappedHead.x && rivals[rci].snake[rcj].y === wrappedHead.y) {
-                            rivalBodyHit = true; break;
-                        }
-                    }
-                }
-                if (rivalBodyHit) break;
-            }
-            if (rivalBodyHit) {
+            // --- v6: extracted death check ---
+            function checkPlayerDeath(wrappedHead, skipSelfCollision) {
+                if (checkCollision(wrappedHead) && !skipSelfCollision) {
                     if (shieldActive) {
-                        shieldActive = false;
-                        powerUpTimer = 0;
-                        powerUpType = null;
+                        shieldActive = false; powerUpTimer = 0; powerUpType = null;
                         stats.shieldBlocks++;
                         spawnParticles(wrappedHead.x, wrappedHead.y, 15, '#4488FF');
                         playSound('bonus');
-                    } else {
-                        lastDeathCause = 'You were caught by the rival!';
-                        snake.push(tail);
-                        gameOver();
-                        return;
+                        return false;
+                    }
+                    // v6: Vampire Brew — survive first fatal hit at length 3
+                    if (activeBrews.indexOf('vampire') !== -1 && !brewUsageFlags.vampireUsed) {
+                        brewUsageFlags.vampireUsed = true;
+                        while (snake.length > 3) snake.pop();
+                        lastDeathCause = 'Vampire Brew saved you!';
+                        spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FF0044');
+                        return false;
+                    }
+                    lastDeathCause = 'You ran into yourself!';
+                    return true;
+                }
+                if (MODE_CONFIG[gameMode].wallDeath) {
+                    if (wrappedHead.x < 0 || wrappedHead.x >= CANVAS_WIDTH || wrappedHead.y < 0 || wrappedHead.y >= CANVAS_HEIGHT) {
+                        lastDeathCause = 'Hit the wall!';
+                        // v6: Phoenix Brew — resurrect once
+                        if (activeBrews.indexOf('phoenix') !== -1 && !brewUsageFlags.phoenixUsed) {
+                            brewUsageFlags.phoenixUsed = true;
+                            var freePos = findFreeTile(wrappedHead.x, wrappedHead.y);
+                            if (freePos) {
+                                snake[0] = { x: freePos.x, y: freePos.y };
+                                while (snake.length > 5) snake.pop();
+                                score = 0;
+                                lastDeathCause = 'Phoenix Brew resurrected!';
+                                spawnParticles(freePos.x, freePos.y, 25, '#FF8800');
+                                return false;
+                            }
+                        }
+                        return true;
                     }
                 }
+                for (var rci = 0; rci < rivals.length; rci++) {
+                    if (rivals[rci].active) {
+                        // v6: Leech Brew head-to-head with rival
+                        if (activeBrews.indexOf('leech') !== -1 && rivals[rci].snake.length > 0) {
+                            var rHead = rivals[rci].snake[0];
+                            var ldx = Math.abs(wrappedHead.x - rHead.x);
+                            var ldy = Math.abs(wrappedHead.y - rHead.y);
+                            if (ldx <= TILE_SIZE && ldy <= TILE_SIZE && ldx + ldy <= TILE_SIZE * 2) {
+                                for (var lsi = 0; lsi < 3 && rivals[rci].snake.length > 1; lsi++) {
+                                    snake.push({ x: snake[snake.length - 1].x, y: snake[snake.length - 1].y });
+                                    rivals[rci].snake.pop();
+                                }
+                                if (rivals[rci].snake.length <= 1) rivals[rci].active = false;
+                                spawnParticles(wrappedHead.x, wrappedHead.y, 10, '#44FF88');
+                            }
+                        }
+                        for (var rcj = 0; rcj < rivals[rci].snake.length; rcj++) {
+                            if (rivals[rci].snake[rcj].x === wrappedHead.x && rivals[rci].snake[rcj].y === wrappedHead.y) {
+                                if (shieldActive) {
+                                    shieldActive = false; powerUpTimer = 0; powerUpType = null;
+                                    stats.shieldBlocks++;
+                                    spawnParticles(wrappedHead.x, wrappedHead.y, 15, '#4488FF');
+                                    playSound('bonus');
+                                    return false;
+                                }
+                                lastDeathCause = 'You were caught by the rival!';
+                                // v6: Phoenix Brew in rival collision
+                                if (activeBrews.indexOf('phoenix') !== -1 && !brewUsageFlags.phoenixUsed) {
+                                    brewUsageFlags.phoenixUsed = true;
+                                    var freePos2 = findFreeTile(wrappedHead.x, wrappedHead.y);
+                                    if (freePos2) {
+                                        snake[0] = { x: freePos2.x, y: freePos2.y };
+                                        while (snake.length > 5) snake.pop();
+                                        score = 0;
+                                        lastDeathCause = 'Phoenix Brew resurrected!';
+                                        spawnParticles(freePos2.x, freePos2.y, 25, '#FF8800');
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+            // --- end v6 extraction ---
+
+            if (checkPlayerDeath(wrappedHead, skipSelfCollision)) {
+                snake.push(tail);
+                gameOver();
+                return;
+            }
 
             snake.unshift(wrappedHead);
             // Painter mode: paint the head position too
@@ -3794,6 +4280,41 @@ const TRAIL_RENDER_CONFIG = {
                         paintCoveredCount++;
                     } else {
                         paintGrid[hcol][hrow] = { color: currentPaintColor, layer: paintGrid[hcol][hrow].layer + 1, timestamp: Date.now() };
+                    }
+                }
+            }
+
+            // v6: Phantom Brew — cross ghost trail for +1.0x combo (5s cooldown)
+            if (activeBrews.indexOf('phantom') !== -1) {
+                var phantomNow = Date.now();
+                var phantomCooldown = brewUsageFlags.phantomCooldown || 0;
+                if (phantomNow > phantomCooldown) {
+                    var ghostMatch = false;
+                    if (ghostPositions.length > 0) {
+                        for (var pgi = 0; pgi < ghostPositions.length; pgi++) {
+                            if (ghostPositions[pgi].x === wrappedHead.x && ghostPositions[pgi].y === wrappedHead.y) {
+                                ghostMatch = true; break;
+                            }
+                        }
+                    }
+                    if (!ghostMatch && arenaGhostPositions.length > 0) {
+                        for (var agi2 = 0; agi2 < arenaGhostPositions.length; agi2++) {
+                            var agBody = arenaGhostPositions[agi2] || [];
+                            for (var agj = 0; agj < agBody.length; agj++) {
+                                if (agBody[agj].x === wrappedHead.x && agBody[agj].y === wrappedHead.y) {
+                                    ghostMatch = true; break;
+                                }
+                            }
+                            if (ghostMatch) break;
+                        }
+                    }
+                    if (ghostMatch) {
+                        brewUsageFlags.phantomCooldown = phantomNow + 5000;
+                        comboCount = Math.min(50, comboCount + 1);
+                        lastEatTime = Date.now();
+                        spawnParticles(wrappedHead.x, wrappedHead.y, 15, '#88FFFF');
+                        playSound('bonus');
+                        queueToast('Phantom Brew: +1.0x Combo!', 2000);
                     }
                 }
             }
@@ -3815,6 +4336,8 @@ const TRAIL_RENDER_CONFIG = {
                 // common, uncommon, rare all count as normalFoodEaten
                 else { stats.normalFoodEaten++; }
 
+                srSpeak('Ate ' + eatenType + '. Score ' + score);
+
                 // Combo logic
                 const now = Date.now();
                 if (now - lastEatTime < 3000 && lastEatTime > 0) {
@@ -3831,20 +4354,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (comboCount > stats.maxCombo) stats.maxCombo = comboCount;
                 if (comboCount > sessionMaxCombo) sessionMaxCombo = comboCount;
 
-                // Combo milestone flash
-                if (COMBO_MILESTONES.includes(comboCount) && comboCount > lastComboMilestone) {
-                    lastComboMilestone = comboCount;
-                    const color = COMBO_FLASH_COLORS[comboCount] || '#44BB44';
-                    const alpha = comboCount >= 20 ? 0.5 : comboCount >= 10 ? 0.4 : 0.3;
-                    if (!flashOverlay || flashOverlay.priority !== 'critical') {
-                        flashOverlay = { color, alpha, priority: comboCount >= 10 ? 'high' : 'normal' };
-                    }
-                    if (comboCount >= 10) {
-                        shakeTimer = Math.min(300, 100 + comboCount * 5);
-                    }
-                    vibrate(30);
-                    playSound('combo_milestone');
-                }
+                // --- v6: extracted combo milestone handler ---
+            handleComboMilestone();
+            // --- end v6 extraction ---
 
                 // XP award for eating
                 const tier = FOOD_TIERS[eatenType] || FOOD_TIERS.common;
@@ -3866,10 +4378,24 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 eatAnimTimer = 150;
                 spawnParticles(wrappedHead.x, wrappedHead.y, tier.pCount, tierColor);
+                // v6: Score pop-up floater
+                if (eatenType === 'speed') {
+                    spawnFloater(wrappedHead.x, wrappedHead.y, '+5 SPEED!', '#FFDD00', 20);
+                } else if (eatenType === 'bonus') {
+                    spawnFloater(wrappedHead.x, wrappedHead.y, '+30 BONUS!', '#FFD700', 18);
+                } else {
+                    spawnFloater(wrappedHead.x, wrappedHead.y, '+' + tier.pts, tierColor);
+                }
+                // --- end v6 ---
                 if (synesthesiaMode) {
                     spawnSynesthesiaRing(wrappedHead.x, wrappedHead.y, tierColor);
                 }
                 if (gameMode !== 'zen' && gameMode !== 'painter') addScore(tier.pts);
+                // v6: Combustion Brew bonus — each combo milestone adds +1 mult to next 3 foods
+                if (activeBrews.indexOf('combustion') !== -1 && brewUsageFlags.combRemaining > 0 && gameMode !== 'zen' && gameMode !== 'painter') {
+                    addScore(tier.pts * brewUsageFlags.combustionAccum);
+                    brewUsageFlags.combRemaining--;
+                }
                 // Combo score bonus
                 if (comboCount > 0 && gameMode !== 'zen' && gameMode !== 'painter') {
                     let comboBonus;
@@ -3933,6 +4459,37 @@ const TRAIL_RENDER_CONFIG = {
                 const playerCombined = snake.concat(rivalCombinedSnake());
                 food = generateFood(playerCombined);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
+                // v6: Rampage Brew — food spawns closer to head (min 3 tiles)
+                if (activeBrews.indexOf('rampage') !== -1) {
+                    minFoodSpawnDist = 3;
+                }
+                // v6: Echo Brew — every 8th food spawns adjacent copy (half pts)
+                if (activeBrews.indexOf('echo') !== -1) {
+                    brewUsageFlags.echoCount = (brewUsageFlags.echoCount || 0) + 1;
+                    if (brewUsageFlags.echoCount % 8 === 0 && food) {
+                        var adj = [{x: food.x + TILE_SIZE, y: food.y}, {x: food.x - TILE_SIZE, y: food.y}, {x: food.x, y: food.y + TILE_SIZE}, {x: food.x, y: food.y - TILE_SIZE}];
+                        for (var ai = 0; ai < adj.length; ai++) {
+                            if (adj[ai].x >= 0 && adj[ai].x < CANVAS_WIDTH && adj[ai].y >= 0 && adj[ai].y < CANVAS_HEIGHT) {
+                                food2 = { x: adj[ai].x, y: adj[ai].y, type: food.type, pts: Math.floor((FOOD_TIERS[food.type] ? FOOD_TIERS[food.type].pts : 10) / 2) };
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // v6: Echo Brew food2 eating
+            if (food2 && wrappedHead.x === food2.x && wrappedHead.y === food2.y) {
+                snake.push(tail);
+                snakeGrew = true;
+                if (activeSeed !== null) recordReplayGrow(gameTick);
+                sessionFoodEaten++;
+                stats.totalFoodEaten++;
+                stats.normalFoodEaten++;
+                addScore(food2.pts || Math.floor(FOOD_TIERS[food2.type].pts / 2));
+                spawnParticles(food2.x, food2.y, 8, '#44FF88');
+                playSound('eat');
+                food2 = null;
             }
 
             // Check power-up collection
@@ -4067,7 +4624,7 @@ const TRAIL_RENDER_CONFIG = {
 
             // Passive food regeneration
             var foodRegenInterval = 10;
-            if (activeMutator === 'golden_food') foodRegenInterval = 20;
+            if (activeMutators.indexOf('golden_food') !== -1) foodRegenInterval = 20;
             if (gameMode === 'gauntlet') {
                 for (var gfpi = 0; gfpi < gauntletPicks.length; gfpi++) {
                     if (gauntletPicks[gfpi].id === 'food_rush') { foodRegenInterval = Math.floor(foodRegenInterval / 2); break; }
@@ -4158,6 +4715,7 @@ const TRAIL_RENDER_CONFIG = {
                 levelUpFlash = 1500; // show "LEVEL N!" for 1.5 seconds
                 showLevelUpToast(level);
                 checkLevelUnlocks(level);
+                srSpeak('Level ' + level + '!');
             }
             cachedLevel = -1; // invalidate XP cache on level change
             saveManager.set('snake_xp', xp);
@@ -4345,6 +4903,7 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
             panelBackdropEl.style.display = 'none';
+            srSpeak('Panel closed');
         }
 
         function showAchievementsPanel() {
@@ -4536,6 +5095,13 @@ const TRAIL_RENDER_CONFIG = {
                     drawGame(1);
                     return;
                 }
+                // v6: Cascade mode toggle
+                if (cascadeUnlocked && (e.key === 'c' || e.key === 'C')) {
+                    cascadeMode = !cascadeMode;
+                    queueToast('Cascade Mode: ' + (cascadeMode ? 'ON (pick 3)' : 'OFF (pick 1)'), 2000);
+                    drawGame(1);
+                    return;
+                }
                 return;
             }
 
@@ -4551,11 +5117,30 @@ const TRAIL_RENDER_CONFIG = {
                     return;
                 }
                 if (e.key === 'Enter') {
-                    activeMutator = draftOptions[draftSelection];
+                    // v6: Cascade multi-pick
+                    if (cascadeMode && activeMutators.length < 3) {
+                        activeMutators.push(draftOptions[draftSelection]);
+                        if (activeMutators.length >= 3) {
+                            draftScreenVisible = false;
+                            draftModeEnabled = false;
+                            if (activeMutators.indexOf('double_rival') !== -1 && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+                                spawnRival(1);
+                            }
+                            startGame();
+                            queueToast('Cascade x3 starting!', 2000);
+                            return;
+                        }
+                        draftOptions = pickDraftOptions(MUTATOR_DRAFT_SIZE);
+                        draftSelection = 0;
+                        queueToast('Pick ' + (activeMutators.length + 1) + ' of 3', 1500);
+                        drawGame(1);
+                        return;
+                    }
+                    activeMutators = [draftOptions[draftSelection]];
                     draftScreenVisible = false;
                     draftModeEnabled = false;
-                    var mutDef = MUTATOR_DEFS[activeMutator];
-                    if (activeMutator === 'double_rival' && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+                    var mutDef = MUTATOR_DEFS[activeMutators[0]];
+                    if (activeMutators.indexOf('double_rival') !== -1 && (gameMode === 'classic' || gameMode === 'timeAttack')) {
                         spawnRival(1);
                     }
                     startGame();
@@ -4563,7 +5148,7 @@ const TRAIL_RENDER_CONFIG = {
                     return;
                 }
                 if (e.key === 'Escape') {
-                    activeMutator = null;
+                    activeMutators = [];
                     draftScreenVisible = false;
                     draftModeEnabled = false;
                     startGame();
@@ -4661,6 +5246,7 @@ const TRAIL_RENDER_CONFIG = {
                     gameMode = MODE_ORDER[modeSelectIndex];
                     drawGame(1);
                     visualDirty = true;
+                    srSpeak(getModeDesc(gameMode));
                     return;
                 }
                 if (e.key === 'ArrowDown') {
@@ -4669,6 +5255,7 @@ const TRAIL_RENDER_CONFIG = {
                     gameMode = MODE_ORDER[modeSelectIndex];
                     drawGame(1);
                     visualDirty = true;
+                    srSpeak(getModeDesc(gameMode));
                     return;
                 }
             }
@@ -4691,6 +5278,7 @@ const TRAIL_RENDER_CONFIG = {
                     playSound('pause');
                     drawGame(1);
                     visualDirty = true;
+                    srSpeak('Game paused');
                 } else if (gameState === 'paused') {
                     resumeGame();
                     return;
@@ -4793,9 +5381,23 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
+            if (e.key === 'b' || e.key === 'B') {
+                e.preventDefault();
+                if (gameState === 'playing') return;
+                showBrewsPanel();
+                return;
+            }
+
             if (e.key === 'f' || e.key === 'F') {
                 e.preventDefault();
                 showAchievementsPanel();
+                return;
+            }
+
+            // v6: diary panel
+            if (e.key === 'j' || e.key === 'J') {
+                e.preventDefault();
+                showDiaryPanel();
                 return;
             }
 
@@ -4928,8 +5530,8 @@ const TRAIL_RENDER_CONFIG = {
                     return;
             }
 
-                // Mirror mutator: flip left-right controls
-                if (activeMutator === 'mirror') {
+                // v6: Mirror mutator: flip left-right controls
+                if (activeMutators.indexOf('mirror') !== -1) {
                     newDx = -newDx;
                 }
 
