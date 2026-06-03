@@ -3112,15 +3112,26 @@ const TRAIL_RENDER_CONFIG = {
                     drawX = segment.x;
                     drawY = segment.y;
                 } else if (index === 0) {
-                    const prev = prevSnake[0];
-                    if (prev) {
-                        const pdx = segment.x - prev.x;
-                        const pdy = segment.y - prev.y;
-                        drawX = Math.abs(pdx) > PLAY_WIDTH / 2 ? segment.x : prev.x + pdx * t;
-                        drawY = Math.abs(pdy) > PLAY_HEIGHT / 2 ? segment.y : prev.y + pdy * t;
-                    } else {
+                    // When the snake just ate (snakeGrew=true), snap the head to its
+                    // actual position immediately so the visual matches where eating
+                    // effects (particles, floater) and collision occurred. Without
+                    // this, the head is interpolated from prevSnake[0] (1 block
+                    // behind) while food is already replaced — making eating appear
+                    // to trigger "early" and the head "1 block behind."
+                    if (snakeGrew) {
                         drawX = segment.x;
                         drawY = segment.y;
+                    } else {
+                        const prev = prevSnake[0];
+                        if (prev) {
+                            const pdx = segment.x - prev.x;
+                            const pdy = segment.y - prev.y;
+                            drawX = Math.abs(pdx) > PLAY_WIDTH / 2 ? segment.x : prev.x + pdx * t;
+                            drawY = Math.abs(pdy) > PLAY_HEIGHT / 2 ? segment.y : prev.y + pdy * t;
+                        } else {
+                            drawX = segment.x;
+                            drawY = segment.y;
+                        }
                     }
                 } else if (snakeGrew && prevSnake[index - 1]) {
                     const prev = prevSnake[index - 1];

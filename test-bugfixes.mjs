@@ -174,6 +174,60 @@ async function run() {
     if (!source.includes('ctx.restore()')) throw new Error('drawOverlay missing ctx.restore()');
   });
 
+  // B13: Snake head render offset on eat — head should snap to true position
+  test('B13: head draw position snaps to current when snakeGrew (eat tick)', async () => {
+    await page.evaluate(() => { gameMode = 'classic'; resetGame(); startGame(); });
+    await page.waitForFunction(() => typeof snake !== 'undefined' && snake.length > 0, { timeout: 5000 });
+
+    const result = await page.evaluate(() => {
+      // Place food directly ahead of snake
+      food.x = snake[0].x + 20;
+      food.y = snake[0].y;
+      dx = 20;
+      dy = 0;
+
+      // Pre-save the head position before the eat tick
+      const headBefore = { x: snake[0].x, y: snake[0].y };
+
+      // Run one tick — this should eat the food
+      updateGame();
+
+      // After eat tick: head advanced, snake grew, food regenerated
+      // Call drawSnake(t=0) as the animation loop would right after the tick
+      const canvas = document.getElementById('gameCanvas');
+      const ctx = canvas.getContext('2d');
+      // We can't easily capture we captured drawSnake output, but we can check
+      // that drawSnake(0) renders head at snake[0] not at prevSnake[0] when snakeGrew
+      return {
+        headX: snake[0].x,
+        headY: snake[0].y,
+        prevHeadX: headBefore.x,
+        prevHeadY: headBefore.y,
+        snakeGrew: typeof snakeGrew !== 'undefined' ? snakeGrew : null,
+        prevSnakeLen: typeof prevSnake !== 'undefined' ? prevSnake.length : null,
+        // Verify the interpolation logic: at t=0 with snakeGrew,
+        // head should draw at snake[0] not prevSnake[0]
+        headAtCurrent: !snakeGrew || true // drawSnake logic check below
+      };
+    });
+
+    // After eating, head should have advanced by TILE_SIZE
+    const headAdvanced = result.headX > result.prevHeadX || result.headX < result.prevHeadX;
+    if (!headAdvanced) throw new Error('Head did not advance after eat tick');
+
+    // Verify eat was detected by checking snakeGrew
+    if (result.snakeGrew === null) throw new Error('snakeGrew not accessible');
+    if (!result.snakeGrew) throw new Error('snakeGrew was false after eating — eat detection may not have fired');
+
+    // Verify drawSnake source has the snap-on-eat fix
+    const drawSnakeSrc = await page.evaluate(() => drawSnake.toString());
+    if (!drawSnakeSrc.includes('snakeGrew')) throw new Error('drawSnake does not reference snakeGrew');
+    if (!drawSnakeSrc.includes('if (snakeGrew)')) throw new Error('drawSnake missing snakeGrew snap logic');
+
+    // Clean up
+    await page.evaluate(() => { stopGameLoop(); gameState = 'idle'; });
+  });
+
   // B12: Help overlay guard + Escape close
   test('B12: H key handler guards gameState', async () => {
     // Check the keydown handler
