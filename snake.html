@@ -1632,9 +1632,12 @@ const TRAIL_RENDER_CONFIG = {
             var margin = 16;
             var availableHeight = window.innerHeight - scoreBarHeight - dpadHeight - margin;
             var availableWidth = window.innerWidth - 16;
-            var size = Math.max(300, Math.min(availableWidth, availableHeight, 600));
-            canvasEl.style.width = size + 'px';
-            canvasEl.style.height = size + 'px';
+            // Preserve 440x600 aspect ratio: fit within available space
+            var scaleX = availableWidth / CANVAS_WIDTH;
+            var scaleY = availableHeight / CANVAS_HEIGHT;
+            var scale = Math.min(scaleX, scaleY, 1);
+            canvasEl.style.width = Math.max(300, Math.round(CANVAS_WIDTH * scale)) + 'px';
+            canvasEl.style.height = Math.max(300, Math.round(CANVAS_HEIGHT * scale)) + 'px';
         }
 
         function debouncedResize() {
