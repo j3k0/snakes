@@ -239,7 +239,49 @@
         let obstacles = [];
         let lastFrameTime = 0;
         let shakeTimer = 0;
+        // v7: Visual effect queues — producer-consumer pattern (replaces flashOverlay)
+        // gameEffects: written ONLY by game-tick loop (updateGame)
+        // rAFEffects: written ONLY by rAF loop (animateVisuals)
+        let gameEffects = [];
+        let rAFEffects = [];
+        const PRIORITY_ORDER = { critical: 3, high: 2, normal: 1, none: 0 };
+        // flashOverlay kept for backward compat during migration — will be removed
         let flashOverlay = null;
+
+        function queueGameEffect(type, params) {
+            gameEffects.push({
+                type: type,
+                color: params.color || '#FFF',
+                alpha: params.alpha || 0.5,
+                priority: PRIORITY_ORDER[params.priority] || 0,
+                decay: params.decay || 0
+            });
+        }
+        function queueRAFEffect(type, params) {
+            rAFEffects.push({
+                type: type,
+                color: params.color || '#FFF',
+                alpha: params.alpha || 0.5,
+                priority: PRIORITY_ORDER[params.priority] || 0,
+                decay: params.decay || 0
+            });
+        }
+        function drainVisualQueue() {
+            var effects = { flash: null, shake: null };
+            var all = gameEffects.concat(rAFEffects);
+            for (var i = 0; i < all.length; i++) {
+                var e = all[i];
+                if (!effects[e.type] || e.priority > effects[e.type].priority) {
+                    effects[e.type] = e;
+                }
+            }
+            gameEffects.length = 0;
+            rAFEffects.length = 0;
+            return effects;
+        }
+        function hasPendingEffects() {
+            return gameEffects.length > 0 || rAFEffects.length > 0;
+        }
         let visualDirty = true;
         let prevSnake = [];
         let lastTickTime = 0;
@@ -1350,8 +1392,9 @@ const TRAIL_RENDER_CONFIG = {
             paintTotalTiles = 0;
             paintLayers = 1;
             currentPaintColor = '#FF4444';
-            painterFoodEaten = 0;
-            powerUpPickup = null;
+            flashOverlay = null;
+            gameEffects.length = 0;
+            rAFEffects.length = 0;
             shieldActive = false;
             magnetActive = false;
             slowMoActive = false;
@@ -2549,23 +2592,22 @@ const TRAIL_RENDER_CONFIG = {
             }
             if (newObstacleToastTimer > 0) newObstacleToastTimer -= delta;
 
+            // v7: Flash overlay decay — read from queue, not direct write
             if (flashOverlay) {
                 flashOverlay.alpha -= delta * 0.004;
                 if (flashOverlay.alpha <= 0) flashOverlay = null;
             }
 
-            // Level-up flash overlay
+            // v7: Level-up flash — queue to rAF effects instead of direct write
             if (levelUpFlash > 0) {
                 levelUpFlash = Math.max(0, levelUpFlash - delta);
-            if (!flashOverlay || flashOverlay.priority !== 'critical') {
-                flashOverlay = { color: '#FFD700', alpha: Math.min(0.3, levelUpFlash / 5000), priority: 'critical' };
-            }
+                queueRAFEffect('flash', { color: '#FFD700', alpha: Math.min(0.3, levelUpFlash / 5000), priority: 'critical' });
             }
 
             const elapsed = timestamp - lastTickTime;
             const t = lastTickTime > 0 ? Math.min(elapsed / tickInterval, 1) : 1;
 
-            const needsRedraw = gameState === 'playing' || visualDirty || particles.length > 0 || flashOverlay || shakeTimer > 0 || eatAnimTimer > 0 || snapLevelUpFlash > 0 || (gameMode === 'snap' && gameState === 'playing');
+            const needsRedraw = gameState === 'playing' || visualDirty || particles.length > 0 || flashOverlay || hasPendingEffects() || shakeTimer > 0 || eatAnimTimer > 0 || snapLevelUpFlash > 0 || (gameMode === 'snap' && gameState === 'playing');
             if (needsRedraw) {
                 visualDirty = false;
                 let didShake = false;
@@ -2664,11 +2706,13 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Flash overlay — renders last on top of everything (AGENTS.md)
-            if (flashOverlay) {
-                ctx.fillStyle = flashOverlay.color === 'rainbow'
+            // v7: Flash overlay — drain visual queue (merges game-tick and rAF effects)
+            const visualFX = drainVisualQueue();
+            if (visualFX.flash) {
+                ctx.fillStyle = visualFX.flash.color === 'rainbow'
                     ? 'hsl(' + (Date.now() % 2000 / 2000 * 360) + ', 100%, 50%)'
-                    : flashOverlay.color;
-                ctx.globalAlpha = Math.max(0, flashOverlay.alpha);
+                    : visualFX.flash.color;
+                ctx.globalAlpha = Math.max(0, visualFX.flash.alpha);
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
                 ctx.globalAlpha = 1;
             }
@@ -3549,6 +3593,8 @@ const TRAIL_RENDER_CONFIG = {
             gameTick = 0;
             particles = [];
             flashOverlay = null;
+            gameEffects.length = 0;
+            rAFEffects.length = 0;
             shakeTimer = 0;
             eatAnimTimer = 0;
             touchIndicatorTimer = 0;
@@ -3985,8 +4031,10 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.font = hudFont(11);
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
-                ctx.fillText('Target: ' + challengeFromUrl.targetScore, 5, synesthesiaMode ? 28 : 15);
-                ctx.restore();
+                    if (!flashOverlay || flashOverlay.priority !== 'critical') {
+                        flashOverlay = { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' };
+                        queueGameEffect('flash', { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' });
+                    }
             }
 
             // Gauntlet intermission overlay
@@ -4029,6 +4077,7 @@ const TRAIL_RENDER_CONFIG = {
                     var alpha = comboCount >= 20 ? 0.5 : comboCount >= 10 ? 0.4 : 0.3;
                     if (!flashOverlay || flashOverlay.priority !== 'critical') {
                         flashOverlay = { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' };
+                        queueGameEffect('flash', { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' });
                     }
                     if (comboCount >= 10) {
                         shakeTimer = Math.min(300, 100 + comboCount * 5);
@@ -4145,6 +4194,7 @@ const TRAIL_RENDER_CONFIG = {
             if (activeResonance) {
                 if (activeResonance.effect === 'invertControls' && gameTick % (10 + Math.floor(Math.random() * 6)) === 0) {
                     flashOverlay = { color: '#FFFFFF', alpha: 0.2, priority: 'normal' };
+                    queueGameEffect('flash', { color: '#FFFFFF', alpha: 0.2, priority: 'normal' });
                 }
                 if (activeResonance.effect === 'feastFamine' && hungerStarted) {
                     if (hungerTickCounter % 30 === 0 && snake.length > 1) {
@@ -4419,6 +4469,7 @@ const TRAIL_RENDER_CONFIG = {
                 const tierColor = tier.color;
                 if (!flashOverlay || (flashOverlay.priority !== 'high' && flashOverlay.priority !== 'critical')) {
                     flashOverlay = { color: tierColor, alpha: 0.4, priority: 'normal' };
+                    queueGameEffect('flash', { color: tierColor, alpha: 0.4, priority: 'normal' });
                 }
                 eatAnimTimer = 150;
                 spawnParticles(wrappedHead.x, wrappedHead.y, tier.pCount, tierColor);
@@ -4477,6 +4528,7 @@ const TRAIL_RENDER_CONFIG = {
                     paintLayers++;
                     paintCoveredCount = 0;
                     flashOverlay = { color: '#FFFFFF', alpha: 0.6, priority: 'high' };
+                    queueGameEffect('flash', { color: '#FFFFFF', alpha: 0.6, priority: 'high' });
                     queueToast('100% Coverage! Layer ' + paintLayers + '!', 3000);
                     playSound('achievement');
                     vibrate(50);
