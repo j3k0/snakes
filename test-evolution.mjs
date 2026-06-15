@@ -172,6 +172,30 @@ test('Serpentine: does not save a self-collision', async (page) => {
   if (r.pass) throw new Error('obstaclePassUsed must NOT flip on self-collision');
 });
 
+// Leech brew rival-steal is a 3rd growth site — evolution must fire there too.
+test('Leech steal growth triggers evolution (3rd growth site)', async (page) => {
+  await setup(page);
+  const r = await page.evaluate(() => {
+    // 8-seg snake; moving right into a rival head -> Leech steals 3 -> length
+    // crosses Swift@10 at the steal site (before this fix it only recovered on
+    // the next food eat).
+    snake = [];
+    for (let i = 0; i < 8; i++) snake.push({ x: 200 - i * 20, y: 200 });
+    dx = 20; dy = 0; nextDirection = null;
+    evolutionTier = -1;
+    activeBrews = ['leech'];
+    rivals = [{ active: true, color: '#FF6666', snake: [
+      { x: 240, y: 200 }, { x: 260, y: 200 }, { x: 280, y: 200 }, { x: 300, y: 200 },
+    ] }];
+    obstacles = [];
+    food = { x: 20, y: 20, type: 'common' };
+    updateGame();
+    return { tier: evolutionTier, len: snake.length };
+  });
+  if (r.tier !== 0) throw new Error('Leech steal should evolve to Swift (tier 0), got tier ' + r.tier);
+  if (r.len < 10) throw new Error('snake should have grown past 10, got length ' + r.len);
+});
+
 // --- Titan food proximity ---
 test('Titan: shrinks Rampage food-spawn cap by 1 tile', async (page) => {
   await setup(page);

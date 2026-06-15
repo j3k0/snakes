@@ -4439,6 +4439,8 @@ const TRAIL_RENDER_CONFIG = {
                                 }
                                 if (rivals[rci].snake.length <= 1) rivals[rci].active = false;
                                 spawnParticles(wrappedHead.x, wrappedHead.y, 10, '#44FF88');
+                                // v7: evolution trigger — Leech steal is a 3rd growth site
+                                triggerEvolutionIfReady();
                             }
                         }
                         for (var rcj = 0; rcj < rivals[rci].snake.length; rcj++) {

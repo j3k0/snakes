@@ -55,9 +55,10 @@
 ## Game Loop — Restart Helper
 - `restartGameTimeout()` must call `stopGameLoop()` (which clears `gameTimeout` to null) before `scheduleNextTick()` — without the null-reset, a stale timeout handle lingers and calling `clearTimeout()` on it is a silent no-op. Do NOT write to `gameTimeout` directly; always use `stopGameLoop()`.
 
-## Module Closure Pattern (v6+)
-- All game code now lives inside an IIFE that assigns to `window` for test access. Variables declared with `let`/`var` at module scope are NOT global — they're closure-scoped.
-- Tests must use `page.evaluate()` to access game variables; they aren't available on `window` unless explicitly assigned (like `startGame`, `resetGame`, `gameState`, `snake`, etc.).
+## Module Scope (no IIFE)
+- Game code lives at plain `<script>` top-level scope (no IIFE wrapper). `function`/`var` declarations become `window` properties; top-level `let`/`const` live in the global lexical environment — accessible by bare name, but NOT as `window.*` properties.
+- Tests use Playwright `page.evaluate(() => …)` and reference these by bare name (e.g. `snake`, `gameMode`, `triggerEvolutionIfReady`, `EVOLUTION_TIERS`). This works for both `let`/`const` lexical globals and `function`/`var` window globals.
+- Consequence: any top-level `let`/`const` referenced before its declaration — or any typo'd identifier at module init — throws at load and halts the ENTIRE script (see "Load-Time Bindings"). Run `node test-bugfixes.mjs` ("No JS errors on load") as the first smoke check.
 
 ## Dual Render Loops — rAF Write Boundary
 - The rAF loop's timer-decay section (lines ~1346-1352) writes `flashOverlay` from `levelUpFlash` and `snapLevelUpFlash` decay — this is a write to visual state inside the read-only rAF loop. Legitimate since it only writes the `flashOverlay` object (visual state), not game-logic state, but the pattern is fragile: any future code adding a `flashOverlay` write in this section creates a write-contention risk with the game-tick `flashOverlay` writes in `updateGame()`.
