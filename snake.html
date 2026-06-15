@@ -102,6 +102,7 @@
         <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.95);border:2px solid #555;border-radius:10px;padding:20px;color:white;font-family:monospace;z-index:100;min-width:300px;max-width:400px;max-height:70vh;overflow-y:auto;"></div>
         <div id="achievementsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #FFD700;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:350px;max-width:480px;"></div>
         <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
+        <div id="questsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #44FF88;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;"></div>
         <div id="panelBackdrop" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;touch-action:manipulation;"></div>
         <!-- v6: Screen reader live region -->
         <div id="srAnnounce" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
@@ -447,6 +448,8 @@
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
+            var qp = document.getElementById('questsPanel');
+            if (qp) qp.style.display = 'none';
             var bp = document.getElementById('brewsPanel');
             if (bp) bp.style.display = 'none';
             // Populate filter
@@ -874,6 +877,8 @@ function showBrewsPanel() {
     document.getElementById('statsPanel').style.display = 'none';
     document.getElementById('achievementsPanel').style.display = 'none';
     document.getElementById('cosmeticsPanel').style.display = 'none';
+    var qp = document.getElementById('questsPanel');
+    if (qp) qp.style.display = 'none';
     renderBrewsPanel();
     el.style.display = 'block';
     srSpeak('Brews panel opened');
@@ -1190,6 +1195,280 @@ const TRAIL_RENDER_CONFIG = {
                 default: return 0;
             }
         }
+
+        // ============================================================
+        // v7 Feature C: Quest Board (Daily/Weekly Missions)
+        // 3 daily + 3 weekly missions, deterministic per day/ISO-week seed.
+        // Rewards are XP only (NOT mutator tokens) per design review —
+        // flooding the token economy would destroy its scarcity.
+        // checkQuestProgress() is a parallel session-end hook: it MUST be
+        // called from BOTH gameOver() AND endZenSession() (see AGENTS.md).
+        // ============================================================
+        let dailyQuests = [];
+        let weeklyQuests = [];
+
+        function getDayString() {
+            const d = new Date();
+            return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+        }
+
+        // ISO-8601 week string: 'YYYY-Www'. Monday-anchored, week 1 = first week
+        // with a Thursday. Deterministic per calendar week across runs.
+        function getISOWeekString() {
+            const d = new Date();
+            const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+            const dayNum = (tmp.getUTCDay() + 6) % 7; // 0 = Monday
+            tmp.setUTCDate(tmp.getUTCDate() - dayNum + 3); // nearest Thursday
+            const firstThursday = tmp.getTime();
+            tmp.setUTCMonth(0, 1);
+            if (tmp.getUTCDay() !== 4) {
+                tmp.setUTCMonth(0, 1 + ((4 - tmp.getUTCDay()) + 7) % 7);
+            }
+            const weekNum = 1 + Math.round((firstThursday - tmp.getTime()) / (7*24*3600*1000));
+            return tmp.getUTCFullYear() + '-W' + String(weekNum).padStart(2,'0');
+        }
+
+        function hashString(s) {
+            let h = 0;
+            for (let i = 0; i < s.length; i++) {
+                h = ((h << 5) - h) + s.charCodeAt(i);
+                h |= 0;
+            }
+            return Math.abs(h);
+        }
+
+        // 20 quest templates. Each has daily/weekly target pools (empty pool =
+        // not offered in that period). progressKey maps to a QUEST_PROGRESS_MAP
+        // reader. {n} in desc is replaced by the chosen target's display value
+        // (seconds for timeAlive, raw number otherwise).
+        const QUEST_TEMPLATES = [
+            { id:'reach_length',   desc:'Reach length {n}',            progressKey:'snakeLength', daily:[15,20,25],         weekly:[40,50,60],     xpDaily:25,  xpWeekly:60 },
+            { id:'score_target',   desc:'Score {n} in one run',        progressKey:'score',       daily:[100,150,200],      weekly:[300,400],      xpDaily:30,  xpWeekly:70 },
+            { id:'combo_target',   desc:'Reach a x{n} combo',          progressKey:'maxCombo',    daily:[3,5,7],            weekly:[10,15],        xpDaily:20,  xpWeekly:55 },
+            { id:'survive_time',   desc:'Survive {n} in one run',      progressKey:'timeAlive',   daily:[60000,90000,120000], weekly:[180000,240000], xpDaily:25, xpWeekly:60 },
+            { id:'eat_food',       desc:'Eat {n} food in one run',     progressKey:'foodEaten',   daily:[10,15,20],         weekly:[30,40],        xpDaily:15,  xpWeekly:50 },
+            { id:'eat_speed',      desc:'Eat {n} speed food',          progressKey:'speedFood',   daily:[2,3],              weekly:[5,8],          xpDaily:20,  xpWeekly:50 },
+            { id:'eat_bonus',      desc:'Eat {n} bonus food',          progressKey:'bonusFood',   daily:[2,3],              weekly:[5,8],          xpDaily:20,  xpWeekly:50 },
+            { id:'mode_classic',   desc:'Play a Classic run',          progressKey:'modePlayed',  param:{mode:'classic'},   daily:[1], weekly:[1], xpDaily:10, xpWeekly:0 },
+            { id:'mode_timeattack',desc:'Play a Time Attack run',      progressKey:'modePlayed',  param:{mode:'timeAttack'},daily:[1], weekly:[1], xpDaily:10, xpWeekly:0 },
+            { id:'mode_snap',      desc:'Play a Snap run',             progressKey:'modePlayed',  param:{mode:'snap'},      daily:[1], weekly:[1], xpDaily:10, xpWeekly:0 },
+            { id:'mode_zen',       desc:'Play a Zen run',              progressKey:'modePlayed',  param:{mode:'zen'},       daily:[1], weekly:[1], xpDaily:10, xpWeekly:0 },
+            { id:'mode_walled',    desc:'Play a Walled run',           progressKey:'modePlayed',  param:{mode:'walled'},    daily:[1], weekly:[1], xpDaily:10, xpWeekly:0 },
+            { id:'mode_paint',     desc:'Play a Painter run',          progressKey:'modePlayed',  param:{mode:'painter'},   daily:[1], weekly:[1], xpDaily:10, xpWeekly:0 },
+            { id:'walled_score',   desc:'Score {n}+ in Walled mode',   progressKey:'walledScore', daily:[],                 weekly:[150,200,250],  xpDaily:0,   xpWeekly:65 },
+            { id:'no_death_5min',  desc:'Survive 5 minutes in one run',progressKey:'timeAlive',   daily:[],                 weekly:[300000],       xpDaily:0,   xpWeekly:80 },
+            { id:'use_mutator',    desc:'Finish a run with a mutator', progressKey:'mutatorUsed', daily:[],                 weekly:[1],            xpDaily:0,   xpWeekly:45 },
+            { id:'brew_run',       desc:'Finish a run with a brew',    progressKey:'brewUsed',    daily:[],                 weekly:[1],            xpDaily:0,   xpWeekly:45 },
+            { id:'combo_high',     desc:'Reach a x{n} combo',          progressKey:'maxCombo',    daily:[],                 weekly:[20,30],        xpDaily:0,   xpWeekly:75 },
+            { id:'length_high',    desc:'Reach length {n}',            progressKey:'snakeLength', daily:[],                 weekly:[75,100],       xpDaily:0,   xpWeekly:85 },
+            { id:'zen_score',      desc:'Score {n}+ in Zen mode',      progressKey:'modeScore',   param:{mode:'zen'},       daily:[], weekly:[50,75], xpDaily:0, xpWeekly:70 },
+        ];
+
+        // Maps a quest's progressKey to its current live value. Run-based
+        // metrics (score, length, combo, time, food counts) track the BEST
+        // single run of the period via Math.max in checkQuestProgress — this
+        // mirrors the existing daily-challenge semantics, not cumulative totals.
+        // The reader receives the quest so param-driven keys (modeScore,
+        // modePlayed) can inspect param.mode.
+        const QUEST_PROGRESS_MAP = {
+            snakeLength: () => snake.length,
+            score: () => score,
+            maxCombo: () => sessionMaxCombo,
+            timeAlive: (q) => Math.min(sessionTimeAlive, q.target),
+            foodEaten: () => sessionFoodEaten,
+            speedFood: () => sessionSpeedFood,
+            bonusFood: () => sessionBonusFood,
+            modePlayed: (q) => (gameMode === (q.param && q.param.mode)) ? 1 : 0,
+            modeScore: (q) => (gameMode === (q.param && q.param.mode)) ? score : 0,
+            walledScore: () => (gameMode === 'walled') ? score : 0,
+            mutatorUsed: () => activeMutators.length > 0 ? 1 : 0,
+            brewUsed: () => activeBrews.length > 0 ? 1 : 0,
+        };
+
+        function instantiateQuest(template, target, period) {
+            const displayN = template.progressKey === 'timeAlive'
+                ? (target / 1000) + 's'
+                : String(target);
+            const xp = period === 'daily' ? template.xpDaily : template.xpWeekly;
+            return {
+                id: 'q_' + period + '_' + template.id + '_' + target,
+                templateId: template.id,
+                desc: template.desc.replace('{n}', displayN),
+                progressKey: template.progressKey,
+                param: template.param || null,
+                progress: 0,
+                target: target,
+                completed: false,
+                claimed: false,
+                reward: { xp: xp },
+                period: period,
+            };
+        }
+
+        // Deterministic per day/week: same seed string → same 3 quests. Picks
+        // 3 distinct templates from the period's pool, then a target from each
+        // template's pool, both driven by mulberry32(seedHash).
+        function generateQuests(period) {
+            const seedStr = (period === 'daily' ? getDayString() : getISOWeekString()) + '_quests_' + period;
+            const rng = mulberry32(hashString(seedStr));
+            const pool = QUEST_TEMPLATES.filter(t => (period === 'daily' ? t.daily : t.weekly).length > 0);
+            const chosen = [];
+            const usedIdx = new Set();
+            while (chosen.length < 3 && usedIdx.size < pool.length) {
+                const idx = Math.floor(rng() * pool.length);
+                if (usedIdx.has(idx)) continue;
+                usedIdx.add(idx);
+                const t = pool[idx];
+                const targets = period === 'daily' ? t.daily : t.weekly;
+                const target = targets[Math.floor(rng() * targets.length)];
+                chosen.push(instantiateQuest(t, target, period));
+            }
+            return chosen;
+        }
+
+        // Update progress for all active quests. Called from the food-eat
+        // block (length/food/combo movement) AND from BOTH gameOver() and
+        // endZenSession() — the parallel session-end paths (AGENTS.md).
+        // Progress is monotonic (Math.max) so it survives across runs in the
+        // same period; newly-completed quests toast once.
+        function checkQuestProgress() {
+            let changed = false;
+            let newlyCompleted = null;
+            const all = dailyQuests.concat(weeklyQuests);
+            for (let i = 0; i < all.length; i++) {
+                const q = all[i];
+                if (q.completed) continue;
+                const reader = QUEST_PROGRESS_MAP[q.progressKey];
+                if (!reader) continue;
+                const current = reader(q) || 0;
+                if (current > q.progress) { q.progress = current; changed = true; }
+                if (q.progress >= q.target) { q.completed = true; changed = true; if (!newlyCompleted) newlyCompleted = q; }
+            }
+            if (changed) persistQuests();
+            if (newlyCompleted) queueToast('🎯 Quest complete: ' + newlyCompleted.desc, 2800);
+        }
+
+        // Atomic claim: set claimed, award XP, persist — all synchronous, no
+        // await between them, so a crash mid-claim cannot leave a half-state.
+        function claimQuest(period, index) {
+            const list = period === 'daily' ? dailyQuests : weeklyQuests;
+            const q = list[index];
+            if (!q || !q.completed || q.claimed) return;
+            q.claimed = true;
+            awardXP(q.reward.xp);
+            persistQuests();
+            queueToast('🎯 Claimed: +' + q.reward.xp + ' XP', 2500);
+            renderQuests();
+            updateMenuFooter();
+        }
+
+        function persistQuests() {
+            saveManager.setJSON('snake_daily_quests', dailyQuests);
+            saveManager.setJSON('snake_weekly_quests', weeklyQuests);
+            saveManager.set('snake_daily_quest_date', getDayString());
+            saveManager.set('snake_weekly_quest_date', getISOWeekString());
+        }
+
+        // Staleness check — page load + idle render only (NOT during gameplay).
+        // If the stored date doesn't match today / this ISO week, regenerate;
+        // otherwise restore persisted quests. Always re-persists so the date
+        // keys stay current even on a fresh generate.
+        function syncQuestState() {
+            const today = getDayString();
+            const thisWeek = getISOWeekString();
+            if (saveManager.get('snake_daily_quest_date', '') !== today) {
+                dailyQuests = generateQuests('daily');
+            } else {
+                const saved = saveManager.getJSON('snake_daily_quests', null);
+                dailyQuests = (Array.isArray(saved) && saved.length === 3) ? saved : generateQuests('daily');
+            }
+            if (saveManager.get('snake_weekly_quest_date', '') !== thisWeek) {
+                weeklyQuests = generateQuests('weekly');
+            } else {
+                const saved = saveManager.getJSON('snake_weekly_quests', null);
+                weeklyQuests = (Array.isArray(saved) && saved.length === 3) ? saved : generateQuests('weekly');
+            }
+            persistQuests();
+        }
+
+        // Human-readable "resets in Xh Ym" for the period boundary.
+        function questResetCountdown(period) {
+            const now = new Date();
+            let next;
+            if (period === 'daily') {
+                next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+            } else {
+                const dayIdx = (now.getDay() + 6) % 7; // 0 = Monday
+                const daysToMonday = (7 - dayIdx) % 7 || 7;
+                next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMonday, 0, 0, 0, 0);
+            }
+            const ms = Math.max(0, next - now);
+            const h = Math.floor(ms / 3600000);
+            const m = Math.floor((ms % 3600000) / 60000);
+            return h + 'h ' + m + 'm';
+        }
+
+        function renderQuestRow(q, period, index) {
+            const pct = Math.min(100, Math.round((q.progress / q.target) * 100));
+            const barColor = q.completed ? '#44FF88' : '#4488FF';
+            let action;
+            if (q.claimed) {
+                action = '<span style="color:#44FF88;font-weight:bold;">✓ Claimed</span>';
+            } else if (q.completed) {
+                action = '<button onclick="claimQuest(\'' + period + '\',' + index + ')" style="background:#44FF88;color:#000;border:none;border-radius:4px;padding:5px 10px;cursor:pointer;font-weight:bold;font-size:11px;touch-action:manipulation;">Claim +' + q.reward.xp + ' XP</button>';
+            } else {
+                action = '<span style="color:#666;font-size:11px;">' + q.progress + ' / ' + q.target + '</span>';
+            }
+            return '<div style="margin:8px 0;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">' +
+                  '<span style="font-size:12px;flex:1;">' + q.desc + '</span>' +
+                  '<span style="font-size:11px;color:#FFD700;white-space:nowrap;">+' + q.reward.xp + ' XP</span>' +
+                '</div>' +
+                '<div style="background:#222;border-radius:4px;height:8px;margin:6px 0;overflow:hidden;">' +
+                  '<div style="width:' + pct + '%;height:100%;background:' + barColor + ';border-radius:4px;"></div>' +
+                '</div>' +
+                '<div style="text-align:right;min-height:20px;">' + action + '</div>' +
+            '</div>';
+        }
+
+        function renderQuests() {
+            const el = document.getElementById('questsPanel');
+            if (!el) return;
+            const dailyHtml = dailyQuests.map((q, i) => renderQuestRow(q, 'daily', i)).join('');
+            const weeklyHtml = weeklyQuests.map((q, i) => renderQuestRow(q, 'weekly', i)).join('');
+            el.innerHTML =
+                '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button>' +
+                '<h2 style="text-align:center;margin-top:0;color:#44FF88;">🎯 QUESTS</h2>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 4px 0;">' +
+                  '<span style="font-weight:bold;color:#FFD700;font-size:13px;">📅 Daily</span>' +
+                  '<span style="font-size:11px;color:#888;">Resets in ' + questResetCountdown('daily') + '</span>' +
+                '</div>' + dailyHtml +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin:14px 0 4px 0;">' +
+                  '<span style="font-weight:bold;color:#9B59B6;font-size:13px;">📆 Weekly</span>' +
+                  '<span style="font-size:11px;color:#888;">Resets in ' + questResetCountdown('weekly') + '</span>' +
+                '</div>' + weeklyHtml;
+        }
+
+        function showQuestsPanel() {
+            const el = document.getElementById('questsPanel');
+            if (!el) return;
+            // Always re-sync on open so a just-crossed midnight rotates quests
+            // even if the player never left the idle screen.
+            syncQuestState();
+            if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
+            panelBackdropEl.style.display = 'block';
+            document.getElementById('statsPanel').style.display = 'none';
+            document.getElementById('achievementsPanel').style.display = 'none';
+            document.getElementById('cosmeticsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            var dp = document.getElementById('diaryPanel');
+            if (dp) dp.style.display = 'none';
+            renderQuests();
+            el.style.display = 'block';
+            srSpeak('Quest board opened');
+        }
+        // --- end v7 Feature C ---
 
         let gameMode = 'classic';
         let modeSelectIndex = 0;
@@ -1550,6 +1829,7 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
             footer.style.display = 'block';
+            syncQuestState();
             if (seedContainer) seedContainer.style.display = 'flex';
             var prestigeInfo = document.getElementById('prestigeInfo');
             var shortcutInfo = document.getElementById('shortcutInfo');
@@ -1577,7 +1857,7 @@ const TRAIL_RENDER_CONFIG = {
             if (hasTouch) {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap to Start | Swipe \u2191\u2193 to change mode</span>';
             } else {
-                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews</span>';
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests</span>';
             }
         }
 
@@ -2058,6 +2338,7 @@ const TRAIL_RENDER_CONFIG = {
                 snakeLength: snake.length
             });
             checkStatMilestones();
+            checkQuestProgress();
 
             // Session summary
             sessionSummary = {
@@ -2129,6 +2410,7 @@ const TRAIL_RENDER_CONFIG = {
                 snakeLength: snake.length
             });
             checkStatMilestones();
+            checkQuestProgress();
             // Session summary
             sessionSummary = {
                 score: score,
@@ -4806,6 +5088,7 @@ const TRAIL_RENDER_CONFIG = {
                     }
                 }
                 checkAchievements(score);
+                checkQuestProgress();
                 const playerCombined = snake.concat(rivalCombinedSnake());
                 food = generateFood(playerCombined);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
@@ -5253,6 +5536,7 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
+            document.getElementById('questsPanel').style.display = 'none';
             panelBackdropEl.style.display = 'none';
             srSpeak('Panel closed');
         }
@@ -5264,6 +5548,7 @@ const TRAIL_RENDER_CONFIG = {
             if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
+            document.getElementById('questsPanel').style.display = 'none';
             let html = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;color:#FFD700;">🏆 ACHIEVEMENTS</h2><div style="max-height:400px;overflow-y:auto;">';
             for (const id in ACHIEVEMENTS) {
                 const ach = ACHIEVEMENTS[id];
@@ -5289,6 +5574,7 @@ const TRAIL_RENDER_CONFIG = {
             if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('achievementsPanel').style.display = 'none';
+            document.getElementById('questsPanel').style.display = 'none';
 
             function cycle(currentId, categoryMap, direction) {
                 const keys = Object.keys(categoryMap);
@@ -5379,6 +5665,7 @@ const TRAIL_RENDER_CONFIG = {
             if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
+            document.getElementById('questsPanel').style.display = 'none';
             el.innerHTML = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;">📊 STATS</h2>' +
                 '<table style="width:100%;border-collapse:collapse;">' +
                 '<tr><td style="padding:4px 8px;">Games Played</td><td style="text-align:right;padding:4px 8px;">' + stats.gamesPlayed + '</td></tr>' +
@@ -5751,6 +6038,13 @@ const TRAIL_RENDER_CONFIG = {
                 showDiaryPanel();
                 return;
             }
+            // v7 Feature C: quest board panel (idle/gameover only)
+            if (e.key === 'q' || e.key === 'Q') {
+                e.preventDefault();
+                if (gameState === 'playing') return;
+                showQuestsPanel();
+                return;
+            }
 
             if (e.key === 'h' || e.key === 'H') {
                 e.preventDefault();
@@ -6045,6 +6339,7 @@ const TRAIL_RENDER_CONFIG = {
         });
 
         syncDailyState();
+        syncQuestState();
 
         window.addEventListener('load', function() {
             var hash = window.location.hash.slice(1);
