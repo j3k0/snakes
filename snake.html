@@ -296,6 +296,10 @@
         let tickInterval = 120;
         let snakeGrew = false;
         let prevRivalSnake = [];
+        // Touch-device detection (referenced by isMobile and the touch UI guards).
+        // Was missing since the v5 refactor, throwing a ReferenceError that halted
+        // the entire game script on load — every symbol below landed in the TDZ.
+        const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
         let isMobile = hasTouch || window.innerWidth < 600;
         let mutatorTokens = saveManager.getInt('snake_mutator_tokens', 0);
         // v7: PWA standalone detection
@@ -588,6 +592,9 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let welcomeOverlay = !saveManager.get('snake_has_played', '');
         let lastDeathCause = '';
         let lastComboMilestone = 0;
+        // v7: Evolution System per-run state (reset in resetGame / resetWaveState)
+        let evolutionTier = -1;          // -1 = none; 0..3 = index into EVOLUTION_TIERS
+        let obstaclePassUsed = false;    // Serpentine tier — one obstacle pass per run
         let sessionSummary = null;
         let sessionSummaryTimer = 0;          // countdown timer for "LEVEL N!" flash display
         let levelUpFlash = 0;
@@ -789,6 +796,16 @@ var BREWS_CONFIG = [
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
+];
+// v7: EVOLUTION SYSTEM — length-milestone morphs with permanent per-run bonuses.
+// Single threshold set for ALL modes (per design: mode-specific thresholds add
+// maintenance burden for minimal gameplay benefit). Zen reaching length 100 is
+// trivial but Zen is casual — intentional.
+const EVOLUTION_TIERS = [
+    { length: 10,  name: 'Swift',      speedBonus: 0.05,  color: '#44FF88', glow: 0 },
+    { length: 25,  name: 'Serpentine', obstaclePass: 1,   color: '#44CCFF', glow: 4 },
+    { length: 50,  name: 'Titan',      foodProximity: 1,  color: '#FFAA44', glow: 6 },
+    { length: 100, name: 'Apex',       minCombo: 2,       color: 'rainbow', glow: 8 },
 ];
 var unlockedBrews = saveManager.getJSON('snake_unlocked_brews', []);
 var equippedBrews = saveManager.getJSON('snake_equipped_brews', []);
@@ -1201,7 +1218,13 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function getEffectiveSpeed() {
-            return slowMoActive ? getSpeed() * 2 : getSpeed();
+            // Returns the tick interval in ms (smaller = faster snake). slowMo doubles
+            // it (slower); the Swift evolution divides it by (1+bonus) for +5% speed.
+            let speed = slowMoActive ? getSpeed() * 2 : getSpeed();
+            // v7: Swift evolution — +5% speed = ~5% smaller tick interval. Recomputed
+            // live every call so it never needs snapshot/restore across slowMo changes.
+            if (evolutionTier >= 0) speed /= (1 + EVOLUTION_TIERS[0].speedBonus);
+            return speed;
         }
 
         function getOverchargeMultiplier() {
@@ -1297,9 +1320,11 @@ const TRAIL_RENDER_CONFIG = {
                 };
             } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y) ||
                      obstacles.some(o => o.x === newFood.x && o.y === newFood.y) ||
-                     // v6: Rampage Brew — prefer food closer to head
+                     // v6: Rampage Brew — prefer food closer to head.
+                     // v7: Titan evolution shrinks the cap by foodProximity tiles
+                     // (stacks with Rampage; only meaningful while a cap is active).
                      (minFoodSpawnDist !== null && currentSnake.length > 0 &&
-                      Math.abs(newFood.x - currentSnake[0].x) + Math.abs(newFood.y - currentSnake[0].y) > minFoodSpawnDist * TILE_SIZE));
+                      Math.abs(newFood.x - currentSnake[0].x) + Math.abs(newFood.y - currentSnake[0].y) > Math.max(1, minFoodSpawnDist - ((evolutionTier >= 2) ? EVOLUTION_TIERS[2].foodProximity : 0)) * TILE_SIZE));
             if (newFood.type === 'rare' || newFood.type === 'epic') playSound('rare_spawn');
             return newFood;
         }
@@ -1375,6 +1400,8 @@ const TRAIL_RENDER_CONFIG = {
             lastDeathCause = '';
             lastComboMilestone = 0;
             comboCount = 0;
+            evolutionTier = -1;
+            obstaclePassUsed = false;
             sessionFoodEaten = 0;
             sessionFoodTypes = new Set();
             sessionSpeedFood = 0;
@@ -1664,6 +1691,37 @@ const TRAIL_RENDER_CONFIG = {
                 if (pos.x === snake[i].x && pos.y === snake[i].y) return true;
             }
             return false;
+        }
+        // v7: Evolution helper — obstacle-only collision test. Separate from
+        // checkCollision() (which merges obstacle + self) so the Serpentine
+        // obstacle pass can save obstacle hits without also eating self-collisions.
+        function isObstacleCollision(pos) {
+            for (let i = 0; i < obstacles.length; i++) {
+                if (pos.x === obstacles[i].x && pos.y === obstacles[i].y) return true;
+            }
+            return false;
+        }
+
+        // v7: Evolution — apply a tier: visual flash, sound, toast + center floater.
+        function evolveSnake(tierIndex) {
+            evolutionTier = tierIndex;
+            const tier = EVOLUTION_TIERS[tierIndex];
+            const announceColor = tier.color === 'rainbow' ? '#FF44FF' : tier.color;
+            queueGameEffect('flash', { color: announceColor, alpha: 0.3, priority: 'normal' });
+            playSound('achievement');
+            queueToast('\u26A1 Evolution: ' + tier.name + '!', 3000);
+            spawnFloater(PLAY_MARGIN_LEFT + PLAY_WIDTH / 2, PLAY_MARGIN_TOP + PLAY_HEIGHT / 2, tier.name.toUpperCase() + '!', announceColor, 30, 1.5);
+            vibrate(40);
+        }
+
+        // v7: Evolution trigger — call after every snake growth. Each food grows
+        // length by 1 so at most one tier boundary crosses per call, but the loop
+        // is robust to multi-tier jumps (e.g. Echo brew food2 stacking).
+        function triggerEvolutionIfReady() {
+            while (evolutionTier < EVOLUTION_TIERS.length - 1 &&
+                   snake.length >= EVOLUTION_TIERS[evolutionTier + 1].length) {
+                evolveSnake(evolutionTier + 1);
+            }
         }
 
         function wrapPosition(pos) {
@@ -3170,6 +3228,18 @@ const TRAIL_RENDER_CONFIG = {
 
         function drawSnake(t) {
             const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+            // v7: Evolution visual morphs — the current tier governs body shape +
+            // glow. Bonuses stack cumulatively, but the visible morph reflects the
+            // highest tier reached (slim -> wavy -> thick -> rainbow head). The glow
+            // uses the tier color as a halo; the player's chosen skin fill is kept.
+            var evoTier = evolutionTier;
+            var evo = evoTier >= 0 ? EVOLUTION_TIERS[evoTier] : null;
+            var segSize = TILE_SIZE - 1, segPad = 0;        // default body cell
+            if (evoTier === 0) { segSize = TILE_SIZE - 2; segPad = 1; }        // Swift: slimmer
+            else if (evoTier >= 2) { segSize = TILE_SIZE; segPad = 0; }         // Titan/Apex: thicker (fills cell)
+            var evoGlow = evo ? evo.glow : 0;
+            var evoGlowColor = evo ? (evo.color === 'rainbow' ? '#FF44FF' : evo.color) : null;
+            var evoWavy = (evoTier === 1);                  // Serpentine: sine-wave body
             let headDrawX = 0, headDrawY = 0;
             snake.forEach(function(segment, index) {
                 let drawX, drawY;
@@ -3220,7 +3290,17 @@ const TRAIL_RENDER_CONFIG = {
                     headDrawY = drawY;
                 }
                 
-                if (skin.head === 'ghost') {
+                // v7: evolution glow (shadow) — Serpentine glows head only; Titan/Apex
+                // glow every segment. Set before the fill, reset right after so the
+                // outline and eyes stay crisp (per canvas save/restore discipline).
+                if (evoGlow > 0 && (evoTier >= 2 || index === 0)) {
+                    ctx.shadowBlur = evoGlow;
+                    ctx.shadowColor = evoGlowColor;
+                }
+                if (evoTier >= 3 && index === 0) {
+                    // v7: Apex — rainbow head cycling with renderTime
+                    ctx.fillStyle = 'hsl(' + ((renderTime * 0.2) % 360) + ', 100%, 55%)';
+                } else if (skin.head === 'ghost') {
                     ctx.globalAlpha = 0.5;
                     ctx.fillStyle = index === 0 ? 'rgba(200, 200, 255, 0.7)' : 'rgba(150, 150, 255, 0.4)';
                 } else if (skin.head === 'rainbow') {
@@ -3229,14 +3309,17 @@ const TRAIL_RENDER_CONFIG = {
                 } else {
                     ctx.fillStyle = index === 0 ? skin.head : skin.body;
                 }
+                // v7: Serpentine — subtle vertical sine-wave bob on body segments
+                var wavyY = (evoWavy && index > 0) ? Math.round(Math.sin(index * 0.6 + renderTime * 0.008) * 2) : 0;
                 if (index === 0 && eatAnimTimer > 0) {
                     const scale = 1 + 0.2 * (eatAnimTimer / 150);
-                    const size = Math.round((TILE_SIZE - 1) * scale);
-                    const offset = Math.round(((TILE_SIZE - 1) - size) / 2);
-                    ctx.fillRect(drawX + offset, drawY + offset, size, size);
+                    const size = Math.round(segSize * scale);
+                    const offset = Math.round((segSize - size) / 2);
+                    ctx.fillRect(drawX + segPad + offset, drawY + segPad + offset, size, size);
                 } else {
-                    ctx.fillRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
+                    ctx.fillRect(drawX + segPad, drawY + segPad + wavyY, segSize, segSize);
                 }
+                if (evoGlow > 0) ctx.shadowBlur = 0;
                 if (skin.head === 'ghost') {
                     ctx.globalAlpha = 1;
                 }
@@ -3245,7 +3328,7 @@ const TRAIL_RENDER_CONFIG = {
                 if (highContrast && !(skin.head === 'ghost')) {
                     ctx.strokeStyle = '#FFFFFF';
                     ctx.lineWidth = 1.5;
-                    ctx.strokeRect(drawX, drawY, TILE_SIZE - 1, TILE_SIZE - 1);
+                    ctx.strokeRect(drawX + segPad, drawY + segPad + wavyY, segSize, segSize);
                 }
 
                 if (index === 0) {
@@ -3607,6 +3690,8 @@ const TRAIL_RENDER_CONFIG = {
             comboCount = 0;
             lastEatTime = 0;
             lastComboMilestone = 0;
+            evolutionTier = -1;
+            obstaclePassUsed = false;
             var hasComboSave = false;
             for (var cp = 0; cp < gauntletPicks.length; cp++) {
                 if (gauntletPicks[cp].id === 'combo_save') hasComboSave = true;
@@ -4307,7 +4392,18 @@ const TRAIL_RENDER_CONFIG = {
                         spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FF0044');
                         return false;
                     }
-                    lastDeathCause = 'You ran into yourself!';
+                    // v7: Serpentine evolution — one-time obstacle pass. Order per
+                    // design: Shield -> Vampire/Phoenix brew -> Serpentine -> death,
+                    // so a chosen brew save is never wasted on an automatic save.
+                    if (evolutionTier >= 1 && !obstaclePassUsed && isObstacleCollision(wrappedHead)) {
+                        obstaclePassUsed = true;
+                        lastDeathCause = 'Serpentine phased through an obstacle!';
+                        spawnParticles(wrappedHead.x, wrappedHead.y, 18, EVOLUTION_TIERS[1].color);
+                        playSound('bonus');
+                        queueToast('\uD83D\uDEE1\uFE0F Serpentine: obstacle pass used!', 2000);
+                        return false;
+                    }
+                    lastDeathCause = isObstacleCollision(wrappedHead) ? 'Hit an obstacle!' : 'You ran into yourself!';
                     return true;
                 }
                 if (MODE_CONFIG[gameMode].wallDeath) {
@@ -4438,6 +4534,7 @@ const TRAIL_RENDER_CONFIG = {
             if (food && wrappedHead.x === food.x && wrappedHead.y === food.y) {
                 snake.push(tail);
                 snakeGrew = true;
+                triggerEvolutionIfReady();
                 if (activeSeed !== null) recordReplayGrow(gameTick);
                 const eatenType = food.type;
 
@@ -4459,7 +4556,7 @@ const TRAIL_RENDER_CONFIG = {
                 if (now - lastEatTime < 3000 && lastEatTime > 0) {
                     comboCount = Math.min(50, comboCount + 1);
                 } else {
-                    comboCount = 0;
+                    comboCount = (evolutionTier >= 3) ? EVOLUTION_TIERS[3].minCombo : 0;
                     lastComboMilestone = 0;
                 }
                 lastEatTime = now;
@@ -4600,6 +4697,7 @@ const TRAIL_RENDER_CONFIG = {
             if (food2 && wrappedHead.x === food2.x && wrappedHead.y === food2.y) {
                 snake.push(tail);
                 snakeGrew = true;
+                triggerEvolutionIfReady();
                 if (activeSeed !== null) recordReplayGrow(gameTick);
                 sessionFoodEaten++;
                 stats.totalFoodEaten++;
