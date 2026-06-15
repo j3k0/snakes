@@ -243,6 +243,12 @@
         let muted = saveManager.getInt('snake_muted', 0);
         let highContrast = saveManager.get('snake_high_contrast', '') === '1';
         let particles = [];
+        // v7 D4: snake-decay death fragments — REPLACE the old death particle burst.
+        // Spawned tail-to-head in gameOver(); updated/rendered additively in the rAF
+        // loop. deathFragmentsActive gates rendering so the array isn't scanned when
+        // no death sequence is in flight. Capped at 400 fragments.
+        let deathFragments = [];
+        let deathFragmentsActive = false;
         let displayedScore = 0;
         let obstacles = [];
         let lastFrameTime = 0;
@@ -1307,7 +1313,7 @@ const TRAIL_RENDER_CONFIG = {
                     }
                     if (freeTiles.length === 0) return null;
                     const tile = freeTiles[Math.floor(seededRandom() * freeTiles.length)];
-                    const fallbackFood = { x: tile.x, y: tile.y, type: pickRandomFoodType() };
+                    const fallbackFood = { x: tile.x, y: tile.y, type: pickRandomFoodType(), spawnTime: performance.now() };
                     if (fallbackFood.type === 'rare' || fallbackFood.type === 'epic') playSound('rare_spawn');
                     return fallbackFood;
                 }
@@ -1316,7 +1322,8 @@ const TRAIL_RENDER_CONFIG = {
                 newFood = {
                     x: Math.floor(seededRandom() * (PLAY_WIDTH / TILE_SIZE)) * TILE_SIZE,
                     y: Math.floor(seededRandom() * (PLAY_HEIGHT / TILE_SIZE)) * TILE_SIZE,
-                    type: type
+                    type: type,
+                    spawnTime: performance.now()
                 };
             } while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y) ||
                      obstacles.some(o => o.x === newFood.x && o.y === newFood.y) ||
@@ -1499,6 +1506,8 @@ const TRAIL_RENDER_CONFIG = {
             score = 0;
             displayedScore = 0;
             particles = [];
+            deathFragments = [];
+            deathFragmentsActive = false;
             gameState = 'idle';
             gameTimeout = null;
             nextDirection = null;
@@ -2061,16 +2070,37 @@ const TRAIL_RENDER_CONFIG = {
             sessionSummaryTimer = 4000; // show for 4 seconds
 
             vibrate(30);
-            const de = DEATH_EFFECTS[cosmetics.death] || DEATH_EFFECTS.death_classic;
-            if (de.color === 'rainbow') {
-                const perColor = Math.floor(de.count / 3);
-                const extra = de.count - perColor * 3;
-                spawnParticles(snake[0].x, snake[0].y, perColor + (extra > 0 ? 1 : 0), '#FF0000');
-                spawnParticles(snake[0].x, snake[0].y, perColor + (extra > 1 ? 1 : 0), '#00FF00');
-                spawnParticles(snake[0].x, snake[0].y, perColor, '#0000FF');
-            } else {
-                spawnParticles(snake[0].x, snake[0].y, de.count, de.color);
+            // v7 D4: snake-decay death effect — REPLACES the old death-particle burst.
+            // Each segment becomes a fragment, spawned tail-first with a per-segment
+            // delay so the decay ripples from tail to head. Fragment colors come from
+            // the snake's own skin (the snake decays into itself); ghost/rainbow skins
+            // get representative colors (rainbow bursts with a per-segment hue).
+            var dSkin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
+            var dHeadRaw = dSkin.head, dBodyRaw = dSkin.body;
+            deathFragments = [];
+            for (var fi = snake.length - 1; fi >= 0; fi--) {
+                var seg = snake[fi];
+                var isHead = (fi === 0);
+                var fragColor = isHead
+                    ? (dHeadRaw === 'ghost' ? '#AABBFF' : dHeadRaw === 'rainbow' ? 'hsl(' + ((fi * 20) % 360) + ',100%,55%)' : dHeadRaw)
+                    : (dBodyRaw === 'ghost' ? '#7788BB' : dBodyRaw === 'rainbow' ? 'hsl(' + ((fi * 20) % 360) + ',100%,45%)' : dBodyRaw);
+                var angle = Math.random() * Math.PI * 2;
+                var speed = 1 + Math.random() * 2;
+                var fLife = 0.6 + Math.random() * 0.6;
+                deathFragments.push({
+                    x: seg.x + TILE_SIZE / 2,
+                    y: seg.y + TILE_SIZE / 2,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed - 1,
+                    life: fLife,
+                    maxLife: fLife,
+                    color: fragColor,
+                    size: isHead ? 5 : 2 + Math.random() * 3,
+                    delay: (snake.length - 1 - fi) * 15 // sequential tail-to-head explosion (ms)
+                });
             }
+            if (deathFragments.length > 400) deathFragments.splice(0, deathFragments.length - 400);
+            deathFragmentsActive = true;
             stopDrone();
             stopPad();
             playSound('gameover');
@@ -2701,6 +2731,33 @@ const TRAIL_RENDER_CONFIG = {
             }
             ctx.globalAlpha = 1;
 
+            // v7 D4: snake-decay death fragments — additive glow, tail-to-head via
+            // per-fragment delay. MUST restore globalCompositeOperation to 'source-over'
+            // after (ctx.restore() handles it). Updated with delta time so the effect
+            // is frame-rate independent. Only active right after gameOver().
+            if (deathFragmentsActive && deathFragments.length > 0) {
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                for (let dfi = deathFragments.length - 1; dfi >= 0; dfi--) {
+                    const df = deathFragments[dfi];
+                    if (df.delay > 0) { df.delay -= delta; continue; }
+                    df.x += df.vx;
+                    df.y += df.vy;
+                    df.vy += 0.08; // gravity
+                    df.life -= delta / 1000;
+                    if (df.life <= 0) { deathFragments.splice(dfi, 1); continue; }
+                    ctx.globalAlpha = df.life / df.maxLife;
+                    ctx.fillStyle = df.color;
+                    ctx.shadowBlur = df.size;
+                    ctx.shadowColor = df.color;
+                    ctx.beginPath();
+                    ctx.arc(df.x, df.y, df.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore(); // restores globalAlpha, compositeOp, shadowBlur, shadowColor
+                if (deathFragments.length === 0) deathFragmentsActive = false;
+            }
+
             // v6: Render floaters on top of particles
             if (floaters.length > 0) drawFloaters(ctx);
             // --- end v6 ---
@@ -3013,13 +3070,39 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
 
+        // v7 D1: easeOutBack — overshoot easing for the food spawn "pop". Standard
+        // easeOutBack with c1=1.7 / c3=2.7 (rounded). Clamps to 1 once the pop
+        // window elapses so idle bob takes over cleanly.
+        function easeOutBack(t) {
+            return t < 1 ? 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2) : 1;
+        }
+
         function drawFood() {
             if (!food) return;
             const tier = FOOD_TIERS[food.type] || FOOD_TIERS.common;
             const cx = food.x + TILE_SIZE / 2;
             const cy = food.y + TILE_SIZE / 2;
 
+            // v7 D1: spawn "pop" (easeOutBack over 250ms) + per-type idle bob.
+            // Shapes are drawn around the LOCAL ORIGIN (0,0) below; the transform
+            // (translate → scale → rotate) carries them to the tile center so a
+            // single scale applies the pop and a single rotate applies the bob.
+            const spawnElapsed = performance.now() - (food.spawnTime || 0);
+            const spawnScale = spawnElapsed < 250 ? Math.max(0, easeOutBack(spawnElapsed / 250)) : 1;
+            var bobX = 0, bobY = 0, bobRot = 0, bobPulse = 1;
+            switch (food.type) {
+                case 'common':  bobY = Math.sin(renderTime / 300) * 1.5; break;            // circle: vertical wobble
+                case 'uncommon': bobRot = Math.sin(renderTime / 500) * 0.25; break;         // diamond: slow rotation
+                case 'rare':    bobPulse = 1 + 0.08 * Math.sin(renderTime / 400); break;    // triangle: gentle breathe
+                case 'epic':    bobPulse = 1 + 0.10 * Math.sin(renderTime / 350); break;    // hexagon: pulse
+                case 'speed':   bobX = Math.sin(renderTime / 250) * 2; break;               // chevron: horizontal drift
+                // 'bonus' keeps its own internal pulse mechanic (see its case below)
+            }
+
             ctx.save();
+            ctx.translate(cx + bobX, cy + bobY);
+            ctx.scale(spawnScale * bobPulse, spawnScale * bobPulse);
+            ctx.rotate(bobRot);
 
             if (tier.glow) {
                 ctx.shadowBlur = tier.glow;
@@ -3032,7 +3115,7 @@ const TRAIL_RENDER_CONFIG = {
                 case 'common': {
                     // Filled circle
                     ctx.beginPath();
-                    ctx.arc(cx, cy, TILE_SIZE * 0.4, 0, 2 * Math.PI);
+                    ctx.arc(0, 0, TILE_SIZE * 0.4, 0, 2 * Math.PI);
                     ctx.fill();
                     break;
                 }
@@ -3040,10 +3123,10 @@ const TRAIL_RENDER_CONFIG = {
                     // Diamond shape
                     const s = TILE_SIZE * 0.45;
                     ctx.beginPath();
-                    ctx.moveTo(cx, cy - s);
-                    ctx.lineTo(cx + s, cy);
-                    ctx.lineTo(cx, cy + s);
-                    ctx.lineTo(cx - s, cy);
+                    ctx.moveTo(0, -s);
+                    ctx.lineTo(s, 0);
+                    ctx.lineTo(0, s);
+                    ctx.lineTo(-s, 0);
                     ctx.closePath();
                     ctx.fill();
                     break;
@@ -3052,9 +3135,9 @@ const TRAIL_RENDER_CONFIG = {
                     // Upward-pointing triangle
                     const s = TILE_SIZE * 0.45;
                     ctx.beginPath();
-                    ctx.moveTo(cx, cy - s);
-                    ctx.lineTo(cx + s, cy + s * 0.7);
-                    ctx.lineTo(cx - s, cy + s * 0.7);
+                    ctx.moveTo(0, -s);
+                    ctx.lineTo(s, s * 0.7);
+                    ctx.lineTo(-s, s * 0.7);
                     ctx.closePath();
                     ctx.fill();
                     break;
@@ -3065,8 +3148,8 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.beginPath();
                     for (let i = 0; i < 6; i++) {
                         const angle = (Math.PI / 3) * i - Math.PI / 2;
-                        const px = cx + r * Math.cos(angle);
-                        const py = cy + r * Math.sin(angle);
+                        const px = r * Math.cos(angle);
+                        const py = r * Math.sin(angle);
                         if (i === 0) ctx.moveTo(px, py);
                         else ctx.lineTo(px, py);
                     }
@@ -3079,7 +3162,7 @@ const TRAIL_RENDER_CONFIG = {
                     const pulse = 1 + 0.5 * Math.sin(renderTime / 200);
                     const r = Math.min(TILE_SIZE * 0.4 * pulse, TILE_SIZE * 0.6);
                     ctx.beginPath();
-                    ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+                    ctx.arc(0, 0, r, 0, 2 * Math.PI);
                     ctx.fill();
                     break;
                 }
@@ -3089,19 +3172,19 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.lineWidth = 3;
                     ctx.strokeStyle = tier.color;
                     ctx.beginPath();
-                    ctx.moveTo(cx - s, cy - s);
-                    ctx.lineTo(cx, cy);
-                    ctx.lineTo(cx - s, cy + s);
+                    ctx.moveTo(-s, -s);
+                    ctx.lineTo(0, 0);
+                    ctx.lineTo(-s, s);
                     ctx.stroke();
                     ctx.beginPath();
-                    ctx.moveTo(cx, cy - s);
-                    ctx.lineTo(cx + s, cy);
-                    ctx.lineTo(cx, cy + s);
+                    ctx.moveTo(0, -s);
+                    ctx.lineTo(s, 0);
+                    ctx.lineTo(0, s);
                     ctx.stroke();
                     break;
                 }
                 default: {
-                    ctx.fillRect(food.x, food.y, TILE_SIZE, TILE_SIZE);
+                    ctx.fillRect(-TILE_SIZE / 2, -TILE_SIZE / 2, TILE_SIZE, TILE_SIZE);
                     break;
                 }
             }
@@ -3145,8 +3228,11 @@ const TRAIL_RENDER_CONFIG = {
                 var f2cx = food2.x + TILE_SIZE / 2;
                 var f2cy = food2.y + TILE_SIZE / 2;
                 ctx.fillStyle = f2Tier.color;
+                // v7 D1: echo food also pops on spawn
+                var f2Elapsed = performance.now() - (food2.spawnTime || 0);
+                var f2Scale = f2Elapsed < 250 ? Math.max(0, easeOutBack(f2Elapsed / 250)) : 1;
                 ctx.beginPath();
-                ctx.arc(f2cx, f2cy, TILE_SIZE * 0.35, 0, 2 * Math.PI);
+                ctx.arc(f2cx, f2cy, TILE_SIZE * 0.35 * f2Scale, 0, 2 * Math.PI);
                 ctx.fill();
                 ctx.fillStyle = '#FFF';
                 ctx.font = 'bold 8px Arial';
@@ -3484,11 +3570,38 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
 
-        function drawSlowMoTint() {
+        // v7 D3: post-processing — always-on vignette + slow-mo tint + death
+        // vignette crush. Uses source-over (NOT multiply — multiply is not a valid
+        // Canvas 2D composite op). Called as the LAST thing in drawGame(), before
+        // the flash overlay (which renders in animateVisuals). The center stays
+        // transparent so HUD/overlay text remains readable.
+        function drawPostFX() {
+            ctx.save();
+            // Always-on vignette — transparent center → 0.15 black at edges
+            var vig = ctx.createRadialGradient(
+                CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, CANVAS_WIDTH * 0.4,
+                CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, CANVAS_WIDTH * 0.75);
+            vig.addColorStop(0, 'rgba(0,0,0,0)');
+            vig.addColorStop(1, 'rgba(0,0,0,0.15)');
+            ctx.fillStyle = vig;
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            // Slow-mo tint — replaces the old flat drawSlowMoTint()
             if (slowMoActive) {
-                ctx.fillStyle = 'rgba(170, 68, 255, 0.05)';
+                ctx.fillStyle = 'rgba(80,0,120,0.08)';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             }
+            // Death vignette crush — intensifies as shakeTimer winds down
+            if (gameState === 'gameover' && shakeTimer > 0) {
+                var deathAlpha = (1 - shakeTimer / 200) * 0.3;
+                var dv = ctx.createRadialGradient(
+                    CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 50,
+                    CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, CANVAS_WIDTH * 0.6);
+                dv.addColorStop(0, 'rgba(0,0,0,0)');
+                dv.addColorStop(1, 'rgba(60,0,0,' + deathAlpha + ')');
+                ctx.fillStyle = dv;
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            }
+            ctx.restore();
         }
 
         function drawTimeAttackHUD() {
@@ -3699,6 +3812,8 @@ const TRAIL_RENDER_CONFIG = {
             if (!hasComboSave) sessionMaxCombo = 0;
             gameTick = 0;
             particles = [];
+            deathFragments = [];
+            deathFragmentsActive = false;
             flashOverlay = null;
             gameEffects.length = 0;
             rAFEffects.length = 0;
@@ -4014,6 +4129,22 @@ const TRAIL_RENDER_CONFIG = {
             ctx.clip();
 
             drawGrid();
+            // v7 D2: ambient grid breathing — soft radial gradient centered on the
+            // snake head, alpha modulated by a ~3s sine cycle. Sits behind obstacles
+            // and food (drawn right after the grid) and only while actively playing.
+            if (gameState === 'playing' && snake.length > 0) {
+                ctx.save();
+                var bx = snake[0].x + TILE_SIZE / 2;
+                var by = snake[0].y + TILE_SIZE / 2;
+                var breathAlpha = 0.04 + 0.03 * Math.sin(renderTime * 0.002);
+                var grd = ctx.createRadialGradient(bx, by, 20, bx, by, 120);
+                grd.addColorStop(0, 'rgba(255,255,255,' + breathAlpha + ')');
+                grd.addColorStop(0.5, 'rgba(255,255,255,' + (breathAlpha * 0.5) + ')');
+                grd.addColorStop(1, 'rgba(255,255,255,0)');
+                ctx.fillStyle = grd;
+                ctx.fillRect(0, 0, PLAY_WIDTH, PLAY_HEIGHT);
+                ctx.restore();
+            }
             drawPaintGrid();
             drawObstacles();
             drawFood();
@@ -4054,7 +4185,6 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
             drawTrails();
-            drawSlowMoTint();
 
             // Subtle play area border
             ctx.save();
@@ -4171,6 +4301,9 @@ const TRAIL_RENDER_CONFIG = {
                     drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + 'Press ENTER to Restart');
                 }
             }
+            // v7 D3: post-processing — called LAST in drawGame, before the flash
+            // overlay (which renders in animateVisuals on top of everything).
+            drawPostFX();
         }
 
         function updateGame() {
@@ -4687,7 +4820,7 @@ const TRAIL_RENDER_CONFIG = {
                         var adj = [{x: food.x + TILE_SIZE, y: food.y}, {x: food.x - TILE_SIZE, y: food.y}, {x: food.x, y: food.y + TILE_SIZE}, {x: food.x, y: food.y - TILE_SIZE}];
                         for (var ai = 0; ai < adj.length; ai++) {
                             if (adj[ai].x >= 0 && adj[ai].x < PLAY_WIDTH && adj[ai].y >= 0 && adj[ai].y < PLAY_HEIGHT) {
-                                food2 = { x: adj[ai].x, y: adj[ai].y, type: food.type, pts: Math.floor((FOOD_TIERS[food.type] ? FOOD_TIERS[food.type].pts : 10) / 2) };
+                                food2 = { x: adj[ai].x, y: adj[ai].y, type: food.type, pts: Math.floor((FOOD_TIERS[food.type] ? FOOD_TIERS[food.type].pts : 10) / 2), spawnTime: performance.now() };
                                 break;
                             }
                         }
