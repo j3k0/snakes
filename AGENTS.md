@@ -1,8 +1,10 @@
 # AGENTS.md
 
-## Game Loop
-- `gameInterval` must be both `clearInterval()`'d AND set to `null` in `gameOver()` — the keydown handler guards on `!gameInterval` to detect stopped state
-- Speed changes require clearing the existing `setInterval` and creating a new one; you cannot mutate a running interval's delay
+## Game Loop (v6+)
+- The game loop uses `setTimeout` chaining: `scheduleNextTick()` → `updateGame()` → `scheduleNextTick()` (no longer `setInterval`/`gameInterval`).
+- `stopGameLoop()` clears `gameTimeout` to null and is the single exit path.
+- `restartGameTimeout()` calls `stopGameLoop()` then `scheduleNextTick()` — use this for speed changes instead of manual clear+create.
+- Speed changes still require clearing and re-scheduling the existing timeout chain.
 
 ## Dual Render Loops
 - The game runs TWO concurrent loops: `setInterval` (50-120ms) for `updateGame()` → `drawGame()` (core game state), and `requestAnimationFrame` (60fps) for `animateVisuals()` (particles, score animation, screen effects)
@@ -51,7 +53,11 @@
 - When two toast systems fire in sequence (e.g., `checkAchievements()` + `checkDailyCompletion()` both from `gameOver()`), the second toast's `clearTimeout` on the shared timer suppresses the first toast's display
 
 ## Game Loop — Restart Helper
-- `restartGameInterval(speed)` must also do `clearInterval(gameInterval); gameInterval = null;` before `setInterval` — not just `gameOver()`. Without the null, a stale interval handle lingers and `clearInterval()` on it is a silent no-op.
+- `restartGameTimeout()` must call `stopGameLoop()` (which clears `gameTimeout` to null) before `scheduleNextTick()` — without the null-reset, a stale timeout handle lingers and calling `clearTimeout()` on it is a silent no-op. Do NOT write to `gameTimeout` directly; always use `stopGameLoop()`.
+
+## Module Closure Pattern (v6+)
+- All game code now lives inside an IIFE that assigns to `window` for test access. Variables declared with `let`/`var` at module scope are NOT global — they're closure-scoped.
+- Tests must use `page.evaluate()` to access game variables; they aren't available on `window` unless explicitly assigned (like `startGame`, `resetGame`, `gameState`, `snake`, etc.).
 
 ## Dual Render Loops — rAF Write Boundary
 - The rAF loop's timer-decay section (lines ~1346-1352) writes `flashOverlay` from `levelUpFlash` and `snapLevelUpFlash` decay — this is a write to visual state inside the read-only rAF loop. Legitimate since it only writes the `flashOverlay` object (visual state), not game-logic state, but the pattern is fragile: any future code adding a `flashOverlay` write in this section creates a write-contention risk with the game-tick `flashOverlay` writes in `updateGame()`.
@@ -60,6 +66,7 @@
 ## Canvas Save/Restore — Sub-Function Leaks
 - `drawOverlay()` (lines ~1476-1571) sets `ctx.textAlign`, `ctx.textBaseline`, `ctx.font`, and `ctx.fillStyle` without save/restore. Its idle-state branch has an early return at line ~1542 that leaks these values into `animateVisuals()`. Any sub-function called from `drawGame()` or `animateVisuals()` that modifies text/alignment properties MUST wrap in save/restore.
 - Common leak pattern: `ctx.textAlign = 'center'` and `ctx.textBaseline = 'middle'` in overlay/draw functions without save/restore. These persist into subsequent canvas text operations and silently misalign labels.
+- `drawSnake()` mutates `ctx.globalAlpha`, `ctx.fillStyle`, and `ctx.strokeStyle` without save/restore. Safe because drawGame sets what it needs per frame, but fragile on exception paths.
 
 ## Draw Order — HUD Elements
 - Background HUD (`drawMuteIndicator`, `drawXPBar`, `drawPrestigeBorder`) renders between grid and obstacles, at grid depth. This is intentional — they sit on the background behind game content. The core game-draw order (grid → obstacles → food → snake → trails → overlays → flash) defines only the game-content layering; HUD elements interleave at grid depth and do not follow the same sequence.
