@@ -598,6 +598,7 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let snapLevel = 1;                 // current snap difficulty level (increments every 10s)
         let snapLevelUpFlash = 0;
         let helpOverlayVisible = false;
+        let resumeRunTextY = CANVAS_HEIGHT - 95; // v7 E: capture position for tap band
         let welcomeOverlay = !saveManager.get('snake_has_played', '');
         let lastDeathCause = '';
         let lastComboMilestone = 0;
@@ -1862,6 +1863,9 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function startGame() {
+            // v7 E: starting a fresh run — discard any saved snapshot so the
+            // idle "Resume Run" button doesn't offer a stale unrelated run.
+            clearSnapshot();
             syncDailyState();
             sessionSummary = null;
             sessionSummaryTimer = 0;
@@ -2205,10 +2209,13 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         // Deserialize and resume. Returns true on success, false on invalid
-        // data (in which case the bad snapshot is cleared so it can't loop).
-        function restoreFromSnapshot(data) {
+        // data. If fromStorage is true, the bad snapshot is cleared from
+        // localStorage so it can't loop. URL-hash restores (fromStorage=false)
+        // never touch local storage — a bad shared link must not destroy
+        // the user's own saved run.
+        function restoreFromSnapshot(data, fromStorage) {
             if (!data || typeof data !== 'object' || data.v !== SNAPSHOT_VERSION || !MODE_CONFIG[data.mode]) {
-                clearSnapshot();
+                if (fromStorage) clearSnapshot();
                 return false;
             }
             try {
@@ -2322,8 +2329,9 @@ const TRAIL_RENDER_CONFIG = {
                 helpOverlayVisible = false;
                 ghostPositions = [];
 
-                // Snapshot consumed — clear so it can't be double-restored.
-                clearSnapshot();
+                // Snapshot consumed — clear so it can't be double-restored
+                // (only for localStorage path; URL hash restores never wrote).
+                if (fromStorage) clearSnapshot();
 
                 srSpeak('Run resumed.');
                 resumeGameLoop();
@@ -2334,20 +2342,18 @@ const TRAIL_RENDER_CONFIG = {
                 if (synesthesiaMode) startPad();
                 return true;
             } catch (e) {
-                clearSnapshot();
+                if (fromStorage) clearSnapshot();
                 return false;
             }
         }
 
         // Restore from a #snapshot=<base64> URL hash. base64 wraps a
-        // URI-encoded JSON string: decodeURIComponent(atob(data)).
         function restoreFromSnapshotHash(hashData) {
             try {
                 var json = decodeURIComponent(atob(hashData));
                 var data = JSON.parse(json);
-                return restoreFromSnapshot(data);
+                return restoreFromSnapshot(data, false);
             } catch (e) {
-                clearSnapshot();
                 return false;
             }
         }
@@ -3540,6 +3546,7 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 // v7 E: Resume saved run
                 if (hasSnapshot()) {
+                    resumeRunTextY = currentY;
                     ctx.fillStyle = '#44AAFF';
                     ctx.font = 'bold 16px Arial';
                     ctx.fillText('\u25B6 Resume Run  (R)', CANVAS_WIDTH / 2, currentY);
@@ -3601,7 +3608,7 @@ const TRAIL_RENDER_CONFIG = {
 
                     ctx.font = '13px Arial';
                     ctx.fillStyle = '#666';
-                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  C Copy Run  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 120);
+                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  C Copy Run  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 145);
                 }
                 ctx.restore();
                 ctx.restore();
@@ -6289,7 +6296,7 @@ const TRAIL_RENDER_CONFIG = {
             if ((e.key === 'r' || e.key === 'R') && gameState === 'idle' && hasSnapshot()) {
                 var snap = saveManager.getJSON(SNAPSHOT_KEY, null);
                 if (snap) {
-                    if (restoreFromSnapshot(snap)) {
+                    if (restoreFromSnapshot(snap, true)) {
                         drawGame(1);
                         visualDirty = true;
                     }
@@ -6429,11 +6436,13 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState !== 'playing') {
                 if (gameState === 'paused') {
                     if (e.key === 'ArrowUp') {
+                        if (pauseConfirmPending) return;
                         pauseMenuSelection = (pauseMenuSelection - 1 + 4) % 4;
                         drawGame(1);
                         return;
                     }
                     if (e.key === 'ArrowDown') {
+                        if (pauseConfirmPending) return;
                         pauseMenuSelection = (pauseMenuSelection + 1) % 4;
                         drawGame(1);
                         return;
@@ -6624,10 +6633,9 @@ const TRAIL_RENDER_CONFIG = {
               const scaleY = CANVAS_HEIGHT / rect.height;
               const tapY = (e.changedTouches[0].clientY - rect.top) * scaleY;
               const tapX = (e.changedTouches[0].clientX - rect.left) * (CANVAS_WIDTH / rect.width);
-              // Resume Run line renders at ~currentY (CANVAS_HEIGHT - 95 + daily_offsets)
-              if (tapY >= CANVAS_HEIGHT - 120 && tapY <= CANVAS_HEIGHT - 55 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
+              if (tapY >= resumeRunTextY - 15 && tapY <= resumeRunTextY + 20 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
                 var snap = saveManager.getJSON(SNAPSHOT_KEY, null);
-                if (snap && restoreFromSnapshot(snap)) {
+                if (snap && restoreFromSnapshot(snap, true)) {
                   drawGame(1);
                   visualDirty = true;
                 }
