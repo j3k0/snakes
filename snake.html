@@ -2220,6 +2220,12 @@ const TRAIL_RENDER_CONFIG = {
             }
             try {
                 gameMode = data.mode;
+                // Compute offline gap BEFORE field restores so timeAttackEnd
+                // can be rebased to the new wall clock. The gap runs from
+                // the last live moment to now.
+                var lastLive = data.sessionPauseStart || data.savedAt || Date.now();
+                var offlineGap = Date.now() - lastLive;
+
                 // Seed: re-derive the PRNG from the seed string. The PRNG
                 // stream position is NOT part of the snapshot (mulberry32
                 // holds its state in a closure we can't read back), so
@@ -2236,11 +2242,11 @@ const TRAIL_RENDER_CONFIG = {
                 gameTick = data.tick || 0;
                 score = data.score || 0;
                 snake = (data.snake || []).map(function (s) { return { x: s.x, y: s.y }; });
-                dx = data.dx; dy = data.dy;
+                dx = data.dx || 1; dy = data.dy || 0;
                 nextDirection = data.nextDirection || null;
-                food = data.food ? { x: data.food.x, y: data.food.y, type: data.food.type, pts: data.food.pts || 0, spawnTime: data.food.spawnTime || performance.now() } : null;
-                food2 = data.food2 ? { x: data.food2.x, y: data.food2.y, type: data.food2.type, pts: data.food2.pts || 0, spawnTime: data.food2.spawnTime || performance.now() } : null;
-                tickInterval = data.tickInterval || getEffectiveSpeed();
+                food = data.food ? { x: data.food.x, y: data.food.y, type: data.food.type, pts: data.food.pts || 0, spawnTime: performance.now() } : null;
+                food2 = data.food2 ? { x: data.food2.x, y: data.food2.y, type: data.food2.type, pts: data.food2.pts || 0, spawnTime: performance.now() } : null;
+                tickInterval = (data.tickInterval == null) ? getEffectiveSpeed() : data.tickInterval;
                 minFoodSpawnDist = (data.minFoodSpawnDist == null) ? null : data.minFoodSpawnDist;
                 comboCount = data.comboCount || 0;
                 lastComboMilestone = data.lastComboMilestone || 0;
@@ -2269,19 +2275,18 @@ const TRAIL_RENDER_CONFIG = {
                 gauntletWaveScore = data.gauntletWaveScore || 0;
                 gauntletSelection = data.gauntletSelection || 0;
                 gauntletPickOptions = (data.gauntletPickOptions || []).slice();
-                snapDuration = data.snapDuration || 3000;
-                snapLevel = data.snapLevel || 1;
+                snapDuration = (data.snapDuration == null) ? 3000 : data.snapDuration;
+                snapLevel = (data.snapLevel == null) ? 1 : data.snapLevel;
                 snapTimeSinceDecrease = data.snapTimeSinceDecrease || 0;
-                shrinkTimer = data.shrinkTimer || 3000;
-                timeAttackEnd = data.timeAttackEnd || 0;
+                shrinkTimer = (data.shrinkTimer == null) ? 3000 : data.shrinkTimer;
+                timeAttackEnd = data.timeAttackEnd ? data.timeAttackEnd + offlineGap : 0;
                 zenActive = !!data.zenActive;
                 paintGrid = data.paintGrid || null;
                 paintCoveredCount = data.paintCoveredCount || 0;
                 paintTotalTiles = data.paintTotalTiles || 0;
-                paintLayers = data.paintLayers || 1;
                 currentPaintColor = data.currentPaintColor || '#FF4444';
                 painterFoodEaten = data.painterFoodEaten || 0;
-                shrinkRows = data.shrinkRows || 0;
+                paintLayers = (data.paintLayers == null) ? 1 : data.paintLayers;
                 shrinkCols = data.shrinkCols || 0;
                 hungerStarted = !!data.hungerStarted;
                 hungerTickCounter = data.hungerTickCounter || 0;
@@ -2297,17 +2302,11 @@ const TRAIL_RENDER_CONFIG = {
                 sessionStartTime = data.sessionStartTime || Date.now();
                 sessionModeHighStart = data.sessionModeHighStart || 0;
                 sessionUsedShield = !!data.sessionUsedShield;
-                lastEatenType = data.lastEatenType || 'common';
+                lastEatenType = (data.lastEatenType == null) ? 'common' : data.lastEatenType;
                 replayEvents = (data.replayEvents || []).slice();
 
-                // Account for the offline gap as paused time so session
-                // time-alive stats are not inflated by however long the tab
-                // was closed. The gap runs from the last live moment (pause
-                // start if paused, else the save timestamp) to now.
-                var lastLive = data.sessionPauseStart || data.savedAt || Date.now();
-                sessionPausedTime = (data.sessionPausedTime || 0) + (Date.now() - lastLive);
+                sessionPausedTime = (data.sessionPausedTime || 0) + offlineGap;
                 sessionPauseStart = 0;
-
                 // Clean transient visual state (snapshot excludes it by design).
                 particles = [];
                 deathFragments = [];
@@ -2352,7 +2351,13 @@ const TRAIL_RENDER_CONFIG = {
             try {
                 var json = decodeURIComponent(atob(hashData));
                 var data = JSON.parse(json);
-                return restoreFromSnapshot(data, false);
+                if (restoreFromSnapshot(data, false)) {
+                    // Strip the hash so a reload doesn't re-restore the old
+                    // shared state over the user's continued play.
+                    history.replaceState(null, '', window.location.pathname + window.location.search);
+                    return true;
+                }
+                return false;
             } catch (e) {
                 return false;
             }
