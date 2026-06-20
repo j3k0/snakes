@@ -2070,6 +2070,327 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
 
+        // ===================================================================
+        // v7 Feature E: GameState Snapshot Engine (Save & Resume)
+        // Serializes the entire run state to a compact JSON blob in
+        // localStorage so a run survives tab close / browser restart. Also
+        // round-trips through a #snapshot=<base64> URL hash for sharing.
+        // ===================================================================
+
+        const SNAPSHOT_KEY = 'snake_snapshot';
+        const SNAPSHOT_VERSION = 1;
+
+        // Shared post-restore step: flip to playing and arm the tick chain.
+        // Used by restoreFromSnapshot(). startGame() sets tickInterval itself
+        // before scheduling, so it does not go through here.
+        function resumeGameLoop() {
+            gameState = 'playing';
+            scheduleNextTick();
+        }
+
+        // Build the serializable snapshot object from live state. All visual
+        // FX (particles, fragments, flashes, shake) are intentionally excluded
+        // — they reset cleanly and have no gameplay meaning. Returns null if
+        // there is no live run to snapshot.
+        function buildSnapshotObject() {
+            if (gameState !== 'playing' && gameState !== 'paused') return null;
+            return {
+                v: SNAPSHOT_VERSION,
+                savedAt: Date.now(),
+                // Core
+                mode: gameMode,
+                seed: activeSeed,
+                tick: gameTick,
+                score: score,
+                snake: snake.map(function (s) { return { x: s.x, y: s.y }; }),
+                dx: dx, dy: dy,
+                nextDirection: nextDirection,
+                food: food ? { x: food.x, y: food.y, type: food.type, pts: food.pts || 0, spawnTime: food.spawnTime || 0 } : null,
+                food2: food2 ? { x: food2.x, y: food2.y, type: food2.type, pts: food2.pts || 0, spawnTime: food2.spawnTime || 0 } : null,
+                tickInterval: tickInterval,
+                minFoodSpawnDist: minFoodSpawnDist,
+                // Combo
+                comboCount: comboCount,
+                lastComboMilestone: lastComboMilestone,
+                lastEatTime: lastEatTime,
+                // Speed
+                speedBoostCounter: speedBoostCounter,
+                // Obstacles
+                obstacles: obstacles.map(function (o) { return { x: o.x, y: o.y }; }),
+                obstacleSpawnTimer: obstacleSpawnTimer,
+                // Power-ups
+                powerUpType: powerUpType,
+                powerUpTimer: powerUpTimer,
+                powerUpSpawnCounter: powerUpSpawnCounter,
+                powerUpDespawnCounter: powerUpDespawnCounter,
+                powerUpPickup: powerUpPickup ? { x: powerUpPickup.x, y: powerUpPickup.y, type: powerUpPickup.type } : null,
+                shieldActive: shieldActive,
+                magnetActive: magnetActive,
+                slowMoActive: slowMoActive,
+                // Rival
+                rivals: rivals.map(function (r) { return { snake: r.snake.map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: r.active, respawnTimer: r.respawnTimer, color: r.color }; }),
+                // Mutators & brews
+                activeMutators: activeMutators.slice(),
+                activeBrews: activeBrews.slice(),
+                brewUsageFlags: Object.assign({}, brewUsageFlags),
+                // Evolution
+                evolutionTier: evolutionTier,
+                obstaclePassUsed: obstaclePassUsed,
+                // Mode-specific
+                gauntletWave: gauntletWave,
+                gauntletScore: gauntletScore,
+                gauntletPicks: gauntletPicks.slice(),
+                gauntletIntermission: gauntletIntermission,
+                gauntletWaveScore: gauntletWaveScore,
+                gauntletSelection: gauntletSelection,
+                gauntletPickOptions: gauntletPickOptions.slice(),
+                snapDuration: snapDuration,
+                snapLevel: snapLevel,
+                snapTimeSinceDecrease: snapTimeSinceDecrease,
+                shrinkTimer: shrinkTimer,
+                timeAttackEnd: timeAttackEnd,
+                zenActive: zenActive,
+                // Painter
+                paintGrid: paintGrid,
+                paintCoveredCount: paintCoveredCount,
+                paintTotalTiles: paintTotalTiles,
+                paintLayers: paintLayers,
+                currentPaintColor: currentPaintColor,
+                painterFoodEaten: painterFoodEaten,
+                // Mutator-specific
+                shrinkRows: shrinkRows,
+                shrinkCols: shrinkCols,
+                hungerStarted: hungerStarted,
+                hungerTickCounter: hungerTickCounter,
+                chaosShuffleTick: chaosShuffleTick,
+                chaosCurrentWeights: chaosCurrentWeights,
+                // Session stats
+                sessionFoodEaten: sessionFoodEaten,
+                sessionFoodTypes: Array.from(sessionFoodTypes),
+                sessionSpeedFood: sessionSpeedFood,
+                sessionBonusFood: sessionBonusFood,
+                sessionTimeAlive: sessionTimeAlive,
+                sessionMaxCombo: sessionMaxCombo,
+                sessionXP: sessionXP,
+                sessionPausedTime: sessionPausedTime,
+                sessionPauseStart: sessionPauseStart,
+                sessionStartTime: sessionStartTime,
+                sessionModeHighStart: sessionModeHighStart,
+                sessionUsedShield: sessionUsedShield,
+                lastEatenType: lastEatenType,
+                // Replay
+                replayEvents: replayEvents.slice()
+            };
+        }
+
+        // Persist the current run. Best-effort: localStorage may be full or
+        // unavailable (e.g. private mode). Returns true only on a successful write.
+        function saveSnapshot() {
+            var snap = buildSnapshotObject();
+            if (!snap) return false;
+            try {
+                saveManager.setJSON(SNAPSHOT_KEY, snap);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function clearSnapshot() {
+            saveManager.remove(SNAPSHOT_KEY);
+        }
+
+        function hasSnapshot() {
+            return saveManager.get(SNAPSHOT_KEY, null) !== null;
+        }
+
+        // Deserialize and resume. Returns true on success, false on invalid
+        // data (in which case the bad snapshot is cleared so it can't loop).
+        function restoreFromSnapshot(data) {
+            if (!data || typeof data !== 'object' || data.v !== SNAPSHOT_VERSION || !MODE_CONFIG[data.mode]) {
+                clearSnapshot();
+                return false;
+            }
+            try {
+                gameMode = data.mode;
+                // Seed: re-derive the PRNG from the seed string. The PRNG
+                // stream position is NOT part of the snapshot (mulberry32
+                // holds its state in a closure we can't read back), so
+                // post-restore seeded randomness diverges from the original
+                // run. Current state (food, obstacles) is preserved exactly;
+                // only newly generated items differ. Acceptable for a
+                // save/resume convenience feature.
+                activeSeed = (data.seed == null) ? null : data.seed;
+                if (activeSeed !== null) {
+                    seedPrng = mulberry32(activeSeed.split('').reduce(function (h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0));
+                } else {
+                    seedPrng = null;
+                }
+                gameTick = data.tick || 0;
+                score = data.score || 0;
+                snake = (data.snake || []).map(function (s) { return { x: s.x, y: s.y }; });
+                dx = data.dx; dy = data.dy;
+                nextDirection = data.nextDirection || null;
+                food = data.food ? { x: data.food.x, y: data.food.y, type: data.food.type, pts: data.food.pts || 0, spawnTime: data.food.spawnTime || performance.now() } : null;
+                food2 = data.food2 ? { x: data.food2.x, y: data.food2.y, type: data.food2.type, pts: data.food2.pts || 0, spawnTime: data.food2.spawnTime || performance.now() } : null;
+                tickInterval = data.tickInterval || getEffectiveSpeed();
+                minFoodSpawnDist = (data.minFoodSpawnDist == null) ? null : data.minFoodSpawnDist;
+                comboCount = data.comboCount || 0;
+                lastComboMilestone = data.lastComboMilestone || 0;
+                lastEatTime = data.lastEatTime || 0;
+                speedBoostCounter = data.speedBoostCounter || 0;
+                obstacles = (data.obstacles || []).map(function (o) { return { x: o.x, y: o.y }; });
+                obstacleSpawnTimer = data.obstacleSpawnTimer || 0;
+                powerUpType = data.powerUpType || null;
+                powerUpTimer = data.powerUpTimer || 0;
+                powerUpSpawnCounter = data.powerUpSpawnCounter || 0;
+                powerUpDespawnCounter = data.powerUpDespawnCounter || 0;
+                powerUpPickup = data.powerUpPickup ? { x: data.powerUpPickup.x, y: data.powerUpPickup.y, type: data.powerUpPickup.type } : null;
+                shieldActive = !!data.shieldActive;
+                magnetActive = !!data.magnetActive;
+                slowMoActive = !!data.slowMoActive;
+                rivals = (data.rivals || []).map(function (r) { return { snake: (r.snake || []).map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: !!r.active, respawnTimer: r.respawnTimer || 0, color: r.color || '#FF4444' }; });
+                activeMutators = (data.activeMutators || []).slice();
+                activeBrews = (data.activeBrews || []).slice();
+                brewUsageFlags = Object.assign({}, data.brewUsageFlags || {});
+                evolutionTier = (data.evolutionTier == null) ? -1 : data.evolutionTier;
+                obstaclePassUsed = !!data.obstaclePassUsed;
+                gauntletWave = data.gauntletWave || 0;
+                gauntletScore = data.gauntletScore || 0;
+                gauntletPicks = (data.gauntletPicks || []).slice();
+                gauntletIntermission = !!data.gauntletIntermission;
+                gauntletWaveScore = data.gauntletWaveScore || 0;
+                gauntletSelection = data.gauntletSelection || 0;
+                gauntletPickOptions = (data.gauntletPickOptions || []).slice();
+                snapDuration = data.snapDuration || 3000;
+                snapLevel = data.snapLevel || 1;
+                snapTimeSinceDecrease = data.snapTimeSinceDecrease || 0;
+                shrinkTimer = data.shrinkTimer || 3000;
+                timeAttackEnd = data.timeAttackEnd || 0;
+                zenActive = !!data.zenActive;
+                paintGrid = data.paintGrid || null;
+                paintCoveredCount = data.paintCoveredCount || 0;
+                paintTotalTiles = data.paintTotalTiles || 0;
+                paintLayers = data.paintLayers || 1;
+                currentPaintColor = data.currentPaintColor || '#FF4444';
+                painterFoodEaten = data.painterFoodEaten || 0;
+                shrinkRows = data.shrinkRows || 0;
+                shrinkCols = data.shrinkCols || 0;
+                hungerStarted = !!data.hungerStarted;
+                hungerTickCounter = data.hungerTickCounter || 0;
+                chaosShuffleTick = data.chaosShuffleTick || 0;
+                chaosCurrentWeights = data.chaosCurrentWeights || null;
+                sessionFoodEaten = data.sessionFoodEaten || 0;
+                sessionFoodTypes = new Set(data.sessionFoodTypes || []);
+                sessionSpeedFood = data.sessionSpeedFood || 0;
+                sessionBonusFood = data.sessionBonusFood || 0;
+                sessionTimeAlive = data.sessionTimeAlive || 0;
+                sessionMaxCombo = data.sessionMaxCombo || 0;
+                sessionXP = data.sessionXP || 0;
+                sessionStartTime = data.sessionStartTime || Date.now();
+                sessionModeHighStart = data.sessionModeHighStart || 0;
+                sessionUsedShield = !!data.sessionUsedShield;
+                lastEatenType = data.lastEatenType || 'common';
+                replayEvents = (data.replayEvents || []).slice();
+
+                // Account for the offline gap as paused time so session
+                // time-alive stats are not inflated by however long the tab
+                // was closed. The gap runs from the last live moment (pause
+                // start if paused, else the save timestamp) to now.
+                var lastLive = data.sessionPauseStart || data.savedAt || Date.now();
+                sessionPausedTime = (data.sessionPausedTime || 0) + (Date.now() - lastLive);
+                sessionPauseStart = 0;
+
+                // Clean transient visual state (snapshot excludes it by design).
+                particles = [];
+                deathFragments = [];
+                deathFragmentsActive = false;
+                flashOverlay = null;
+                gameEffects.length = 0;
+                rAFEffects.length = 0;
+                shakeTimer = 0;
+                eatAnimTimer = 0;
+                snapLevelUpFlash = 0;
+                levelUpFlash = 0;
+                touchIndicatorTimer = 0;
+                newObstacleFlash = [];
+                newObstacleToastTimer = 0;
+                if (comboFadeTimer) { clearTimeout(comboFadeTimer); comboFadeTimer = null; }
+                pauseMenuSelection = 0;
+                pauseConfirmPending = false;
+                pauseConfirmAction = null;
+                helpOverlayVisible = false;
+                ghostPositions = [];
+
+                // Snapshot consumed — clear so it can't be double-restored.
+                clearSnapshot();
+
+                srSpeak('Run resumed.');
+                resumeGameLoop();
+                updateScoreDisplay();
+                updateMenuFooter();
+                drawGame(1);
+                visualDirty = true;
+                if (synesthesiaMode) startPad();
+                return true;
+            } catch (e) {
+                clearSnapshot();
+                return false;
+            }
+        }
+
+        // Restore from a #snapshot=<base64> URL hash. base64 wraps a
+        // URI-encoded JSON string: decodeURIComponent(atob(data)).
+        function restoreFromSnapshotHash(hashData) {
+            try {
+                var json = decodeURIComponent(atob(hashData));
+                var data = JSON.parse(json);
+                return restoreFromSnapshot(data);
+            } catch (e) {
+                clearSnapshot();
+                return false;
+            }
+        }
+
+        // Encode the current run state to a shareable URL hash string.
+        function encodeSnapshotHash() {
+            var snap = buildSnapshotObject();
+            if (!snap) return null;
+            try {
+                return 'snapshot=' + btoa(encodeURIComponent(JSON.stringify(snap)));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Clipboard share of the run state.
+        function copyRunState() {
+            var hash = encodeSnapshotHash();
+            if (!hash) { queueToast('No run to copy', 2000); return; }
+            var url = window.location.origin + window.location.pathname + '#' + hash;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(function () {
+                    queueToast('Run state copied to clipboard!', 2500);
+                }, function () { fallbackCopy(url); });
+            } else {
+                fallbackCopy(url);
+            }
+        }
+
+        // Pause-menu "Save & Quit": persist the run, then return to the title
+        // screen. The snapshot survives resetGame() (which does not touch it),
+        // so the "Resume Run" button lights up on the idle screen.
+        function saveAndQuit() {
+            if (!saveSnapshot()) {
+                queueToast('Could not save run', 2500);
+                return;
+            }
+            stopGameLoop();
+            sessionPauseStart = 0;
+            resetGame();
+            queueToast('\uD83D\uDCBE Run saved — Resume from title screen', 3000);
+        }
+
         function pickWeightedPattern() {
             const rand = seededRandom();
             let cumulative = 0;
@@ -2315,6 +2636,9 @@ const TRAIL_RENDER_CONFIG = {
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
+            // v7 E: run is finished — discard any saved snapshot so the idle
+            // "Resume Run" button doesn't offer a dead run.
+            clearSnapshot();
             if (shieldActive) sessionUsedShield = true;
             // v6: Cascade score multiplier
             if (activeMutators.length > 1) {
@@ -2395,6 +2719,7 @@ const TRAIL_RENDER_CONFIG = {
         function endZenSession() {
             stopGameLoop();
             gameState = 'gameover';
+            clearSnapshot();
             saveReplay(score, snake.length);
             updateMenuFooter();
             score = snake.length;
@@ -3213,6 +3538,13 @@ const TRAIL_RENDER_CONFIG = {
                         }
                     } catch(e) {}
                 }
+                // v7 E: Resume saved run
+                if (hasSnapshot()) {
+                    ctx.fillStyle = '#44AAFF';
+                    ctx.font = 'bold 16px Arial';
+                    ctx.fillText('\u25B6 Resume Run  (R)', CANVAS_WIDTH / 2, currentY);
+                    currentY += 20;
+                }
                 // v7: PWA install prompt
                 if (deferredInstallPrompt && !isStandalone) {
                     ctx.fillStyle = '#44FF44';
@@ -3255,6 +3587,7 @@ const TRAIL_RENDER_CONFIG = {
                     const menuItems = [
                         { label: '\u25B6 Resume', color: '#44FF44' },
                         { label: '\uD83D\uDD04 Restart', color: '#FFD700' },
+                        { label: '\uD83D\uDCBE Save & Quit', color: '#44AAFF' },
                         { label: '\u2302 Quit to Menu', color: '#FF4444' }
                     ];
                     for (let i = 0; i < menuItems.length; i++) {
@@ -3268,7 +3601,7 @@ const TRAIL_RENDER_CONFIG = {
 
                     ctx.font = '13px Arial';
                     ctx.fillStyle = '#666';
-                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 120);
+                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  C Copy Run  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 120);
                 }
                 ctx.restore();
                 ctx.restore();
@@ -5952,6 +6285,18 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
+            // v7 E: Resume saved run with 'R' on idle
+            if ((e.key === 'r' || e.key === 'R') && gameState === 'idle' && hasSnapshot()) {
+                var snap = saveManager.getJSON(SNAPSHOT_KEY, null);
+                if (snap) {
+                    if (restoreFromSnapshot(snap)) {
+                        drawGame(1);
+                        visualDirty = true;
+                    }
+                }
+                return;
+            }
+
             if (e.key === 'v' || e.key === 'V') {
                 highContrast = !highContrast;
                 saveManager.set('snake_high_contrast', highContrast ? '1' : '0');
@@ -6084,14 +6429,12 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState !== 'playing') {
                 if (gameState === 'paused') {
                     if (e.key === 'ArrowUp') {
-                        if (pauseConfirmPending) return;
-                        pauseMenuSelection = (pauseMenuSelection - 1 + 3) % 3;
+                        pauseMenuSelection = (pauseMenuSelection - 1 + 4) % 4;
                         drawGame(1);
                         return;
                     }
                     if (e.key === 'ArrowDown') {
-                        if (pauseConfirmPending) return;
-                        pauseMenuSelection = (pauseMenuSelection + 1) % 3;
+                        pauseMenuSelection = (pauseMenuSelection + 1) % 4;
                         drawGame(1);
                         return;
                     }
@@ -6126,10 +6469,20 @@ const TRAIL_RENDER_CONFIG = {
                             return;
                         }
                         if (pauseMenuSelection === 2) {
+                            saveAndQuit();
+                            return;
+                        }
+                        if (pauseMenuSelection === 3) {
                             pauseConfirmPending = true;
                             pauseConfirmAction = 'quit';
                             drawGame(1);
                             return;
+                        }
+                        return;
+                    }
+                    if (e.key === 'c' || e.key === 'C') {
+                        if (!pauseConfirmPending) {
+                            copyRunState();
                         }
                         return;
                     }
@@ -6254,16 +6607,32 @@ const TRAIL_RENDER_CONFIG = {
                 return;
               }
               const menuTopY = CANVAS_HEIGHT / 2 - 10;
-              for (let i = 0; i < 3; i++) {
+              for (let i = 0; i < 4; i++) {
                 const itemY = menuTopY + i * 40;
                 if (tapY >= itemY - 15 && tapY <= itemY + 20 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
                   if (i === 0) { resumeGame(); }
                   else if (i === 1) { pauseConfirmPending = true; pauseConfirmAction = 'restart'; drawGame(1); }
-                  else if (i === 2) { pauseConfirmPending = true; pauseConfirmAction = 'quit'; drawGame(1); }
+                  else if (i === 2) { saveAndQuit(); }
+                  else if (i === 3) { pauseConfirmPending = true; pauseConfirmAction = 'quit'; drawGame(1); }
                   return;
                 }
               }
-              return;
+            }
+            // v7 E: Resume Run tap on idle screen
+            if (gameState === 'idle' && hasSnapshot()) {
+              const rect = canvas.getBoundingClientRect();
+              const scaleY = CANVAS_HEIGHT / rect.height;
+              const tapY = (e.changedTouches[0].clientY - rect.top) * scaleY;
+              const tapX = (e.changedTouches[0].clientX - rect.left) * (CANVAS_WIDTH / rect.width);
+              // Resume Run line renders at ~currentY (CANVAS_HEIGHT - 95 + daily_offsets)
+              if (tapY >= CANVAS_HEIGHT - 120 && tapY <= CANVAS_HEIGHT - 55 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
+                var snap = saveManager.getJSON(SNAPSHOT_KEY, null);
+                if (snap && restoreFromSnapshot(snap)) {
+                  drawGame(1);
+                  visualDirty = true;
+                }
+                return;
+              }
             }
             // v7: PWA install tap on idle screen
             if (gameState === 'idle' && deferredInstallPrompt && !isStandalone) {
@@ -6338,20 +6707,37 @@ const TRAIL_RENDER_CONFIG = {
             closeAllPanels();
         });
 
+        // v7 E: Auto-save on tab close / navigation (pagehide for mobile iOS)
+        function autoSaveOnClose() {
+            if (gameState === 'playing' || gameState === 'paused') {
+                saveSnapshot();
+            }
+        }
+        window.addEventListener('beforeunload', autoSaveOnClose);
+        window.addEventListener('pagehide', autoSaveOnClose);
+
         syncDailyState();
         syncQuestState();
 
         window.addEventListener('load', function() {
             var hash = window.location.hash.slice(1);
             if (hash) {
-                challengeFromUrl = parseChallengeUrl(hash);
+                if (hash.startsWith('snapshot=')) {
+                    restoreFromSnapshotHash(hash.slice(9));
+                } else {
+                    challengeFromUrl = parseChallengeUrl(hash);
+                }
             }
         });
 
         window.addEventListener('hashchange', function() {
             if (gameState === 'idle') {
                 var hash = window.location.hash.slice(1);
-                challengeFromUrl = hash ? parseChallengeUrl(hash) : null;
+                if (hash && hash.startsWith('snapshot=')) {
+                    restoreFromSnapshotHash(hash.slice(9));
+                } else {
+                    challengeFromUrl = hash ? parseChallengeUrl(hash) : null;
+                }
                 visualDirty = true;
             }
         });
