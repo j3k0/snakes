@@ -207,3 +207,43 @@
 
 ## Canvas Save/Restore — New v8 Draw Functions
 - `drawRecapCard()` (gameover branch of the gameover overlay), the hunter paw-print shape (new `drawFood()` case), and the bounty countdown ring (in `animateVisuals`) all wrap in `ctx.save()`/`ctx.restore()` and draw shapes at the local origin where a transform applies. Follow the existing D1 discipline.
+
+
+## Save Data Export/Import (v9 A)
+- `exportSaveData()` / `importSaveData(file)` are bare-name module-scope functions (become `window.*` for `onclick`). Export collects all `snake_*` localStorage keys into a versioned JSON backup (`{ format: 'snakes-backup', version: 1, ... }`). Import overwrites localStorage with a confirm dialog. Import requires a page reload to take effect (module-scope `let`/`const` are already initialized from old values). Buttons live in `renderSettings()` inside the existing `#settingsPanel` — no new panel, no cross-hide contract impact.
+
+## Visibility-Safe Auto-Save (v9 B)
+- The `visibilitychange` handler calls `saveSnapshot()` BEFORE setting `gameState = 'paused'` on tab hidden. This closes the mobile data-loss gap where `beforeunload`/`pagehide` don't fire reliably on mobile Safari/Chrome. The snapshot is only restored on explicit user action (R key or tap "Resume Run").
+
+## Diary Seed Replay (v9 G)
+- `retrySeedFromDiary(seed)` mirrors the seedField input handler's hash computation (`seed.split('').reduce(...)` form, NOT the snapshot-restore `hashString` form). Sets `seedField.value`, `activeSeed`, `seedPrng`, calls `closeAllPanels()`, returns to idle. The button appears only when `entry.seed` is non-empty. No new state, no new DOM panel.
+
+## Combo Heat Aura (v9 C)
+- `comboHeatColor(combo)` returns a semi-transparent rgba tint for combo ≥ 3 (yellow → orange → red at 15+). Applied as a body fill overlay in `drawSnake()` after the main segment fill.
+- The head halo is a radial gradient drawn BEFORE the `snake.forEach` loop (z-order: halo bottom → body+evolution glow → shield aura top). Draws at ABSOLUTE head coords (like the shield aura), NOT at local origin. Alpha capped at 0.5; dimmed 50% when `shieldActive` so the shield remains the dominant head cue. Calm-mode gate: skip the pulse, keep the static tint.
+
+## Visual Feedback Pack (v9 F)
+- `transientRings[]` is a shared visual array (same pattern as `deathFragments`): delta-decayed in `animateVisuals`, capped at 50, reset in `resetGame()`/`resetWaveState()`. All pushes happen in the tick loop or event handlers (never from rAF). `pushTransientRing(x, y, maxRadius, color, maxLife, type, lineWidth)` is the helper.
+- **F1 Hunter Dust**: `moveHunter()` pushes a brown dust puff at the vacated cell. Calm-mode: skip. Determinism-safe: dust is pure visual (rAF-only), never affects snapshots/replays.
+- **F2 Bounty Ring Urgency**: the bounty countdown ring in `animateVisuals` oscillates radius + shifts to red when `ticksLeft < 0.3 * windowTicks`. Calm-mode gates ONLY the oscillation — the countdown arc (information) is NOT gated. Also suppressed during `hoardActive` (v9 E). Cash-in burst on bounty completion: `pushTransientRing` + `spawnParticles` at the head.
+- **F3 Power-Up Shockwave**: `activatePowerUp()` pushes a one-shot shockwave ring + particle burst at the head. Calm-mode: skip the ring, keep reduced particles.
+
+## Portal Food (v9 D)
+- `extraFoods[]` is a shared module-scope array for portal + hoard foods. Every food-touching site iterates it: eat-block (after primary `food` + `food2` checks), `moveHunter` rejection, magnet pull (skip portal, pull bonus), `drawFood` (at end, calls `drawExtraFood` per entry), snapshot serialization (additive field), `resetGame`/`resetWaveState` clear.
+- Epic food has `portal: true` in `FOOD_TIERS`. When an epic spawns (non-Walled only), `findPortalTile()` places a linked portal twin (min 10 tiles, wrap-aware per-axis distance) in `extraFoods[]`. Both foods get `portalLink` refs to each other.
+- **Eating the portal twin grants the epic's bonus** (score + XP + stats) AND removes the primary epic `food` (regenerates a new primary food). The snake is teleported Phoenix-style: `snake = [{exit.x, exit.y}]` then grows to min length 3. The exit is `snapToFreeTile()`-ed to avoid occupying snake/obstacle/rival.
+- **Eating the primary epic food** triggers the normal eat block, then `extraFoods = extraFoods.filter(ef => !ef.portalLink)` removes the portal twin.
+- `drawExtraFood()` draws portal foods as two concentric counter-rotating arcs (distinct from bonus pulse) with a prominent dashed purple connecting line + directional arrow. The label block wraps in `ctx.save()`/`ctx.restore()` per the sub-function leak rule.
+- Echo-brew `food2` coerces `food.type === 'portal'` to `'common'` (same as hunter). Magnet skips portal foods. `hasSeenPortal` flag gates a first-time toast (mirrors `snake_has_played` onboarding pattern).
+- The primary `generateFood` call includes `extraFoods` in the collision-check `currentSnake` parameter to prevent spawning on top of existing extra foods.
+
+## Golden Hoard Event (v9 E)
+- `hoardActive`/`hoardTimer`/`hoardTickCounter`/`scoreMultiplier` are module-scope state declared early (line ~204) so Feature F can reference `hoardActive` before E is implemented. Constants: `HOARD_INTERVAL = 5400` (~90s), `HOARD_DURATION = 900` (~15s). `hoardEnabled: true` in `MODE_CONFIG` for Classic, Time Attack, Daily, Snap only.
+- `activateHoard()` spawns 4 bonus foods into `extraFoods[]` via `generateHoardFood()` (direct placement, bypasses `generateFood`'s portal logic). Sets `scoreMultiplier = 2`, announces via `queueToast` + `queueGameEffect('flash')`.
+- `endHoard()` resets `scoreMultiplier = 1`, `hoardTickCounter = 0`. Uneaten hoard foods remain in `extraFoods[]` (they're still valid bonus foods).
+- **`scoreMultiplier` is inside `addScore()`** as a single outer multiplier: `score += Math.round(amount * multi * effectiveHoardMult)`. When `golden_food` mutator is active, the hoard multiplier is capped at 1.5 (Hoard + Golden Age = ×4.5 max, not ×6). Applies to ALL `addScore` calls (tier.pts, combustion, combo bonus, food2, bounty) — bounties are suppressed during hoard so bounty rewards don't fire.
+- **Rival freeze**: BOTH `updateRival()` AND the rival respawn-timer decrement are gated on `!hoardActive`. A dead rival stays dead for the hoard duration.
+- **Bounty suppression**: `tickBounty()` holds `bountyTickCounter` at 0 while `hoardActive` (no new bounties spawn). The urgency ring (F2) is also suppressed during hoard.
+- **Post-FX golden tint**: `drawPostFX()` adds a subtle gold tint (`rgba(255,215,0,0.06)`, or 0.03 in calm mode) when `hoardActive`.
+- **Snapshot**: `hoardActive`/`hoardTimer`/`hoardTickCounter`/`scoreMultiplier` are additive fields (no `SNAPSHOT_VERSION` bump). The 4 hoard foods are in `extraFoods[]` (snapshotted by D's infrastructure). Reset in `resetGame()` only (E is excluded from Gauntlet, so `resetWaveState()` is not needed).
+- **No session-end hook** — the event dies with the run, like bounty.

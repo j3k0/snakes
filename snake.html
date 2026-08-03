@@ -199,6 +199,10 @@
         let snake = [];
         let food = {};
         var food2 = null; // v6: Echo Brew duplicate food
+        let extraFoods = []; // v9 D: shared array for portal + hoard foods
+        let transientRings = []; // v9 F: shared visual rings (hunter dust, bounty burst, power-up shockwave)
+        let hoardActive = false; // v9 E: Golden Hoard event state (declared here so F can reference it before E)
+        let scoreMultiplier = 1; // v9 E: hoard score multiplier (declared here for same reason)
         let dx = 0;
         let dy = 0;
         let score = 0;
@@ -455,7 +459,8 @@
                 count++;
                 var dateStr = entry.date ? new Date(entry.date).toLocaleDateString() : '?';
                 var timeStr = formatDuration(entry.duration);
-                html += '<div class="diary-entry" onclick="toggleDiaryDetail(' + entry.id + ')"><div class="diary-summary"><span class="diary-mode">' + (entry.mode || '?') + '</span><span class="diary-score">' + (entry.score || 0) + '</span><span class="diary-time">' + timeStr + '</span><span class="diary-date">' + dateStr + '</span></div><div id="diary-detail-' + entry.id + '" class="diary-detail" style="display:none;"><div class="diary-stats"><span>Food: ' + (entry.foodEaten || 0) + '</span><span>Combo: ' + (entry.maxCombo || 0) + 'x</span><span>Level: ' + (entry.level || 0) + '</span><span>Prestige: ' + (entry.prestigeLevel || 0) + '</span><span>Death: ' + (entry.deathCause || '?') + '</span><span>Mutators: ' + (entry.mutators && entry.mutators.length ? entry.mutators.join(', ') : 'none') + '</span><span>Brews: ' + (entry.brews && entry.brews.length ? entry.brews.join(', ') : 'none') + '</span></div><button onclick="deleteDiaryEntry(' + entry.id + ')" class="diary-delete">Delete</button></div></div>';
+                var seedBtn = entry.seed ? '<button onclick="event.stopPropagation();retrySeedFromDiary(\'' + entry.seed.replace(/'/g, "\\'") + '\')" style="margin-top:8px;padding:6px 14px;border-radius:6px;border:1px solid #88AAFF;background:rgba(136,170,255,0.15);color:#88AAFF;cursor:pointer;font-size:12px;touch-action:manipulation;">↻ Retry Seed</button>' : '';
+                html += '<div class="diary-entry" onclick="toggleDiaryDetail(' + entry.id + ')"><div class="diary-summary"><span class="diary-mode">' + (entry.mode || '?') + '</span><span class="diary-score">' + (entry.score || 0) + '</span><span class="diary-time">' + timeStr + '</span><span class="diary-date">' + dateStr + '</span></div><div id="diary-detail-' + entry.id + '" class="diary-detail" style="display:none;"><div class="diary-stats"><span>Food: ' + (entry.foodEaten || 0) + '</span><span>Combo: ' + (entry.maxCombo || 0) + 'x</span><span>Level: ' + (entry.level || 0) + '</span><span>Prestige: ' + (entry.prestigeLevel || 0) + '</span><span>Death: ' + (entry.deathCause || '?') + '</span><span>Mutators: ' + (entry.mutators && entry.mutators.length ? entry.mutators.join(', ') : 'none') + '</span><span>Brews: ' + (entry.brews && entry.brews.length ? entry.brews.join(', ') : 'none') + '</span></div>' + seedBtn + '<button onclick="deleteDiaryEntry(' + entry.id + ')" class="diary-delete">Delete</button></div></div>';
             }
             list.innerHTML = html || '<p style="text-align:center;color:#888;padding:20px;">No entries yet. Play some games!</p>';
         }
@@ -471,6 +476,20 @@
             diary = diary.filter(function(e) { return e.id !== id; });
             saveManager.setJSON('snake_diary', diary);
             renderDiary();
+        }
+        // v9 G: Retry Seed from Diary — mirrors the seedField input handler's hash computation
+        function retrySeedFromDiary(seed) {
+            if (!seed) return;
+            var field = document.getElementById('seedField');
+            if (field) field.value = seed;
+            activeSeed = seed;
+            var hash = seed.split('').reduce(function(h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0);
+            seedPrng = mulberry32(hash);
+            closeAllPanels();
+            gameState = 'idle';
+            drawGame(1);
+            updateMenuFooter();
+            queueToast('Seed loaded: ' + seed, 2000);
         }
 
         function showDiaryPanel() {
@@ -635,6 +654,7 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let helpOverlayVisible = false;
         let resumeRunTextY = CANVAS_HEIGHT - 95; // v7 E: capture position for tap band
         let welcomeOverlay = !saveManager.get('snake_has_played', '');
+        let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let lastDeathCause = '';
         let lastComboMilestone = 0;
         // v7: Evolution System per-run state (reset in resetGame / resetWaveState)
@@ -1126,11 +1146,11 @@ let padChangeTick = 0;
         const MODE_CONFIG = {
             classic: {
                 name:'Classic', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             timeAttack: {
                 name:'Time Attack', speed:80, selfCollision:true, wallDeath:false, wrap:true,
-                timer:60000, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:60000, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             zen: {
                 name:'Zen', speed:150, selfCollision:false, wallDeath:false, wrap:true,
@@ -1138,11 +1158,11 @@ let padChangeTick = 0;
             },
             daily: {
                 name:'Daily Challenge', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             snap: {
                 name:'Snap', speed:90, selfCollision:true, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             walled: {
                 name:'Walled', speed:'dynamic', selfCollision:true, wallDeath:true, wrap:false,
@@ -1164,7 +1184,7 @@ let padChangeTick = 0;
             common:   { pts: 10, xp: 25, weight: 0.37, color: '#FF4444', pCount: 8,  sound: 'eat' },
             uncommon: { pts: 15, xp: 30, weight: 0.25, color: '#4488FF', pCount: 10, sound: 'eat' },
             rare:     { pts: 20, xp: 40, weight: 0.12, color: '#44FF44', pCount: 14, sound: 'eat', glow: 8 },
-            epic:     { pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14 },
+            epic:     { pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14, portal: true },
             bonus:    { pts: 30, xp: 60, weight: 0.13, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
             speed:    { pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed' },
             // v8 E: hunter — fleeing prey, moves every 3 ticks away from the head.
@@ -1557,6 +1577,7 @@ const TRAIL_RENDER_CONFIG = {
                 toggle('Grid Lines', gridVisible, 'toggleGridVisible()', 'toggleGridVisible()') +
                 slider('Shake Intensity', shakeIntensity, 'setShakeIntensity(this.value)') +
                 slider('Particle Density', particleDensity, 'setParticleDensity(this.value)') +
+                '<div style="padding:14px 0;border-bottom:1px solid #333;"><div style="font-size:13px;margin-bottom:8px;">Data Backup</div><div style="display:flex;gap:8px;"><button onclick="exportSaveData()" style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;touch-action:manipulation;">⬇ Export</button><label style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;text-align:center;touch-action:manipulation;"><input type="file" accept=".json" style="display:none;" onchange="importSaveData(this.files[0])">⬆ Import</label></div></div>' +
                 '<div style="text-align:center;color:#666;font-size:11px;margin-top:14px;">Settings apply instantly. Press S or ✕ to close.</div>';
         }
         function showSettingsPanel() {
@@ -1584,6 +1605,43 @@ const TRAIL_RENDER_CONFIG = {
         function setShakeIntensity(v) { shakeIntensity = parseInt(v, 10) || 0; saveManager.set('snake_shake_intensity', shakeIntensity); }
         function setParticleDensity(v) { particleDensity = parseInt(v, 10) || 0; saveManager.set('snake_particle_density', particleDensity); }
         // --- end v8 Feature C ---
+        // v9 A: Save Data Export/Import — download/restore all snake_* localStorage keys.
+        function exportSaveData() {
+            var keys = {};
+            try {
+                Object.keys(localStorage).filter(function(k) { return k.indexOf('snake_') === 0; }).forEach(function(k) { keys[k] = localStorage.getItem(k); });
+            } catch (e) { queueToast('Export failed: ' + e.message, 2000); return; }
+            var data = { format: 'snakes-backup', version: 1, exportedAt: new Date().toISOString(), keys: keys };
+            var blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'snakes-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            queueToast('Backup exported!', 2000);
+        }
+        function importSaveData(file) {
+            if (!file) return;
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    var data = JSON.parse(e.target.result);
+                    if (!data || data.format !== 'snakes-backup' || data.version !== 1) {
+                        queueToast('Invalid backup file', 2000);
+                        return;
+                    }
+                    if (!confirm('Importing will overwrite all current save data. Continue?')) return;
+                    Object.keys(data.keys).forEach(function(k) { localStorage.setItem(k, data.keys[k]); });
+                    queueToast('Backup imported! Reload to apply.', 3000);
+                } catch (err) {
+                    queueToast('Import failed: ' + err.message, 2000);
+                }
+            };
+            reader.readAsText(file);
+        }
 
         let gameMode = 'classic';
         let modeSelectIndex = 0;
@@ -1651,7 +1709,12 @@ const TRAIL_RENDER_CONFIG = {
             if (activeMutators.indexOf('golden_food') !== -1) {
                 amount = Math.round(amount * 3);
             }
-            score += Math.round(amount * multi);
+            // v9 E: hoard scoreMultiplier (cap with golden_food to prevent ×6 trivialization)
+            var effectiveHoardMult = scoreMultiplier;
+            if (activeMutators.indexOf('golden_food') !== -1 && scoreMultiplier > 1) {
+                effectiveHoardMult = Math.min(scoreMultiplier, 1.5); // Hoard + Golden Age = ×4.5 max
+            }
+            score += Math.round(amount * multi * effectiveHoardMult);
             updateScoreDisplay();
         }
 
@@ -1707,6 +1770,8 @@ const TRAIL_RENDER_CONFIG = {
                 if (rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === c.x && s.y === c.y; }); })) continue;
                 if (food2 && food2.x === c.x && food2.y === c.y) continue;
                 if (powerUpPickup && powerUpPickup.x === c.x && powerUpPickup.y === c.y) continue;
+                // v9 D: reject extraFoods[] tiles (portal + hoard foods)
+                if (extraFoods.some(function(ef) { return ef.x === c.x && ef.y === c.y; })) continue;
                 // Wrap-aware Manhattan distance from head (PLAY dims, not CANVAS).
                 var ddx = c.x - head.x, ddy = c.y - head.y;
                 if (ddx > PLAY_WIDTH / 2) ddx -= PLAY_WIDTH; else if (ddx < -PLAY_WIDTH / 2) ddx += PLAY_WIDTH;
@@ -1716,7 +1781,11 @@ const TRAIL_RENDER_CONFIG = {
                 var score = dist + seededRandom() * 0.5;
                 if (score > bestScore) { bestScore = score; best = c; }
             }
-            if (best) { food.x = best.x; food.y = best.y; food.spawnTime = performance.now(); }
+            if (best) {
+                // v9 F1: dust trail at the vacated cell (calm-mode: skip)
+                if (!calmModeEffective()) pushTransientRing(food.x + TILE_SIZE / 2, food.y + TILE_SIZE / 2, 6, '#8B7355', 300, 'dust');
+                food.x = best.x; food.y = best.y; food.spawnTime = performance.now();
+            }
         }
 
         function generateFood(currentSnake) {
@@ -1763,7 +1832,68 @@ const TRAIL_RENDER_CONFIG = {
                      (minFoodSpawnDist !== null && currentSnake.length > 0 &&
                       Math.abs(newFood.x - currentSnake[0].x) + Math.abs(newFood.y - currentSnake[0].y) > Math.max(1, minFoodSpawnDist - ((evolutionTier >= 2) ? EVOLUTION_TIERS[2].foodProximity : 0)) * TILE_SIZE));
             if (newFood.type === 'rare' || newFood.type === 'epic') playSound('rare_spawn');
+            // v9 D: epic food spawns a linked portal twin in extraFoods[] (non-Walled only)
+            if (newFood && FOOD_TIERS[newFood.type] && FOOD_TIERS[newFood.type].portal && MODE_CONFIG[gameMode].wrap !== false) {
+                var portalFood = findPortalTile(newFood, currentSnake);
+                if (portalFood) {
+                    portalFood.type = 'portal';
+                    portalFood.spawnTime = performance.now();
+                    portalFood.portalLink = { x: newFood.x, y: newFood.y };
+                    newFood.portalLink = { x: portalFood.x, y: portalFood.y };
+                    extraFoods.push(portalFood);
+                    if (!hasSeenPortal) {
+                        hasSeenPortal = true;
+                        saveManager.set('snake_has_seen_portal', '1');
+                        queueToast('🌀 Portal food! Eat to teleport to its twin.', 3000);
+                    }
+                }
+            }
             return newFood;
+        }
+
+        // v9 D: find a distant free tile for the portal twin (min 10 tiles, wrap-aware distance)
+        function findPortalTile(epicFood, currentSnake) {
+            var cols = PLAY_WIDTH / TILE_SIZE;
+            var rows = PLAY_HEIGHT / TILE_SIZE;
+            var minDist = 10 * TILE_SIZE;
+            var candidates = [];
+            for (var x = 0; x < cols; x++) {
+                for (var y = 0; y < rows; y++) {
+                    var tx = x * TILE_SIZE, ty = y * TILE_SIZE;
+                    if (currentSnake.some(function(s) { return s.x === tx && s.y === ty; })) continue;
+                    if (obstacles.some(function(o) { return o.x === tx && o.y === ty; })) continue;
+                    if (food && food.x === tx && food.y === ty) continue;
+                    if (food2 && food2.x === tx && food2.y === ty) continue;
+                    if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
+                    if (extraFoods.some(function(ef) { return ef.x === tx && ef.y === ty; })) continue;
+                    // Wrap-aware per-axis distance
+                    var ddx = tx - epicFood.x, ddy = ty - epicFood.y;
+                    if (ddx > PLAY_WIDTH / 2) ddx -= PLAY_WIDTH; else if (ddx < -PLAY_WIDTH / 2) ddx += PLAY_WIDTH;
+                    if (ddy > PLAY_HEIGHT / 2) ddy -= PLAY_HEIGHT; else if (ddy < -PLAY_HEIGHT / 2) ddy += PLAY_HEIGHT;
+                    var d = Math.abs(ddx) + Math.abs(ddy);
+                    if (d >= minDist) candidates.push({ x: tx, y: ty });
+                }
+            }
+            if (candidates.length === 0) return null;
+            return candidates[Math.floor(seededRandom() * candidates.length)];
+        }
+        // v9 D: snap a teleport destination to the nearest free tile if occupied
+        function snapToFreeTile(x, y) {
+            if (!snake.some(function(s) { return s.x === x && s.y === y; }) &&
+                !obstacles.some(function(o) { return o.x === x && o.y === y; }) &&
+                !rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === x && s.y === y; }); })) {
+                return { x: x, y: y };
+            }
+            var neighbors = [{x:x+TILE_SIZE,y:y},{x:x-TILE_SIZE,y:y},{x:x,y:y+TILE_SIZE},{x:x,y:y-TILE_SIZE}];
+            for (var i = 0; i < neighbors.length; i++) {
+                var n = wrapPosition(neighbors[i]);
+                if (!snake.some(function(s) { return s.x === n.x && s.y === n.y; }) &&
+                    !obstacles.some(function(o) { return o.x === n.x && o.y === n.y; }) &&
+                    !rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === n.x && s.y === n.y; }); })) {
+                    return n;
+                }
+            }
+            return { x: x, y: y };
         }
 
         function spawnPowerUpPickup() {
@@ -1808,6 +1938,11 @@ const TRAIL_RENDER_CONFIG = {
                     tickInterval = getEffectiveSpeed();
                     restartGameTimeout();
                     break;
+            }
+            // v9 F3: activation shockwave at the head
+            if (snake.length > 0) {
+                pushTransientRing(snake[0].x + TILE_SIZE / 2, snake[0].y + TILE_SIZE / 2, 25, config.color || '#FFFFFF', 500, 'ring', 3);
+                if (!calmModeEffective()) spawnParticles(snake[0].x, snake[0].y, 12, config.color || '#FFFFFF');
             }
             
             const el = toastEl;
@@ -1938,6 +2073,9 @@ const TRAIL_RENDER_CONFIG = {
              const combinedInitial = snake.concat(rivalCombinedSnake());
             food = generateFood(combinedInitial);
             food2 = null; // v6: Echo Brew duplicate food
+            extraFoods = []; // v9 D: clear portal + hoard foods
+            transientRings = []; // v9 F: clear visual rings
+            hoardActive = false; hoardTimer = 0; hoardTickCounter = 0; scoreMultiplier = 1; // v9 E: clear hoard state
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -2278,6 +2416,7 @@ const TRAIL_RENDER_CONFIG = {
                 nextDirection: nextDirection,
                 food: food ? { x: food.x, y: food.y, type: food.type, pts: food.pts || 0, spawnTime: food.spawnTime || 0 } : null,
                 food2: food2 ? { x: food2.x, y: food2.y, type: food2.type, pts: food2.pts || 0, spawnTime: food2.spawnTime || 0 } : null,
+                extraFoods: extraFoods.map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: ef.spawnTime || 0, portalLink: ef.portalLink || null }; }),
                 tickInterval: tickInterval,
                 minFoodSpawnDist: minFoodSpawnDist,
                 // Combo
@@ -2348,6 +2487,11 @@ const TRAIL_RENDER_CONFIG = {
                 // v8 F: bounty state (additive — no SNAPSHOT_VERSION bump).
                 activeBounty: activeBounty,
                 bountyTickCounter: bountyTickCounter,
+                // v9 E: hoard state (additive — no SNAPSHOT_VERSION bump).
+                hoardActive: hoardActive,
+                hoardTimer: hoardTimer,
+                hoardTickCounter: hoardTickCounter,
+                scoreMultiplier: scoreMultiplier,
                 // Replay
                 replayEvents: replayEvents.slice(),
                 sessionStartTime: sessionStartTime,
@@ -2416,6 +2560,7 @@ const TRAIL_RENDER_CONFIG = {
                 nextDirection = data.nextDirection || null;
                 food = data.food ? { x: data.food.x, y: data.food.y, type: data.food.type, pts: data.food.pts || 0, spawnTime: performance.now() } : null;
                 food2 = data.food2 ? { x: data.food2.x, y: data.food2.y, type: data.food2.type, pts: data.food2.pts || 0, spawnTime: performance.now() } : null;
+                extraFoods = (data.extraFoods || []).map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: performance.now(), portalLink: ef.portalLink || null }; });
                 tickInterval = (data.tickInterval == null) ? getEffectiveSpeed() : data.tickInterval;
                 minFoodSpawnDist = (data.minFoodSpawnDist == null) ? null : data.minFoodSpawnDist;
                 comboCount = data.comboCount || 0;
@@ -2477,11 +2622,17 @@ const TRAIL_RENDER_CONFIG = {
                 // v8 F: bounty state — additive (missing => no active bounty).
                 activeBounty = data.activeBounty || null;
                 bountyTickCounter = data.bountyTickCounter || 0;
+                // v9 E: hoard state — additive (missing => no active hoard).
+                hoardActive = !!data.hoardActive;
+                hoardTimer = data.hoardTimer || 0;
+                hoardTickCounter = data.hoardTickCounter || 0;
+                scoreMultiplier = data.scoreMultiplier || 1;
 
                 sessionPausedTime = (data.sessionPausedTime || 0) + offlineGap;
                 sessionPauseStart = 0;
                 // Clean transient visual state (snapshot excludes it by design).
                 particles = [];
+                transientRings = []; // v9 F: clear visual rings on restore
                 deathFragments = [];
                 deathFragmentsActive = false;
                 flashOverlay = null;
@@ -3068,12 +3219,17 @@ const TRAIL_RENDER_CONFIG = {
                 if (b.reward.xp) awardXP(b.reward.xp);
                 queueGameEffect('flash', { color: '#FFD700', alpha: 0.4, priority: 'high' });
                 queueToast('✅ Bounty complete! +' + (b.reward.pts || b.reward.xp) + (b.reward.pts ? ' pts' : ' XP'), 2500);
+                // v9 F2: cash-in burst at the head
+                if (snake.length > 0) {
+                    pushTransientRing(snake[0].x + TILE_SIZE / 2, snake[0].y + TILE_SIZE / 2, 20, '#FFD700', 400, 'ring', 3);
+                    spawnParticles(snake[0].x, snake[0].y, calmModeEffective() ? 6 : 15, '#FFD700');
+                }
                 activeBounty = null;
             }
         }
         function tickBounty() {
             if (!activeBounty) {
-                bountyTickCounter++;
+                if (!hoardActive) bountyTickCounter++; // v9 E: suppress bounty spawns during hoard
                 if (bountyTickCounter >= BOUNTY_INTERVAL && gameState === 'playing') {
                     spawnBounty();
                     bountyTickCounter = 0;
@@ -3088,6 +3244,46 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
             checkBounty();
+        }
+        // v9 E: Golden Hoard Event — periodic food bonanza with 2x score + rival freeze.
+        const HOARD_INTERVAL = 5400; // ~90s at 60ms tick
+        const HOARD_DURATION = 900;  // ~15s
+        let hoardTimer = 0;
+        let hoardTickCounter = 0;
+        function activateHoard() {
+            hoardActive = true;
+            hoardTimer = HOARD_DURATION;
+            scoreMultiplier = 2;
+            // Spawn 4 bonus foods into extraFoods[] (bypass portal logic — direct placement)
+            for (var i = 0; i < 4; i++) {
+                var combined = snake.concat(rivalCombinedSnake()).concat(extraFoods);
+                var hf = generateHoardFood(combined);
+                if (hf) extraFoods.push(hf);
+            }
+            queueToast('\u26A1 Golden Hoard! 2x score!', 3000);
+            queueGameEffect('flash', { color: '#FFD700', alpha: 0.3, priority: 'normal' });
+        }
+        function endHoard() {
+            hoardActive = false;
+            scoreMultiplier = 1;
+            hoardTickCounter = 0;
+            queueToast('Hoard ended', 1500);
+        }
+        // v9 E: place a bonus food directly (bypasses generateFood's portal logic)
+        function generateHoardFood(currentSnake) {
+            var cols = PLAY_WIDTH / TILE_SIZE;
+            var rows = PLAY_HEIGHT / TILE_SIZE;
+            for (var attempt = 0; attempt < 50; attempt++) {
+                var tx = Math.floor(seededRandom() * cols) * TILE_SIZE;
+                var ty = Math.floor(seededRandom() * rows) * TILE_SIZE;
+                if (currentSnake.some(function(s) { return s.x === tx && s.y === ty; })) continue;
+                if (obstacles.some(function(o) { return o.x === tx && o.y === ty; })) continue;
+                if (food && food.x === tx && food.y === ty) continue;
+                if (food2 && food2.x === tx && food2.y === ty) continue;
+                if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
+                return { x: tx, y: ty, type: 'bonus', spawnTime: performance.now() };
+            }
+            return null;
         }
 
         function playSound(name) {
@@ -3447,6 +3643,12 @@ const TRAIL_RENDER_CONFIG = {
                 });
             }
         }
+        // v9 F: Transient rings — shared visual ring/puff array (hunter dust, bounty burst, power-up shockwave).
+        // Drained in animateVisuals with delta time; capped at 50; reset in resetGame/resetWaveState.
+        function pushTransientRing(x, y, maxRadius, color, maxLife, type, lineWidth) {
+            if (transientRings.length >= 50) transientRings.shift();
+            transientRings.push({ x: x, y: y, maxRadius: maxRadius, alpha: 0.8, color: color, life: maxLife, maxLife: maxLife, type: type || 'ring', lineWidth: lineWidth || 2 });
+        }
 
         function drawHelpOverlay() {
             ctx.save();
@@ -3708,6 +3910,33 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.restore(); // restores globalAlpha, compositeOp, shadowBlur, shadowColor
                 if (deathFragments.length === 0) deathFragmentsActive = false;
             }
+            // v9 F: Transient rings (hunter dust, bounty burst, power-up shockwave)
+            if (transientRings.length > 0) {
+                ctx.save();
+                for (var tri = transientRings.length - 1; tri >= 0; tri--) {
+                    var tr = transientRings[tri];
+                    tr.life -= delta;
+                    if (tr.life <= 0) { transientRings.splice(tri, 1); continue; }
+                    var lifeFrac = tr.life / tr.maxLife;
+                    var r = tr.maxRadius * (1 - lifeFrac);
+                    var a = lifeFrac * tr.alpha;
+                    ctx.globalAlpha = a;
+                    ctx.strokeStyle = tr.color;
+                    ctx.lineWidth = tr.lineWidth || 2;
+                    if (tr.type === 'dust') {
+                        ctx.fillStyle = tr.color;
+                        ctx.globalAlpha = a * 0.5;
+                        ctx.beginPath();
+                        ctx.arc(tr.x, tr.y, r * 0.5, 0, 2 * Math.PI);
+                        ctx.fill();
+                    } else {
+                        ctx.beginPath();
+                        ctx.arc(tr.x, tr.y, r, 0, 2 * Math.PI);
+                        ctx.stroke();
+                    }
+                }
+                ctx.restore();
+            }
 
             // v6: Render floaters on top of particles
             if (floaters.length > 0) drawFloaters(ctx);
@@ -3744,15 +3973,19 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.save();
                 var ringX = CANVAS_WIDTH / 2, ringY = 38, ringR = 14;
                 var frac = Math.max(0, activeBounty.ticksLeft / activeBounty.windowTicks);
+                // v9 F2: urgency pulse when time is running low (calm-mode: skip oscillation, keep arc)
+                var urgencyActive = frac < 0.3 && !calmModeEffective() && !hoardActive;
+                var ringR_eff = urgencyActive ? ringR + Math.sin(renderTime * 0.01) * 3 : ringR;
+                var ringColor = urgencyActive ? '#FF4444' : (frac > 0.3 ? '#FFD700' : '#FF6B35');
                 ctx.strokeStyle = '#333';
                 ctx.lineWidth = 3;
                 ctx.beginPath();
-                ctx.arc(ringX, ringY, ringR, 0, 2 * Math.PI);
+                ctx.arc(ringX, ringY, ringR_eff, 0, 2 * Math.PI);
                 ctx.stroke();
-                ctx.strokeStyle = frac > 0.3 ? '#FFD700' : '#FF6B35';
+                ctx.strokeStyle = ringColor;
                 ctx.lineWidth = 3;
                 ctx.beginPath();
-                ctx.arc(ringX, ringY, ringR, -Math.PI / 2, -Math.PI / 2 + frac * 2 * Math.PI);
+                ctx.arc(ringX, ringY, ringR_eff, -Math.PI / 2, -Math.PI / 2 + frac * 2 * Math.PI);
                 ctx.stroke();
                 ctx.font = 'bold 9px Arial';
                 ctx.fillStyle = '#FFD700';
@@ -4278,6 +4511,87 @@ const TRAIL_RENDER_CONFIG = {
             }
             
             ctx.restore();
+            // v9 D: draw extraFoods[] (portal + hoard foods) at end of drawFood
+            for (var efdi = 0; efdi < extraFoods.length; efdi++) {
+                drawExtraFood(extraFoods[efdi]);
+            }
+        }
+        // v9 D: draw extraFoods[] (portal + hoard foods) — called from drawFood after primary food/food2
+        function drawExtraFood(ef) {
+            var cx = ef.x + TILE_SIZE / 2;
+            var cy = ef.y + TILE_SIZE / 2;
+            var calm = calmModeEffective();
+            var spawnElapsed = performance.now() - (ef.spawnTime || 0);
+            var spawnScale = calm ? 1 : (spawnElapsed < 250 ? Math.max(0, easeOutBack(spawnElapsed / 250)) : 1);
+            // Portal connecting line (prominent, dashed, calm-safe)
+            if (ef.type === 'portal' && ef.portalLink) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(170,68,255,0.4)';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(ef.portalLink.x + TILE_SIZE / 2, ef.portalLink.y + TILE_SIZE / 2);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+            ctx.save();
+            ctx.translate(cx, cy);
+            if (ef.type === 'portal') {
+                // Two concentric counter-rotating arcs (distinct from bonus pulse)
+                var totalScale = spawnScale;
+                ctx.scale(totalScale, totalScale);
+                ctx.strokeStyle = '#AA44FF';
+                ctx.lineWidth = 2;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#AA44FF';
+                ctx.beginPath();
+                ctx.arc(0, 0, TILE_SIZE * 0.35, renderTime * 0.003, renderTime * 0.003 + Math.PI * 1.5);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(0, 0, TILE_SIZE * 0.25, -renderTime * 0.004, -renderTime * 0.004 + Math.PI * 1.5);
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                // Directional arrow toward the twin
+                if (ef.portalLink) {
+                    var adx = ef.portalLink.x - ef.x, ady = ef.portalLink.y - ef.y;
+                    if (Math.abs(adx) > PLAY_WIDTH / 2) adx = adx > 0 ? adx - PLAY_WIDTH : adx + PLAY_WIDTH;
+                    if (Math.abs(ady) > PLAY_HEIGHT / 2) ady = ady > 0 ? ady - PLAY_HEIGHT : ady + PLAY_HEIGHT;
+                    var angle = Math.atan2(ady, adx);
+                    ctx.rotate(angle);
+                    ctx.fillStyle = '#CC88FF';
+                    ctx.beginPath();
+                    ctx.moveTo(TILE_SIZE * 0.45, 0);
+                    ctx.lineTo(TILE_SIZE * 0.3, -3);
+                    ctx.lineTo(TILE_SIZE * 0.3, 3);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.rotate(-angle);
+                }
+            } else {
+                // Hoard bonus food: reuse the bonus visual (single pulsing circle)
+                var pulse = calm ? 1 : (1 + 0.5 * Math.sin(renderTime / 200));
+                var totalScale2 = spawnScale * pulse;
+                ctx.scale(totalScale2, totalScale2);
+                ctx.fillStyle = FOOD_TIERS.bonus.color;
+                ctx.shadowBlur = FOOD_TIERS.bonus.glow || 0;
+                ctx.shadowColor = FOOD_TIERS.bonus.color;
+                ctx.beginPath();
+                ctx.arc(0, 0, TILE_SIZE * 0.3, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+            ctx.restore();
+            // Label after restore (wrapped in save/restore per AGENTS.md sub-function leak rule)
+            ctx.save();
+            ctx.fillStyle = '#FFF';
+            ctx.font = 'bold 9px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            if (ef.type === 'portal') ctx.fillText('P', cx, cy);
+            else ctx.fillText('\u2605', cx, cy);
+            ctx.restore();
         }
 
         function drawEyes(drawX, drawY, dx, dy, scleraColor, pupilColor) {
@@ -4302,6 +4616,13 @@ const TRAIL_RENDER_CONFIG = {
             ctx.beginPath(); ctx.arc(ex1, ey1, 2, 0, 2 * Math.PI); ctx.fill();
             ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
         }
+        // v9 C: Combo Heat Aura — body tint + head halo that warms with comboCount.
+        function comboHeatColor(combo) {
+            if (combo < 3) return null;
+            if (combo < 7) { var t = (combo - 3) / 4; return 'rgba(255,' + Math.round(255 - t * 100) + ',' + Math.round(255 - t * 200) + ',0.15)'; }
+            if (combo < 15) { var t2 = (combo - 7) / 8; return 'rgba(255,' + Math.round(155 - t2 * 100) + ',' + Math.round(55 - t2 * 55) + ',0.2)'; }
+            return 'rgba(255,55,0,0.25)';
+        }
 
         function drawSnake(t) {
             const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
@@ -4318,6 +4639,25 @@ const TRAIL_RENDER_CONFIG = {
             var evoGlowColor = evo ? (evo.color === 'rainbow' ? '#FF44FF' : evo.color) : null;
             var evoWavy = (evoTier === 1);                  // Serpentine: sine-wave body
             let headDrawX = 0, headDrawY = 0;
+            // v9 C: Combo Heat halo — drawn before the body so the body covers the center.
+            // Z-order: halo (bottom) → body+evolution glow → shield aura (top). Alpha capped
+            // so it never occludes the evolution glow; dimmed 50% when shield is active.
+            if (comboCount >= 3 && snake.length > 0) {
+                var comboFrac = Math.min(1, comboCount / 15);
+                var haloAlpha = (0.3 + 0.2 * comboFrac) * (shieldActive ? 0.5 : 1);
+                var pulseR = calmModeEffective() ? TILE_SIZE * 0.6 : (TILE_SIZE * 0.6 + Math.sin(renderTime * (0.005 + comboFrac * 0.01)) * 3);
+                var hcx = snake[0].x + TILE_SIZE / 2;
+                var hcy = snake[0].y + TILE_SIZE / 2;
+                ctx.save();
+                ctx.globalAlpha = haloAlpha;
+                var haloColor = comboCount >= 15 ? '#FF4400' : comboCount >= 7 ? '#FF8800' : '#FFCC00';
+                var grad = ctx.createRadialGradient(hcx, hcy, 0, hcx, hcy, pulseR);
+                grad.addColorStop(0, haloColor);
+                grad.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(hcx - pulseR, hcy - pulseR, pulseR * 2, pulseR * 2);
+                ctx.restore();
+            }
             snake.forEach(function(segment, index) {
                 let drawX, drawY;
                 
@@ -4394,6 +4734,12 @@ const TRAIL_RENDER_CONFIG = {
                     const offset = Math.round((segSize - size) / 2);
                     ctx.fillRect(drawX + segPad + offset, drawY + segPad + offset, size, size);
                 } else {
+                    ctx.fillRect(drawX + segPad, drawY + segPad + wavyY, segSize, segSize);
+                }
+                // v9 C: Combo Heat body tint — semi-transparent overlay warming with comboCount
+                var heatColor = comboHeatColor(comboCount);
+                if (heatColor && index > 0) {
+                    ctx.fillStyle = heatColor;
                     ctx.fillRect(drawX + segPad, drawY + segPad + wavyY, segSize, segSize);
                 }
                 if (evoGlow > 0) ctx.shadowBlur = 0;
@@ -4579,6 +4925,11 @@ const TRAIL_RENDER_CONFIG = {
             // Slow-mo tint — replaces the old flat drawSlowMoTint()
             if (slowMoActive) {
                 ctx.fillStyle = 'rgba(80,0,120,0.08)';
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            }
+            // v9 E: Golden Hoard tint
+            if (hoardActive) {
+                ctx.fillStyle = calmModeEffective() ? 'rgba(255, 215, 0, 0.03)' : 'rgba(255, 215, 0, 0.06)';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             }
             // Death vignette crush — intensifies as shakeTimer winds down
@@ -4784,6 +5135,8 @@ const TRAIL_RENDER_CONFIG = {
             dy = 0;
             nextDirection = null;
             food = null;
+            extraFoods = []; // v9 D: clear portal + hoard foods per wave
+            transientRings = []; // v9 F: clear visual rings per wave
             score = 0;
             gauntletWaveScore = 0;
             displayedScore = 0;
@@ -5316,6 +5669,16 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState !== 'playing') return;
             // v8 F: Bounty Rush — tick/resolve contracts (game-logic only).
             tickBounty();
+            // v9 E: Golden Hoard event — tick-counted, game-logic only, no session-end hook.
+            if (MODE_CONFIG[gameMode].hoardEnabled) {
+                if (!hoardActive) {
+                    hoardTickCounter++;
+                    if (hoardTickCounter >= HOARD_INTERVAL && gameState === 'playing') activateHoard();
+                } else {
+                    hoardTimer--;
+                    if (hoardTimer <= 0) endHoard();
+                }
+            }
 
             // v6: extracted functions (declared here for closure over updateGame's locals)
             function handleComboMilestone() {
@@ -5820,7 +6183,11 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 checkAchievements(score);
                 checkQuestProgress();
-                const playerCombined = snake.concat(rivalCombinedSnake());
+                // v9 D: if the eaten food was a portal epic, remove its twin from extraFoods[]
+                if (eatenType === 'epic') {
+                    extraFoods = extraFoods.filter(function(ef) { return !ef.portalLink; });
+                }
+                const playerCombined = snake.concat(rivalCombinedSnake()).concat(extraFoods);
                 food = generateFood(playerCombined);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
                 // v6: Rampage Brew — food spawns closer to head (min 3 tiles)
@@ -5836,7 +6203,7 @@ const TRAIL_RENDER_CONFIG = {
                             if (adj[ai].x >= 0 && adj[ai].x < PLAY_WIDTH && adj[ai].y >= 0 && adj[ai].y < PLAY_HEIGHT) {
                                 // v8 E: food2 copies the eaten food's type — coerce hunter to
                                 // common so a static hunter food2 (never moves) can't spawn.
-                                var f2Type = food.type === 'hunter' ? 'common' : food.type;
+                                var f2Type = (food.type === 'hunter' || food.type === 'portal') ? 'common' : food.type;
                                 food2 = { x: adj[ai].x, y: adj[ai].y, type: f2Type, pts: Math.floor((FOOD_TIERS[f2Type] ? FOOD_TIERS[f2Type].pts : 10) / 2), spawnTime: performance.now() };
                                 break;
                             }
@@ -5858,6 +6225,66 @@ const TRAIL_RENDER_CONFIG = {
                 spawnParticles(food2.x, food2.y, 8, '#44FF88');
                 playSound('eat');
                 food2 = null;
+            }
+            // v9 D: extraFoods[] eat check (portal + hoard foods)
+            for (var efi = extraFoods.length - 1; efi >= 0; efi--) {
+                var ef = extraFoods[efi];
+                if (wrappedHead.x === ef.x && wrappedHead.y === ef.y) {
+                    if (ef.portalLink) {
+                        // Portal food: teleport the entire snake (Phoenix-style re-anchor)
+                        // Eating the portal grants the epic's bonus (score + XP) and removes both foods.
+                        var exitTile = snapToFreeTile(ef.portalLink.x, ef.portalLink.y);
+                        spawnParticles(ef.x, ef.y, 18, '#AA44FF');
+                        spawnParticles(exitTile.x, exitTile.y, 18, '#AA44FF');
+                        playSound('bonus');
+                        // Grant the epic's bonus
+                        sessionFoodEaten++;
+                        stats.totalFoodEaten++;
+                        stats.epicFoodEaten++;
+                        sessionFoodTypes.add('epic');
+                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.epic.pts);
+                        awardXP(FOOD_TIERS.epic.xp);
+                        spawnFloater(exitTile.x, exitTile.y, '+' + FOOD_TIERS.epic.pts + ' EPIC!', '#AA44FF', 18);
+                        // Remove the portal food from extraFoods[]
+                        extraFoods.splice(efi, 1);
+                        // Remove the primary epic food (it's the `food` variable, not in extraFoods[])
+                        // The epic's portalLink points to the portal food we just removed.
+                        // Check if food is the epic twin: its portalLink matches the eaten portal's position.
+                        if (food && food.portalLink && food.portalLink.x === ef.x && food.portalLink.y === ef.y) {
+                            food = null;
+                            // Generate a new primary food (without portal, since we don't want another portal immediately)
+                            var combinedAfterPortal = snake.concat(rivalCombinedSnake()).concat(extraFoods);
+                            food = generateFood(combinedAfterPortal);
+                            if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
+                        }
+                        // Re-anchor: snake becomes a short segment at the exit
+                        snake = [{ x: exitTile.x, y: exitTile.y }];
+                        while (snake.length < 3) {
+                            var tailSeg = wrapPosition({ x: snake[snake.length - 1].x - dx, y: snake[snake.length - 1].y - dy });
+                            if (snake.some(function(s) { return s.x === tailSeg.x && s.y === tailSeg.y; })) break;
+                            snake.push(tailSeg);
+                        }
+                        triggerEvolutionIfReady();
+                        queueToast('🌀 Teleported!', 1500);
+                    } else {
+                        // Hoard bonus food: normal eat logic
+                        snake.push(tail);
+                        snakeGrew = true;
+                        triggerEvolutionIfReady();
+                        if (activeSeed !== null) recordReplayGrow(gameTick);
+                        sessionFoodEaten++;
+                        stats.totalFoodEaten++;
+                        stats.bonusFoodEaten++;
+                        sessionBonusFood++;
+                        sessionFoodTypes.add('bonus');
+                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.bonus.pts);
+                        spawnParticles(ef.x, ef.y, FOOD_TIERS.bonus.pCount, FOOD_TIERS.bonus.color);
+                        spawnFloater(ef.x, ef.y, '+30 BONUS!', '#FFD700', 18);
+                        playSound('bonus');
+                        extraFoods.splice(efi, 1);
+                    }
+                    break; // only eat one food per tick
+                }
             }
 
             // Check power-up collection
@@ -5938,6 +6365,28 @@ const TRAIL_RENDER_CONFIG = {
                     }
                 }
             }
+            // v9 D: magnet also pulls extraFoods[] (hoard bonus foods, not portal foods)
+            if (magnetActive) {
+                for (var efi2 = 0; efi2 < extraFoods.length; efi2++) {
+                    var ef2 = extraFoods[efi2];
+                    if (ef2.type === 'portal') continue;
+                    var head2 = snake[0];
+                    var dfx = head2.x - ef2.x, dfy = head2.y - ef2.y;
+                    if (Math.abs(dfx) > PLAY_WIDTH / 2) dfx = dfx > 0 ? dfx - PLAY_WIDTH : dfx + PLAY_WIDTH;
+                    if (Math.abs(dfy) > PLAY_HEIGHT / 2) dfy = dfy > 0 ? dfy - PLAY_HEIGHT : dfy + PLAY_HEIGHT;
+                    var d2 = Math.abs(dfx) + Math.abs(dfy);
+                    if (d2 > 0 && d2 <= 4 * TILE_SIZE) {
+                        var nfx = ef2.x, nfy = ef2.y;
+                        if (Math.abs(dfx) >= Math.abs(dfy)) nfx += dfx > 0 ? TILE_SIZE : -TILE_SIZE;
+                        else nfy += dfy > 0 ? TILE_SIZE : -TILE_SIZE;
+                        var wp = wrapPosition({ x: nfx, y: nfy });
+                        if (!snake.some(function(s) { return s.x === wp.x && s.y === wp.y; }) &&
+                            !obstacles.some(function(o) { return o.x === wp.x && o.y === wp.y; })) {
+                            ef2.x = wp.x; ef2.y = wp.y;
+                        }
+                    }
+                }
+            }
 
             // Power-up spawn timer
             if (gameMode !== 'zen' && gameMode !== 'walled' && !powerUpPickup && !powerUpType) {
@@ -5958,7 +6407,7 @@ const TRAIL_RENDER_CONFIG = {
 
             // Rival respawn timer
             var anyRivalAlive = anyRivalActive();
-            if (!anyRivalAlive && rivals.length > 0 && rivals[0].respawnTimer > 0) {
+            if (!anyRivalAlive && rivals.length > 0 && rivals[0].respawnTimer > 0 && !hoardActive) {
                 rivals[0].respawnTimer -= getEffectiveSpeed();
                 if (rivals[0].respawnTimer <= 0) {
                     spawnRival(0);
@@ -5966,7 +6415,7 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Update rival
-            if (anyRivalActive()) {
+            if (anyRivalActive() && !hoardActive) {
                 for (var rii = 0; rii < rivals.length; rii++) {
                     if (rivals[rii].active) updateRival(rii);
                 }
@@ -7106,6 +7555,7 @@ const TRAIL_RENDER_CONFIG = {
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden && gameState === 'playing') {
+                saveSnapshot(); // v9 B: save before pausing so mobile backgrounding doesn't lose the run
                 autoPaused = true;
                 sessionPauseStart = Date.now();
                 gameState = 'paused';
