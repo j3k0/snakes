@@ -145,7 +145,7 @@ async function run() {
 
   test('B8: generateFood guard uses only currentSnake.length + obstacles.length', async () => {
     const source = await page.evaluate(() => generateFood.toString());
-    const hasSimpleGuard = source.includes('currentSnake.length + obstacles.length >= totalTiles');
+    const hasSimpleGuard = source.includes('currentSnake.length + obstacles.length + extraFoods.length >= totalTiles');
     if (!hasSimpleGuard) throw new Error('generateFood guard not simplified');
   });
 

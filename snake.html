@@ -265,6 +265,7 @@
         let gameTimeout = null;
 
         function scheduleNextTick() {
+            if (gameTimeout) return;
             if (gameState !== 'playing') return;
             gameTimeout = setTimeout(() => {
                 updateGame();
@@ -1029,6 +1030,8 @@ function showBrewsPanel() {
     var qp = document.getElementById('questsPanel');
     if (qp) qp.style.display = 'none';
     var ssp = document.getElementById('settingsPanel');
+    var dp = document.getElementById('diaryPanel');
+    if (dp) dp.style.display = 'none';
     if (ssp) ssp.style.display = 'none';
     renderBrewsPanel();
     el.style.display = 'block';
@@ -1905,7 +1908,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function generateFood(currentSnake) {
             const totalTiles = (PLAY_WIDTH / TILE_SIZE) * (PLAY_HEIGHT / TILE_SIZE);
-            if (currentSnake.length + obstacles.length >= totalTiles) return null;
+            if (currentSnake.length + obstacles.length + extraFoods.length >= totalTiles) return null;
 
             let newFood;
             let iterations = 0;
@@ -1922,7 +1925,10 @@ const TRAIL_RENDER_CONFIG = {
                             const ty = y * TILE_SIZE;
                             if (currentSnake.some(s => s.x === tx && s.y === ty)) continue;
                             if (obstacles.some(o => o.x === tx && o.y === ty)) continue;
-                            freeTiles.push({ x: tx, y: ty });
+                            if (food && food.x === tx && food.y === ty) continue;
+                            if (food2 && food2.x === tx && food2.y === ty) continue;
+                            if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
+                            if (extraFoods.some(ef => ef.x === tx && ef.y === ty)) continue;
                         }
                     }
                     if (freeTiles.length === 0) return null;
@@ -2167,6 +2173,7 @@ const TRAIL_RENDER_CONFIG = {
             }
             dx = TILE_SIZE;
             dy = 0;
+            lastConsumedDir = { dx: TILE_SIZE, dy: 0 };
             ghostPositions = [];
             ghostArenaMode = false;
             arenaGhostReplays = [];
@@ -2577,7 +2584,6 @@ const TRAIL_RENDER_CONFIG = {
                 comboCharges: comboCharges,
                 comboBankSpendMode: comboBankSpendMode,
                 hazardChainStreak: hazardChainStreak, // v11 A
-                streakCharges: streakCharges, // v11 E
                 lastEatTime: lastEatTime,
                 // Speed
                 speedBoostCounter: speedBoostCounter,
@@ -2730,7 +2736,7 @@ const TRAIL_RENDER_CONFIG = {
                 comboCharges = data.comboCharges || 0;
                 comboBankSpendMode = data.comboBankSpendMode || 0;
                 hazardChainStreak = data.hazardChainStreak || 0; // v11 A
-                streakCharges = data.streakCharges || saveManager.getInt('snake_streak_charges', 0); // v11 E
+                streakCharges = saveManager.getInt('snake_streak_charges', 0); // v11 E: re-read from saveManager, not snapshot
                 lastEatTime = data.lastEatTime || 0;
                 speedBoostCounter = data.speedBoostCounter || 0;
                 obstacles = (data.obstacles || []).map(function (o) { return { x: o.x, y: o.y }; });
@@ -3238,7 +3244,7 @@ const TRAIL_RENDER_CONFIG = {
             saveReplay(score, snake.length);
             updateMenuFooter();
             score = snake.length;
-            finalizeSession(true);
+            awardXP(snake.length * 10);
             checkAchievements(score);
             checkDailyCompletion(score, {
                 sessionSpeedFood: sessionSpeedFood,
@@ -3525,6 +3531,7 @@ const TRAIL_RENDER_CONFIG = {
             scoreMultiplier = 1;
             hoardTickCounter = 0;
             hoardPigmentCount = 0; // v11 C: clear pigment count (rush outlives hoard)
+            extraFoods = extraFoods.filter(function(ef) { return !ef.pigment; });
             queueToast('Hoard ended', 1500);
         }
         // v9 E: place a bonus food directly (bypasses generateFood's portal logic)
@@ -3904,7 +3911,7 @@ const TRAIL_RENDER_CONFIG = {
                 // Magnet Pulse: instantly pull all foods up to 6 tiles toward head (1-tile gap)
                 var pulseRad = 6 * TILE_SIZE;
                 [food].concat(extraFoods || []).forEach(function(f) {
-                    if (!f || f.type === 'hunter' || f.type === 'bomb' || f.portal) return;
+                    if (!f || f.type === 'hunter' || f.type === 'bomb' || f.type === 'portal' || f.portalLink) return;
                     var ddx = head.x - f.x, ddy = head.y - f.y;
                     var canWrap = MODE_CONFIG[gameMode].wrap !== false;
                     if (canWrap) {
@@ -4810,6 +4817,7 @@ const TRAIL_RENDER_CONFIG = {
             if (!highContrast) {
                 const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S', hunter: 'H', bomb: 'X' };
                 if (labels[food.type]) {
+                    ctx.save();
                     ctx.font = 'bold 10px Arial';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
@@ -4854,6 +4862,10 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textBaseline = 'middle';
                 ctx.fillText('E', f2cx, f2cy);
                 ctx.restore();
+            }
+            // v9 D: draw extraFoods[] (portal + hoard foods) — moved from drawPowerUpPickup
+            for (var efdi = 0; efdi < extraFoods.length; efdi++) {
+                drawExtraFood(extraFoods[efdi]);
             }
         }
 
@@ -4901,10 +4913,6 @@ const TRAIL_RENDER_CONFIG = {
             }
             
             ctx.restore();
-            // v9 D: draw extraFoods[] (portal + hoard foods) at end of drawFood
-            for (var efdi = 0; efdi < extraFoods.length; efdi++) {
-                drawExtraFood(extraFoods[efdi]);
-            }
         }
         // v9 D: draw extraFoods[] (portal + hoard foods) — called from drawFood after primary food/food2
         function drawExtraFood(ef) {
@@ -5574,6 +5582,7 @@ const TRAIL_RENDER_CONFIG = {
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
             dy = 0;
+            lastConsumedDir = { dx: TILE_SIZE, dy: 0 };
             food = null;
             extraFoods = []; // v9 D: clear portal + hoard foods per wave
             transientRings = []; // v9 F: clear visual rings per wave
@@ -6068,10 +6077,8 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.font = hudFont(11);
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
-                    if (!flashOverlay || flashOverlay.priority !== 'critical') {
-                        flashOverlay = { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' };
-                        queueGameEffect('flash', { color: color, alpha: alpha, priority: comboCount >= 10 ? 'high' : 'normal' });
-                    }
+                ctx.fillText('Target: ' + challengeFromUrl.targetScore, 5, 30);
+                ctx.restore();
             }
 
             // Gauntlet intermission overlay
@@ -6342,14 +6349,12 @@ const TRAIL_RENDER_CONFIG = {
             const wrappedHead = wrapPosition(newHead);
 
             // v11 E: Streak charge death save — auto-fire death insurance. Consumes a
-            // streak charge to survive one lethal hit, repositioning the head to a
-            // free tile. Slots AFTER per-run saves (shield, vampire), before serpentine.
             function tryStreakChargeSave(wrappedHead) {
                 if (streakCharges > 0) {
-                    streakCharges--;
-                    saveManager.set('snake_streak_charges', streakCharges);
                     var freePos = findFreeTile(wrappedHead.x, wrappedHead.y);
                     if (freePos) {
+                        streakCharges--;
+                        saveManager.set('snake_streak_charges', streakCharges);
                         snake[0] = { x: freePos.x, y: freePos.y };
                         while (snake.length > 5) snake.pop();
                         lastDeathCause = '🛡 Streak charge saved you!';
@@ -6796,6 +6801,8 @@ const TRAIL_RENDER_CONFIG = {
                 spawnParticles(food2.x, food2.y, 8, '#44FF88');
                 playSound('eat');
                 food2 = null;
+                checkAchievements(score);
+                checkQuestProgress();
             }
             // v9 D: extraFoods[] eat check (portal + hoard foods)
             for (var efi = extraFoods.length - 1; efi >= 0; efi--) {
@@ -6835,6 +6842,7 @@ const TRAIL_RENDER_CONFIG = {
                             if (snake.some(function(s) { return s.x === tailSeg.x && s.y === tailSeg.y; })) break;
                             snake.push(tailSeg);
                         }
+                        snakeGrew = true;
                         triggerEvolutionIfReady();
                         queueToast('🌀 Teleported!', 1500);
                     } else {
@@ -6869,6 +6877,8 @@ const TRAIL_RENDER_CONFIG = {
                             }
                         }
                     }
+                        checkAchievements(score);
+                        checkQuestProgress();
                     break; // only eat one food per tick
                 }
             }
@@ -7060,6 +7070,8 @@ const TRAIL_RENDER_CONFIG = {
                 if (speedBoostCounter <= 0) {
                     tickInterval = getEffectiveSpeed();
                 }
+            } else {
+                tickInterval = getEffectiveSpeed();
             }
 
             // Progressive obstacle spawning
@@ -7345,6 +7357,10 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            var dp = document.getElementById('diaryPanel');
+            if (dp) dp.style.display = 'none';
             document.getElementById('settingsPanel').style.display = 'none';
             let html = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;color:#FFD700;">🏆 ACHIEVEMENTS</h2><div style="max-height:400px;overflow-y:auto;">';
             for (const id in ACHIEVEMENTS) {
@@ -7373,6 +7389,10 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
             document.getElementById('settingsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            var dp = document.getElementById('diaryPanel');
+            if (dp) dp.style.display = 'none';
 
             function cycle(currentId, categoryMap, direction) {
                 const keys = Object.keys(categoryMap);
@@ -7464,6 +7484,10 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            var dp = document.getElementById('diaryPanel');
+            if (dp) dp.style.display = 'none';
             document.getElementById('settingsPanel').style.display = 'none';
             el.innerHTML = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;">📊 STATS</h2>' +
                 '<table style="width:100%;border-collapse:collapse;">' +

@@ -206,7 +206,7 @@ try {
         var count = (updateSrc.match(/tryStreakChargeSave/g) || []).length;
         if (count < 4) return 'tryStreakChargeSave called only ' + count + ' times (need 4)';
         var snapSrc = buildSnapshotObject.toString();
-        if (!snapSrc.includes('streakCharges')) return 'snapshot missing streakCharges';
+        if (snapSrc.includes('streakCharges')) return 'snapshot should NOT store streakCharges (C6 fix)';
         // Check streakCharges re-read in startGame
         var startSrc = startGame.toString();
         if (!startSrc.includes('snake_streak_charges')) return 'startGame does not re-read streakCharges';
