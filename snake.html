@@ -204,10 +204,25 @@
         let hoardActive = false; // v9 E: Golden Hoard event state (declared here so F can reference it before E)
         let hazards = []; // v10 C: Hazard Zones — temporal pulsing danger tiles
         let scoreMultiplier = 1; // v9 E: hoard score multiplier (declared here for same reason)
+        // v11 A: Hazard Chain Bonus — stacking multiplier for eating adjacent to on-phase hazards
+        let hazardChainStreak = 0;
+        let hazardAdjacentThisTick = false;
         let dx = 0;
         let dy = 0;
         let score = 0;
 
+        // v11 F: Save Corruption Auto-Recovery — quarantine corrupted keys instead of
+        // silently returning defaults. Populated during load; read once for the toast.
+        const quarantinedKeys = new Set();
+        function quarantineKey(key) {
+            try {
+                var raw = localStorage.getItem(key);
+                if (raw !== null && !key.startsWith('snake_corrupt_')) {
+                    localStorage.setItem('snake_corrupt_' + key, raw);
+                    quarantinedKeys.add(key);
+                }
+            } catch (e) { /* localStorage unavailable */ }
+        }
         // === PROGRESSION SYSTEM ===
         const saveManager = {
             get(key, defaultVal) {
@@ -227,9 +242,15 @@
                     const v = localStorage.getItem(key);
                     if (v === null) return defaultVal;
                     const parsed = JSON.parse(v);
-                    return validator ? (validator(parsed) ? parsed : defaultVal) : parsed;
+                    if (validator && !validator(parsed)) {
+                        quarantineKey(key);
+                        return defaultVal;
+                    }
+                    return parsed;
+                } catch(e) {
+                    if (!key.startsWith('snake_corrupt_')) quarantineKey(key);
+                    return defaultVal;
                 }
-                catch(e) { return defaultVal; }
             },
             setJSON(key, value) {
                 try { localStorage.setItem(key, JSON.stringify(value)); }
@@ -740,6 +761,9 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let sessionXP = 0; // reserved for achievements
         let xpOvercharge = saveManager.getInt('snake_xp_overcharge', 0);
         let pinnacleRank = saveManager.getInt('snake_pinnacle', 0);
+        // v11 E: Streak death insurance charges — persistent meta-resource, re-read on each run start
+        let streakCharges = saveManager.getInt('snake_streak_charges', 0);
+        let streakChargeGranted = saveManager.getInt('snake_streak_charge_granted', -1); // last threshold index granted
         let gameTick = 0;
         let comboCount = 0;
         let comboCharges = 0;            // v10 A: Combo Bank charges (cap 5)
@@ -1661,6 +1685,7 @@ const TRAIL_RENDER_CONFIG = {
                 slider('Shake Intensity', shakeIntensity, 'setShakeIntensity(this.value)') +
                 slider('Particle Density', particleDensity, 'setParticleDensity(this.value)') +
                 '<div style="padding:14px 0;border-bottom:1px solid #333;"><div style="font-size:13px;margin-bottom:8px;">Data Backup</div><div style="display:flex;gap:8px;"><button onclick="exportSaveData()" style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;touch-action:manipulation;">⬇ Export</button><label style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;text-align:center;touch-action:manipulation;"><input type="file" accept=".json" style="display:none;" onchange="importSaveData(this.files[0])">⬆ Import</label></div></div>' +
+                (quarantinedKeys.size > 0 ? '<div style="padding:10px 0;border-bottom:1px solid #333;"><div style="font-size:12px;color:#FFAA44;margin-bottom:6px;">⚠ ' + quarantinedKeys.size + ' corrupted key(s) backed up</div><button onclick="exportSaveData()" style="padding:6px 12px;border-radius:6px;border:1px solid #FFAA44;background:rgba(255,170,68,0.1);color:#FFAA44;cursor:pointer;font-size:12px;touch-action:manipulation;">⬇ Export Backed-Up Data</button></div>' : '') +
                 '<div style="text-align:center;color:#666;font-size:11px;margin-top:14px;">Settings apply instantly. Press S or ✕ to close.</div>';
         }
         function showSettingsPanel() {
@@ -1718,6 +1743,7 @@ const TRAIL_RENDER_CONFIG = {
                     }
                     if (!confirm('Importing will overwrite all current save data. Continue?')) return;
                     Object.keys(data.keys).forEach(function(k) { localStorage.setItem(k, data.keys[k]); });
+                    if (quarantinedKeys.size > 0) queueToast('⚠ Some imported keys were corrupt — backed up. Reload to apply.', 4000);
                     queueToast('Backup imported! Reload to apply.', 3000);
                 } catch (err) {
                     queueToast('Import failed: ' + err.message, 2000);
@@ -1794,10 +1820,16 @@ const TRAIL_RENDER_CONFIG = {
             }
             // v9 E: hoard scoreMultiplier (cap with golden_food to prevent ×6 trivialization)
             var effectiveHoardMult = scoreMultiplier;
-            if (activeMutators.indexOf('golden_food') !== -1 && scoreMultiplier > 1) {
+            // v11 C: Pigment Rush overrides hoard ×2 with ×3 (the rush IS the climax)
+            if (pigmentRushActive) {
+                effectiveHoardMult = activeMutators.indexOf('golden_food') !== -1 ? 2 : 3; // golden+rush caps at ×2
+            } else if (activeMutators.indexOf('golden_food') !== -1 && scoreMultiplier > 1) {
                 effectiveHoardMult = Math.min(scoreMultiplier, 1.5); // Hoard + Golden Age = ×4.5 max
             }
-            score += Math.round(amount * multi * effectiveHoardMult);
+            // v11 A: Hazard Chain Bonus multiplier + global cap (prevents ×7.5 compounding)
+            var hazardChainMult = (hazardAdjacentThisTick && hazardChainStreak > 0) ? (1 + Math.min(hazardChainStreak, 3) * 0.5) : 1;
+            var totalMult = Math.min(multi * effectiveHoardMult * hazardChainMult, 4);
+            score += Math.round(amount * totalMult);
             updateScoreDisplay();
         }
 
@@ -2059,6 +2091,7 @@ const TRAIL_RENDER_CONFIG = {
             comboCount = 0;
             comboCharges = 0;
             comboBankSpendMode = 0;
+            hazardChainStreak = 0; // v11 A
             evolutionTier = -1;
             obstaclePassUsed = false;
             // v8 D: clear recap state so the idle screen never shows a stale recap.
@@ -2141,6 +2174,12 @@ const TRAIL_RENDER_CONFIG = {
             generateObstacles();
             hazards = []; // v10 C: clear hazard zones
             hazardTickCounter = 0; // v10 C: reset spawn timer
+            // v11 D: Clear seed PRNG so it doesn't leak from a prior daily run
+            // into Classic/TimeAttack/Snap (which must stay non-deterministic).
+            // The seedField/seedRandomBtn handlers re-seed before startGame
+            // when the player sets a manual seed.
+            activeSeed = null;
+            seedPrng = null;
             if (gameMode === 'painter') {
                 var cols = PLAY_WIDTH / TILE_SIZE;
                 var rows = PLAY_HEIGHT / TILE_SIZE;
@@ -2165,6 +2204,7 @@ const TRAIL_RENDER_CONFIG = {
             extraFoods = []; // v9 D: clear portal + hoard foods
             transientRings = []; // v9 F: clear visual rings
             hoardActive = false; hoardTimer = 0; hoardTickCounter = 0; scoreMultiplier = 1; // v9 E: clear hoard state
+            hoardPigmentCount = 0; pigmentRushTimer = 0; pigmentRushActive = false; // v11 C
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -2291,6 +2331,12 @@ const TRAIL_RENDER_CONFIG = {
                     }
                     // Always save the date so next day's comparison works
                     saveManager.set('snake_daily_date', todayStr);
+                    // v11 D: Seed the PRNG for daily mode so ALL seededRandom() calls
+                    // (food, hazard, rival, hunter spawns) are deterministic per date.
+                    // This makes the daily leaderboard fair (same board for all) and
+                    // enables learnable hazard layouts for diary replay.
+                    activeSeed = String(getDailySeed());
+                    seedPrng = mulberry32(getDailySeed());
             }
             // Check streak cosmetic unlocks
             const streak = saveManager.getInt('snake_streak_count', 0);
@@ -2307,6 +2353,24 @@ const TRAIL_RENDER_CONFIG = {
                     }
                     }
                 }
+            }
+            // v11 E: Re-read streak charges from save + grant charges at 7/14/30 day thresholds
+            streakCharges = saveManager.getInt('snake_streak_charges', 0);
+            streakChargeGranted = saveManager.getInt('snake_streak_charge_granted', -1);
+            const STREAK_CHARGE_DAYS = [7, 14, 30];
+            for (var sci = 0; sci < STREAK_CHARGE_DAYS.length; sci++) {
+                if (streak >= STREAK_CHARGE_DAYS[sci] && streakChargeGranted < sci) {
+                    streakCharges++;
+                    streakChargeGranted = sci;
+                    saveManager.set('snake_streak_charges', streakCharges);
+                    saveManager.set('snake_streak_charge_granted', streakChargeGranted);
+                    queueToast('🛡 Streak charge earned! (' + STREAK_CHARGE_DAYS[sci] + ' day streak)', 3000);
+                }
+            }
+            // Reset charge-grant tracker on broken/first streak (streak resets to 1, not 0)
+            if (streak <= 1 && streakChargeGranted >= 0) {
+                streakChargeGranted = -1;
+                saveManager.set('snake_streak_charge_granted', -1);
             }
             const mc = MODE_CONFIG[gameMode];
             if (mc.timer) timeAttackEnd = Date.now() + mc.timer;
@@ -2505,13 +2569,15 @@ const TRAIL_RENDER_CONFIG = {
                 dirQueue: dirQueue,
                 food: food ? { x: food.x, y: food.y, type: food.type, pts: food.pts || 0, spawnTime: food.spawnTime || 0 } : null,
                 food2: food2 ? { x: food2.x, y: food2.y, type: food2.type, pts: food2.pts || 0, spawnTime: food2.spawnTime || 0 } : null,
-                extraFoods: extraFoods.map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: ef.spawnTime || 0, portalLink: ef.portalLink || null }; }),
+                extraFoods: extraFoods.map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: ef.spawnTime || 0, portalLink: ef.portalLink || null, pigment: ef.pigment || false }; }),
                 tickInterval: tickInterval,
                 minFoodSpawnDist: minFoodSpawnDist,
                 // Combo
                 comboCount: comboCount,
                 comboCharges: comboCharges,
                 comboBankSpendMode: comboBankSpendMode,
+                hazardChainStreak: hazardChainStreak, // v11 A
+                streakCharges: streakCharges, // v11 E
                 lastEatTime: lastEatTime,
                 // Speed
                 speedBoostCounter: speedBoostCounter,
@@ -2519,7 +2585,7 @@ const TRAIL_RENDER_CONFIG = {
                 obstacles: obstacles.map(function (o) { return { x: o.x, y: o.y }; }),
                 obstacleSpawnTimer: obstacleSpawnTimer,
                 // v10 C: Hazard Zones
-                hazards: hazards.map(function(h) { return { cx: h.cx, cy: h.cy, radius: h.radius, phase: h.phase, phaseTimer: h.phaseTimer, lifeTimer: h.lifeTimer, maxLife: h.maxLife }; }),
+                hazards: hazards.map(function(h) { return { cx: h.cx, cy: h.cy, radius: h.radius, phase: h.phase, phaseTimer: h.phaseTimer, lifeTimer: h.lifeTimer, maxLife: h.maxLife, seedOffset: h.seedOffset || 0 }; }),
                 // Power-ups
                 powerUpType: powerUpType,
                 powerUpTimer: powerUpTimer,
@@ -2584,6 +2650,10 @@ const TRAIL_RENDER_CONFIG = {
                 hoardTimer: hoardTimer,
                 hoardTickCounter: hoardTickCounter,
                 scoreMultiplier: scoreMultiplier,
+                // v11 C: Pigment Rush state (additive)
+                hoardPigmentCount: hoardPigmentCount,
+                pigmentRushTimer: pigmentRushTimer,
+                pigmentRushActive: pigmentRushActive,
                 // Replay
                 replayEvents: replayEvents.slice(),
                 sessionStartTime: sessionStartTime,
@@ -2621,7 +2691,7 @@ const TRAIL_RENDER_CONFIG = {
         // the user's own saved run.
         function restoreFromSnapshot(data, fromStorage) {
             if (!data || typeof data !== 'object' || data.v !== SNAPSHOT_VERSION || !MODE_CONFIG[data.mode]) {
-                if (fromStorage) clearSnapshot();
+                if (fromStorage) { quarantineKey(SNAPSHOT_KEY); clearSnapshot(); }
                 return false;
             }
             try {
@@ -2653,18 +2723,20 @@ const TRAIL_RENDER_CONFIG = {
                 lastConsumedDir = { dx: dx, dy: dy };
                 food = data.food ? { x: data.food.x, y: data.food.y, type: data.food.type, pts: data.food.pts || 0, spawnTime: performance.now() } : null;
                 food2 = data.food2 ? { x: data.food2.x, y: data.food2.y, type: data.food2.type, pts: data.food2.pts || 0, spawnTime: performance.now() } : null;
-                extraFoods = (data.extraFoods || []).map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: performance.now(), portalLink: ef.portalLink || null }; });
+                extraFoods = (data.extraFoods || []).map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: performance.now(), portalLink: ef.portalLink || null, pigment: ef.pigment || false }; });
                 tickInterval = (data.tickInterval == null) ? getEffectiveSpeed() : data.tickInterval;
                 minFoodSpawnDist = (data.minFoodSpawnDist == null) ? null : data.minFoodSpawnDist;
                 comboCount = data.comboCount || 0;
                 comboCharges = data.comboCharges || 0;
                 comboBankSpendMode = data.comboBankSpendMode || 0;
+                hazardChainStreak = data.hazardChainStreak || 0; // v11 A
+                streakCharges = data.streakCharges || saveManager.getInt('snake_streak_charges', 0); // v11 E
                 lastEatTime = data.lastEatTime || 0;
                 speedBoostCounter = data.speedBoostCounter || 0;
                 obstacles = (data.obstacles || []).map(function (o) { return { x: o.x, y: o.y }; });
                 obstacleSpawnTimer = data.obstacleSpawnTimer || 0;
                 // v10 C: Hazard Zones
-                hazards = (data.hazards || []).map(function(h) { return { cx: h.cx, cy: h.cy, radius: h.radius, phase: h.phase || 'off', phaseTimer: h.phaseTimer || 10, lifeTimer: h.lifeTimer || 300, maxLife: h.maxLife || 300 }; });
+                hazards = (data.hazards || []).map(function(h) { return { cx: h.cx, cy: h.cy, radius: h.radius, phase: h.phase || 'off', phaseTimer: h.phaseTimer || 10, lifeTimer: h.lifeTimer || 300, maxLife: h.maxLife || 300, seedOffset: h.seedOffset || 0 }; });
                 powerUpType = data.powerUpType || null;
                 powerUpTimer = data.powerUpTimer || 0;
                 powerUpSpawnCounter = data.powerUpSpawnCounter || 0;
@@ -2723,6 +2795,10 @@ const TRAIL_RENDER_CONFIG = {
                 hoardTimer = data.hoardTimer || 0;
                 hoardTickCounter = data.hoardTickCounter || 0;
                 scoreMultiplier = data.scoreMultiplier || 1;
+                // v11 C: Pigment Rush state (additive)
+                hoardPigmentCount = data.hoardPigmentCount || 0;
+                pigmentRushTimer = data.pigmentRushTimer || 0;
+                pigmentRushActive = data.pigmentRushActive || false;
 
                 sessionPausedTime = (data.sessionPausedTime || 0) + offlineGap;
                 sessionPauseStart = 0;
@@ -3375,6 +3451,17 @@ const TRAIL_RENDER_CONFIG = {
                 var lifeFrac = 1 - (h.lifeTimer / h.maxLife);
                 h.radius = TILE_SIZE * (0.8 + Math.sin(lifeFrac * Math.PI) * (HAZARD_MAX_RADIUS / TILE_SIZE - 0.8));
             }
+            // v11 A: Hazard Chain Bonus — check if snake head is adjacent to an on-phase hazard
+            // Adjacency = 1-tile buffer beyond the current lethal radius (dist > radius && dist <= radius + TILE_SIZE)
+            for (var ai = 0; ai < hazards.length; ai++) {
+                var ah = hazards[ai];
+                if (ah.phase !== 'on') continue;
+                var adist = Math.abs(snake[0].x - ah.cx) + Math.abs(snake[0].y - ah.cy);
+                if (adist > ah.radius && adist <= ah.radius + TILE_SIZE) {
+                    hazardAdjacentThisTick = true;
+                    break;
+                }
+            }
             // Spawn new hazards (after grace period, cap 2 concurrent)
             if (gameTick < HAZARD_GRACE_TICKS) return;
             hazardTickCounter++;
@@ -3387,7 +3474,7 @@ const TRAIL_RENDER_CONFIG = {
                     var hy = Math.floor(seededRandom() * (PLAY_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                     var headDist = Math.abs(hx - snake[0].x) + Math.abs(hy - snake[0].y);
                     if (headDist >= 4 * TILE_SIZE) {
-                        hazards.push({ cx: hx, cy: hy, radius: TILE_SIZE * 0.8, phase: 'off', phaseTimer: HAZARD_OFF_TICKS, lifeTimer: HAZARD_MAX_LIFE, maxLife: HAZARD_MAX_LIFE });
+                        hazards.push({ cx: hx, cy: hy, radius: TILE_SIZE * 0.8, phase: 'off', phaseTimer: HAZARD_OFF_TICKS, lifeTimer: HAZARD_MAX_LIFE, maxLife: HAZARD_MAX_LIFE, seedOffset: Math.floor(seededRandom() * HAZARD_ON_TICKS) });
                         if (!hasSeenHazard) {
                             hasSeenHazard = true;
                             saveManager.set('snake_has_seen_hazard', '1');
@@ -3413,15 +3500,22 @@ const TRAIL_RENDER_CONFIG = {
         const HOARD_DURATION = 900;  // ~15s
         let hoardTimer = 0;
         let hoardTickCounter = 0;
+        // v11 C: Hoard Pigment Rush — eating all 4 hoard foods triggers a 5s ×3 climax
+        let hoardPigmentCount = 0;
+        let pigmentRushTimer = 0;
+        let pigmentRushActive = false;
+        let hasSeenPigmentRush = saveManager.get('snake_has_seen_pigment_rush', '') === '1';
         function activateHoard() {
             hoardActive = true;
             hoardTimer = HOARD_DURATION;
             scoreMultiplier = 2;
+            hoardPigmentCount = 0; // v11 C: reset pigment count
             // Spawn 4 bonus foods into extraFoods[] (bypass portal logic — direct placement)
+            // v11 C: tag each hoard food with pigment: true for the Pigment Rush objective
             for (var i = 0; i < 4; i++) {
                 var combined = snake.concat(rivalCombinedSnake()).concat(extraFoods);
                 var hf = generateHoardFood(combined);
-                if (hf) extraFoods.push(hf);
+                if (hf) { hf.pigment = true; extraFoods.push(hf); }
             }
             queueToast('\u26A1 Golden Hoard! 2x score!', 3000);
             queueGameEffect('flash', { color: '#FFD700', alpha: 0.3, priority: 'normal' });
@@ -3430,6 +3524,7 @@ const TRAIL_RENDER_CONFIG = {
             hoardActive = false;
             scoreMultiplier = 1;
             hoardTickCounter = 0;
+            hoardPigmentCount = 0; // v11 C: clear pigment count (rush outlives hoard)
             queueToast('Hoard ended', 1500);
         }
         // v9 E: place a bonus food directly (bypasses generateFood's portal logic)
@@ -4338,6 +4433,12 @@ const TRAIL_RENDER_CONFIG = {
                             ctx.font = '13px Arial';
                             ctx.fillText('🔥 ' + streak + ' day streak!', CANVAS_WIDTH / 2, currentY);
                             currentY += 16;
+                            // v11 E: Streak charge display
+                            if (streakCharges > 0) {
+                                ctx.fillStyle = '#FFEE88';
+                                ctx.fillText('🛡×' + streakCharges + ' death insurance', CANVAS_WIDTH / 2, currentY);
+                                currentY += 16;
+                            }
                         }
                         // v10 D: Daily Seed Leaderboard — personal top-5 today
                         var lb = saveManager.getJSON('snake_daily_lb', {});
@@ -4528,6 +4629,24 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.stroke();
                 }
                 ctx.restore();
+            }
+            // v11 A: Gold ring around adjacent hazard when hazard chain is active
+            if (hazardAdjacentThisTick && hazardChainStreak > 0) {
+                for (var ri = 0; ri < hazards.length; ri++) {
+                    var rh = hazards[ri];
+                    if (rh.phase !== 'on') continue;
+                    var rdist = Math.abs(snake[0].x - rh.cx) + Math.abs(snake[0].y - rh.cy);
+                    if (rdist > rh.radius && rdist <= rh.radius + TILE_SIZE) {
+                        ctx.save();
+                        ctx.strokeStyle = '#FFD700';
+                        ctx.lineWidth = 2;
+                        ctx.globalAlpha = 0.6;
+                        ctx.beginPath();
+                        ctx.arc(rh.cx + TILE_SIZE / 2, rh.cy + TILE_SIZE / 2, rh.radius + TILE_SIZE * 0.5, 0, 2 * Math.PI);
+                        ctx.stroke();
+                        ctx.restore();
+                    }
+                }
             }
         }
 
@@ -4888,11 +5007,13 @@ const TRAIL_RENDER_CONFIG = {
             ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
         }
         // v9 C: Combo Heat Aura — body tint + head halo that warms with comboCount.
+        // v11 B: Extended with a molten tier at combo ≥ 10 (brighter, higher alpha).
         function comboHeatColor(combo) {
             if (combo < 3) return null;
             if (combo < 7) { var t = (combo - 3) / 4; return 'rgba(255,' + Math.round(255 - t * 100) + ',' + Math.round(255 - t * 200) + ',0.15)'; }
-            if (combo < 15) { var t2 = (combo - 7) / 8; return 'rgba(255,' + Math.round(155 - t2 * 100) + ',' + Math.round(55 - t2 * 55) + ',0.2)'; }
-            return 'rgba(255,55,0,0.25)';
+            if (combo < 10) { var t2 = (combo - 7) / 3; return 'rgba(255,' + Math.round(155 - t2 * 50) + ',' + Math.round(55 - t2 * 25) + ',0.2)'; }
+            if (combo < 15) { var t3 = (combo - 10) / 5; return 'rgba(255,' + Math.round(105 - t3 * 50) + ',' + Math.round(30 - t3 * 30) + ',0.4)'; }
+            return 'rgba(255,55,0,0.45)';
         }
 
         function drawSnake(t) {
@@ -4915,13 +5036,15 @@ const TRAIL_RENDER_CONFIG = {
             // so it never occludes the evolution glow; dimmed 50% when shield is active.
             if (comboCount >= 3 && snake.length > 0) {
                 var comboFrac = Math.min(1, comboCount / 15);
-                var haloAlpha = (0.3 + 0.2 * comboFrac) * (shieldActive ? 0.5 : 1);
+                // v11 B: molten tier at combo ≥ 10 — brighter halo + higher alpha cap
+                var haloAlpha = (comboCount >= 10 ? 0.45 + 0.25 * comboFrac : 0.3 + 0.2 * comboFrac) * (shieldActive ? 0.5 : 1);
+                if (comboCount >= 10) haloAlpha = Math.min(haloAlpha, 0.7);
                 var pulseR = calmModeEffective() ? TILE_SIZE * 0.6 : (TILE_SIZE * 0.6 + Math.sin(renderTime * (0.005 + comboFrac * 0.01)) * 3);
                 var hcx = snake[0].x + TILE_SIZE / 2;
                 var hcy = snake[0].y + TILE_SIZE / 2;
                 ctx.save();
                 ctx.globalAlpha = haloAlpha;
-                var haloColor = comboCount >= 15 ? '#FF4400' : comboCount >= 7 ? '#FF8800' : '#FFCC00';
+                var haloColor = comboCount >= 15 ? '#FF4400' : comboCount >= 10 ? '#FF6600' : comboCount >= 7 ? '#FF8800' : '#FFCC00';
                 var grad = ctx.createRadialGradient(hcx, hcy, 0, hcx, hcy, pulseR);
                 grad.addColorStop(0, haloColor);
                 grad.addColorStop(1, 'rgba(0,0,0,0)');
@@ -5067,6 +5190,30 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.beginPath();
                 ctx.arc(headDrawX + TILE_SIZE / 2, headDrawY + TILE_SIZE / 2, TILE_SIZE * 0.7, 0, 2 * Math.PI);
                 ctx.stroke();
+                ctx.restore();
+            }
+            // v11 G: Input Buffer Visualization — chevrons showing pending dirQueue turns
+            if (!calmModeEffective() && dirQueue.length > 0 && gameState === 'playing' && snake.length > 0) {
+                ctx.save();
+                var hcx2 = headDrawX + TILE_SIZE / 2;
+                var hcy2 = headDrawY + TILE_SIZE / 2;
+                for (var qi = 0; qi < dirQueue.length; qi++) {
+                    var d = dirQueue[qi];
+                    var off = 6 + qi * 5; // 6px, 11px offset from head center
+                    var ax = hcx2 + d.dx * off;
+                    var ay = hcy2 + d.dy * off;
+                    ctx.globalAlpha = 0.6 - qi * 0.15;
+                    ctx.fillStyle = '#FFEE88';
+                    ctx.beginPath();
+                    // Draw a small triangle pointing in the queued direction
+                    var perpX = -d.dy, perpY = d.dx;
+                    var s = 3; // chevron half-size
+                    ctx.moveTo(ax + d.dx * s, ay + d.dy * s);
+                    ctx.lineTo(ax - d.dx * s + perpX * s, ay - d.dy * s + perpY * s);
+                    ctx.lineTo(ax - d.dx * s - perpX * s, ay - d.dy * s - perpY * s);
+                    ctx.closePath();
+                    ctx.fill();
+                }
                 ctx.restore();
             }
         }
@@ -5218,6 +5365,11 @@ const TRAIL_RENDER_CONFIG = {
             // v9 E: Golden Hoard tint
             if (hoardActive) {
                 ctx.fillStyle = calmModeEffective() ? 'rgba(255, 215, 0, 0.03)' : 'rgba(255, 215, 0, 0.06)';
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            }
+            // v11 C: Pigment Rush — stronger gold tint during the climax
+            if (pigmentRushActive) {
+                ctx.fillStyle = calmModeEffective() ? 'rgba(255, 215, 0, 0.06)' : 'rgba(255, 215, 0, 0.12)';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             }
             // Death vignette crush — intensifies as shakeTimer winds down
@@ -5434,6 +5586,7 @@ const TRAIL_RENDER_CONFIG = {
             comboBankSpendMode = 0;
             sessionBonusFood = 0;
             comboCount = 0;
+            hazardChainStreak = 0; // v11 A
             lastEatTime = 0;
             lastComboMilestone = 0;
             evolutionTier = -1;
@@ -5958,6 +6111,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function updateGame() {
             if (gameState !== 'playing') return;
+            hazardAdjacentThisTick = false; // v11 A: reset each tick, set true in tickHazards
             // v8 F: Bounty Rush — tick/resolve contracts (game-logic only).
             tickBounty();
             // v10 C: Hazard Zones — tick/expand/contract pulsing danger tiles
@@ -5971,6 +6125,11 @@ const TRAIL_RENDER_CONFIG = {
                     hoardTimer--;
                     if (hoardTimer <= 0) endHoard();
                 }
+            }
+            // v11 C: Pigment Rush timer decay — game-logic state, decays in tick loop (not rAF)
+            if (pigmentRushActive) {
+                pigmentRushTimer--;
+                if (pigmentRushTimer <= 0) { pigmentRushActive = false; }
             }
 
             // v6: extracted functions (declared here for closure over updateGame's locals)
@@ -6182,6 +6341,25 @@ const TRAIL_RENDER_CONFIG = {
             };
             const wrappedHead = wrapPosition(newHead);
 
+            // v11 E: Streak charge death save — auto-fire death insurance. Consumes a
+            // streak charge to survive one lethal hit, repositioning the head to a
+            // free tile. Slots AFTER per-run saves (shield, vampire), before serpentine.
+            function tryStreakChargeSave(wrappedHead) {
+                if (streakCharges > 0) {
+                    streakCharges--;
+                    saveManager.set('snake_streak_charges', streakCharges);
+                    var freePos = findFreeTile(wrappedHead.x, wrappedHead.y);
+                    if (freePos) {
+                        snake[0] = { x: freePos.x, y: freePos.y };
+                        while (snake.length > 5) snake.pop();
+                        lastDeathCause = '🛡 Streak charge saved you!';
+                        spawnParticles(freePos.x, freePos.y, 25, '#FFEE88');
+                        queueToast('🛡 Streak charge consumed!', 2000);
+                        return false;
+                    }
+                }
+                return true; // no save, proceed to death
+            }
             // --- v6: extracted death check ---
             function checkPlayerDeath(wrappedHead, skipSelfCollision) {
                 if (checkCollision(wrappedHead) && !skipSelfCollision) {
@@ -6200,6 +6378,8 @@ const TRAIL_RENDER_CONFIG = {
                         spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FF0044');
                         return false;
                     }
+                    // v11 E: Streak charge save (after vampire, before serpentine)
+                    if (!tryStreakChargeSave(wrappedHead)) return false;
                     // v7: Serpentine evolution — one-time obstacle pass. Order per
                     // design: Shield -> Vampire/Phoenix brew -> Serpentine -> death,
                     // so a chosen brew save is never wasted on an automatic save.
@@ -6230,12 +6410,28 @@ const TRAIL_RENDER_CONFIG = {
                                 return false;
                             }
                         }
+                        // v11 E: Streak charge save (after phoenix, before death)
+                        if (!tryStreakChargeSave(wrappedHead)) return false;
                         return true;
                     }
                 }
                 // v10 C: Hazard death — lethal when phase==='on' and head within radius
                 // Save chain: shield → vampire → death (no serpentine — hazards aren't obstacles)
                 if (isHazardCollision(wrappedHead)) {
+                    // v11 B: Combo Heat → Hazard Melt — at combo ≥ 10, entering an
+                    // on-phase hazard downgrades lethal to combo-break (no death).
+                    // Melt is hazard-only; slots before shield so a high-combo player
+                    // isn't punished by also consuming their shield.
+                    if (comboCount >= 10) {
+                        comboCount = 0;
+                        lastComboMilestone = 0;
+                        hazardChainStreak = 0;
+                        lastDeathCause = 'Melted a hazard!';
+                        spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FFAA00');
+                        pushTransientRing(wrappedHead.x + TILE_SIZE / 2, wrappedHead.y + TILE_SIZE / 2, 40, '#FFAA00', 400, 'ring', 3);
+                        queueToast('🔥 Melted a hazard!', 1500);
+                        return false;
+                    }
                     if (shieldActive) {
                         shieldActive = false; powerUpTimer = 0; powerUpType = null;
                         stats.shieldBlocks++;
@@ -6250,6 +6446,9 @@ const TRAIL_RENDER_CONFIG = {
                         spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FF0044');
                         return false;
                     }
+                    // v11 E: Streak charge save (after vampire, before death)
+                    if (!tryStreakChargeSave(wrappedHead)) return false;
+                    hazardChainStreak = 0; // v11 A: reset chain on hazard death
                     lastDeathCause = 'Caught in a hazard rift!';
                     return true;
                 }
@@ -6294,6 +6493,8 @@ const TRAIL_RENDER_CONFIG = {
                                         return false;
                                     }
                                 }
+                                // v11 E: Streak charge save (after phoenix, before death)
+                                if (!tryStreakChargeSave(wrappedHead)) return false;
                                 return true;
                             }
                         }
@@ -6541,6 +6742,17 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 checkAchievements(score);
                 checkQuestProgress();
+                // v11 A: Hazard Chain Bonus — bump streak if adjacent, reset otherwise
+                if (eatenType === 'bomb') {
+                    hazardChainStreak = 0; // bomb is not a hazard-adjacent harvest
+                } else if (hazardAdjacentThisTick) {
+                    hazardChainStreak++;
+                    if (hazardChainStreak >= 1) {
+                        spawnFloater(snake[0].x, snake[0].y - 10, '×' + (1 + Math.min(hazardChainStreak, 3) * 0.5) + ' Hazard!', '#FFD700');
+                    }
+                } else {
+                    hazardChainStreak = 0;
+                }
                 // v9 D: if the eaten food was a portal epic, remove its twin from extraFoods[]
                 if (eatenType === 'epic') {
                     extraFoods = extraFoods.filter(function(ef) { return !ef.portalLink; });
@@ -6641,6 +6853,21 @@ const TRAIL_RENDER_CONFIG = {
                         spawnFloater(ef.x, ef.y, '+30 BONUS!', foodColor('bonus'), 18);
                         playSound('bonus');
                         extraFoods.splice(efi, 1);
+                        // v11 C: Pigment Rush — eating all 4 hoard foods triggers a 5s ×3 climax
+                        if (ef.pigment) {
+                            hoardPigmentCount++;
+                            if (hoardPigmentCount >= 4 && !pigmentRushActive) {
+                                pigmentRushActive = true;
+                                pigmentRushTimer = 300; // ~5s at 60fps
+                                // Extend rival freeze by 3s
+                                for (var pri = 0; pri < rivals.length; pri++) {
+                                    if (rivals[pri].active) rivals[pri].respawnTimer = (rivals[pri].respawnTimer || 0) + 3000;
+                                }
+                                queueToast('🎨 Pigment Rush! ×3 score!', 3000);
+                                queueGameEffect('flash', { color: '#FFD700', alpha: 0.4, priority: 'high' });
+                                if (!hasSeenPigmentRush) { hasSeenPigmentRush = true; saveManager.set('snake_has_seen_pigment_rush', '1'); }
+                            }
+                        }
                     }
                     break; // only eat one food per tick
                 }
@@ -6879,6 +7106,10 @@ const TRAIL_RENDER_CONFIG = {
         function awardXP(amount) {
             const mc = MODE_CONFIG[gameMode];
             if (!mc.earnXP) return;
+            // v11 E: Streak-scaled XP multiplier (+1% per streak day, cap +30%)
+            const streakCount = saveManager.getInt('snake_streak_count', 0);
+            const streakMult = 1 + Math.min(0.30, streakCount * 0.01);
+            amount = Math.round(amount * streakMult);
             if (level >= 20) {
                 xpOvercharge += amount;
                 sessionXP += amount;
@@ -8028,6 +8259,8 @@ const TRAIL_RENDER_CONFIG = {
         });
 
         requestAnimationFrame(animateVisuals);
+        // v11 F: Load-time corruption detection toast
+        if (quarantinedKeys.size > 0) queueToast('⚠ Save data issue detected — backed up ' + quarantinedKeys.size + ' corrupted key(s), settings reset.', 5000);
     </script>
 </body>
 </html>

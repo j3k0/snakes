@@ -313,3 +313,75 @@
 - `generateFood()`: rejects active hazard tiles in the do-while collision check. `generateHoardFood()`: does NOT reject hazards (intentional emergent tension — hoard foods can spawn in active hazards).
 - `hasSeenHazard` first-time toast on first hazard spawn.
 - Snapshot: `hazards` as additive field (no `SNAPSHOT_VERSION` bump). Restore: `hazards = data.hazards || []`.
+
+## v11 Features
+
+## Input Buffer Visualization (v11 G)
+- `drawSnake()` draws directional chevrons at the snake head when `dirQueue.length > 0` (the v10 G input buffer). Chevrons are semi-transparent triangles offset 6px/11px from the head center in the queued direction, colored `#FFEE88` (CVD-safe fixed color, NOT a food tier).
+- Gated on `!calmModeEffective() && dirQueue.length > 0 && gameState === 'playing'`. Reads `dirQueue` live (no new state). Wrapped in `ctx.save()`/`ctx.restore()`.
+- No snapshot or reset changes — pure rendering of existing `dirQueue` state.
+
+## Save Corruption Auto-Recovery (v11 F)
+- `quarantinedKeys` (module-scope `Set`) tracks keys that failed `getJSON` parse or validation. Populated during module init (load-time `getJSON` calls).
+- `quarantineKey(key)` copies the raw localStorage string to `snake_corrupt_<key>` before the bad data is overwritten. Re-quarantine guard: `if (key.startsWith('snake_corrupt_'))` returns default without re-quarantining.
+- `saveManager.getJSON(key, defaultVal, validator)` now calls `quarantineKey` on parse failure or validator-fail (both the catch block and the validator-false path). Previously returned `defaultVal` silently.
+- `restoreFromSnapshot` calls `quarantineKey(SNAPSHOT_KEY)` before `clearSnapshot()` on validation failure (L2642-area), so a corrupted snapshot is backed up, not lost.
+- Load-time toast: after `requestAnimationFrame(animateVisuals)`, if `quarantinedKeys.size > 0`, `queueToast` fires once. The toast lists the count of corrupted keys.
+- Settings: `renderSettings()` shows a "⚠ N corrupted key(s) backed up" section with an "Export Backed-Up Data" button when `quarantinedKeys.size > 0`. The button calls `exportSaveData()` (quarantined keys are `snake_corrupt_*` and included in the export filter `k.indexOf('snake_') === 0`).
+- No new DOM panel (button is inside `#settingsPanel`) — cross-hide contract NOT triggered.
+
+## Daily Seed Determinism (v11 D)
+- **CRITICAL fix:** `seedPrng` was NEVER set in `startGame()` daily block before v11. `seededRandom()` (L689) falls back to `Math.random()` when `seedPrng === null`, so daily mode was fully non-deterministic — food, hazard, rival, and hunter spawns all used `Math.random()`. The daily leaderboard compared runs on different boards.
+- `startGame()` daily block (after L2313) now sets `activeSeed = String(getDailySeed())` and `seedPrng = mulberry32(getDailySeed())`. This makes ALL daily `seededRandom()` calls deterministic per date.
+- `resetGame()` (L2064-area) now clears `activeSeed = null; seedPrng = null;` — WITHOUT this, a daily run's `seedPrng` leaks into Classic/TimeAttack/Snap (which must stay non-deterministic). The seedField/seedRandomBtn handlers re-seed before `startGame` when the player sets a manual seed.
+- Hazard snapshot: `seedOffset` field added to hazard objects (build at L2571-area, restore at L2699-area). `seedOffset = Math.floor(seededRandom() * HAZARD_ON_TICKS)` at spawn time for deterministic phase offset.
+- Snapshot-restore caveat: `restoreFromSnapshot` (L2635-area) does NOT snapshot the PRNG stream position — a resumed daily run diverges post-restore. Acceptable for save/resume.
+
+## Hazard Chain Bonus (v11 A)
+- `hazardChainStreak` (int) + `hazardAdjacentThisTick` (boolean) are module-scope state declared near L207.
+- `hazardAdjacentThisTick` is reset to `false` at the TOP of `updateGame()` (L6023) every tick, then set `true` in `tickHazards()` if the snake head is within a 1-tile buffer beyond an on-phase hazard's lethal radius (`dist > h.radius && dist <= h.radius + TILE_SIZE`, Manhattan).
+- `addScore(amount)` (L1797): `hazardChainMult = (hazardAdjacentThisTick && hazardChainStreak > 0) ? (1 + Math.min(hazardChainStreak, 3) * 0.5) : 1`. The L1828 product is `var totalMult = Math.min(multi * effectiveHoardMult * hazardChainMult, 4)` — a global ×4 cap prevents ×7.5 compounding (hazard ×2.5 × hoard ×2 × pigment ×3).
+- Eat block (after combo-bonus `addScore` at L6567, before `checkAchievements` at L6616): if `eatenType === 'bomb'` resets `hazardChainStreak = 0`; else if `hazardAdjacentThisTick` increments and emits a floater; else resets to 0.
+- `checkPlayerDeath()` hazard branch (L6413): on hazard death, `hazardChainStreak = 0` (before the death return).
+- Reset: `hazardChainStreak = 0` in BOTH `resetGame()` (L2088) AND `resetWaveState()` (L5511).
+- Snapshot: `hazardChainStreak` is additive (build L2575, restore L2724). No `SNAPSHOT_VERSION` bump.
+- `drawHazards()` draws a gold ring (`#FFD700`) around the adjacent hazard when `hazardAdjacentThisTick && hazardChainStreak > 0`. Wrapped in `ctx.save()`/`ctx.restore()`.
+
+## Combo Heat → Hazard Melt (v11 B)
+- At `comboCount >= 10`, entering an on-phase hazard downgrades the hit from lethal to a combo-break: `comboCount = 0`, `lastComboMilestone = 0`, `hazardChainStreak = 0`, no death. Emits particles + ring + toast "🔥 Melted a hazard!" and returns `false` from `checkPlayerDeath()`.
+- Melt is HAZARD-ONLY — only the hazard death branch (L6359) gets the melt check. Self/wall/rival deaths at combo ≥ 10 are NOT melted (thematically correct: "melt" lava, not walls).
+- Melt slots BEFORE shield in the hazard death path, so a high-combo player isn't punished by also consuming their shield.
+- `comboHeatColor(combo)` (L5011): extended with a molten tier at combo ≥ 10 (alpha 0.4, brighter orange-red). The ≥ 15 tier is alpha 0.45 (brighter than ≥ 10).
+- Inline `haloColor` ladder (L4994): `#FF6600` at combo ≥ 10 (between ≥ 7 `#FF8800` and ≥ 15 `#FF4400`). `haloAlpha` cap raised to 0.7 at combo ≥ 10.
+- No new state, no snapshot change (reads existing `comboCount`).
+
+## Death Save Chain (v11 final order, load-bearing)
+- **Hazard death path** (L6359): `melt (combo ≥ 10, v11 B) → shield → vampire → streak charge (v11 E) → death`
+- **Collision death path** (L6364): `shield → vampire → streak charge (v11 E) → serpentine → death`
+- **Wall death path** (L6359-area): `phoenix → streak charge (v11 E) → death` (no shield/vampire — wall death has only phoenix)
+- **Rival collision path** (L6444-area): `shield → phoenix → streak charge (v11 E) → death` (no vampire/serpentine)
+- Serpentine is ABSENT from the hazard, wall, and rival paths (hazards aren't obstacles; wall/rival have no serpentine code).
+- Melt is hazard-only.
+- Streak charge is AFTER per-run saves (shield, vampire), before serpentine (obstacle-specific). This preserves per-run resources first.
+
+## Streak Multiplier Ladder (v11 E)
+- `streakCharges` (int) + `streakChargeGranted` (int, -1 sentinel) are module-scope state declared at L764-766. Persistent meta-resources (NOT reset in `resetGame`/`resetWaveState`).
+- `awardXP(amount)` (L7005): `const streakMult = 1 + Math.min(0.30, streakCount * 0.01)` — +1% XP per streak day, cap +30%. Applied to `amount` BEFORE the level-20 check (L7012), so it applies to both the overcharge and main paths. Quest XP inherits automatically (calls `awardXP`).
+- `startGame()` (L2353-area): re-reads `streakCharges` and `streakChargeGranted` from `saveManager`. Grants a charge at 7/14/30-day thresholds (`STREAK_CHARGE_DAYS = [7, 14, 30]`) via `streakChargeGranted < sci` check. Resets `streakChargeGranted = -1` on broken/first streak (streak resets to 1, not 0 — per codebase convention at L2304/L2325).
+- `tryStreakChargeSave(wrappedHead)` (L6306, nested inside `updateGame`): if `streakCharges > 0`, decrements, persists via `saveManager.set`, repositions head to a free tile (Phoenix-style), toasts, returns `false` (saved). Returns `true` (no save) if no charges. **Auto-fire design** — no prompt; the charge is banked for exactly this purpose.
+- Called in ALL 4 death paths: collision (L6344, after vampire, before serpentine), wall (L6376, after phoenix, before death), hazard (L6412, after vampire, before death), rival (L6459, after phoenix, before death).
+- Snapshot: `streakCharges` is additive (build L2576, restore L2725). The snapshot stores the in-run value; the persistent source is `snake_streak_charges` save key.
+- Display: streak block at L4416 (idle screen) shows "🛡×N death insurance" when `streakCharges > 0`.
+
+## Hoard Pigment Rush (v11 C)
+- `hoardPigmentCount` (int), `pigmentRushTimer` (int), `pigmentRushActive` (boolean) are module-scope state declared at L3502-3504.
+- `activateHoard()` (L3508): resets `hoardPigmentCount = 0` and tags each of the 4 hoard foods with `pigment: true` when pushing to `extraFoods[]`.
+- `extraFoods` eat block (L6840): on eating an `ef.pigment` food, increments `hoardPigmentCount`. At 4, sets `pigmentRushActive = true`, `pigmentRushTimer = 300` (~5s), extends rival `respawnTimer` by 3000ms, toasts "🎨 Pigment Rush! ×3 score!", flashes. `hasSeenPigmentRush` gates a first-time toast.
+- `addScore(amount)` (L1823): when `pigmentRushActive`, `effectiveHoardMult = 3` (replaces hoard ×2, not stacks). With `golden_food` mutator, capped at ×2 (Golden Age + Rush = ×4 max, not ×6). The global ×4 cap from Feature A also applies.
+- `pigmentRushTimer` decays in the TICK LOOP (`updateGame()`, L6114), NOT in `animateVisuals()` (rAF) — it's game-logic state (affects `addScore`).
+- `endHoard()` (L3523): clears `hoardPigmentCount` but does NOT clear `pigmentRushTimer`/`pigmentRushActive` if rush is active (the rush outlives the hoard — design choice so triggering at the last second isn't punished).
+- `drawPostFX()` (L5369): stronger gold tint when `pigmentRushActive` (alpha 0.12, or 0.06 in calm mode vs the normal hoard 0.06/0.03).
+- `extraFoods` snapshot: `pigment: ef.pigment || false` added to build (L2571) and restore (L2721). Additive.
+- Hoard snapshot: `hoardPigmentCount`, `pigmentRushTimer`, `pigmentRushActive` added to build (L2652) and restore (L2797). Additive.
+- Reset: `resetGame()` ONLY (L2207 — hoard is Gauntlet-excluded, matching hoard precedent). NOT `resetWaveState()`.
+- `hasSeenPigmentRush` first-time toast. Save key: `snake_has_seen_pigment_rush`.
