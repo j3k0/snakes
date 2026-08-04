@@ -247,3 +247,69 @@
 - **Post-FX golden tint**: `drawPostFX()` adds a subtle gold tint (`rgba(255,215,0,0.06)`, or 0.03 in calm mode) when `hoardActive`.
 - **Snapshot**: `hoardActive`/`hoardTimer`/`hoardTickCounter`/`scoreMultiplier` are additive fields (no `SNAPSHOT_VERSION` bump). The 4 hoard foods are in `extraFoods[]` (snapshotted by D's infrastructure). Reset in `resetGame()` only (E is excluded from Gauntlet, so `resetWaveState()` is not needed).
 - **No session-end hook** — the event dies with the run, like bounty.
+
+## v10 Features
+
+## Input Buffer Queue (v10 G)
+- `dirQueue[]` (cap 2) replaces the single-slot `nextDirection`. `setNextDirection()` pushes to the queue with reverse-check against the effective tail (last queued direction, or `lastConsumedDir` if queue empty). The tick loop shifts from the front.
+- Reverse-check prevents 180° self-collision: compares new direction against the queue tail (not current `dx`/`dy`), since the tail is the direction that will be in effect when the new press executes.
+- Cap of 2: a 3rd press is silently dropped (2 pending turns max). Documented behavior, not a bug.
+- The swipe handler already calls `setNextDirection()` — no separate edit needed (it was already routing through the function pre-v10).
+- Snapshot: `dirQueue` replaces `nextDirection` (additive, no `SNAPSHOT_VERSION` bump). Restore is backward-compatible: `dirQueue = data.dirQueue || (data.nextDirection ? [data.nextDirection] : [])`.
+- Reset sites: `resetGame()` and `resetWaveState()` both clear `dirQueue = []`. The tick consumption site shifts from the queue and sets `lastConsumedDir`.
+
+## Colorblind Food Palettes (v10 F)
+- `CVD_PALETTES` (protan/deutan/tritan/off) remap food-tier colors to Okabe-Ito confusion-line-safe hues. Persisted via `saveManager.set('snake_cvd_palette', 'off')`.
+- `foodColor(type)` helper: returns palette color if active, else `FOOD_TIERS[type].color`. MUST be used at ALL `tier.color` read sites: `drawFood()` (shadow, fill, stroke), `drawExtraFood()` (hoard bonus), eat-block (floater, flash, particles, synesthesia), help overlay legend, painter mode `currentPaintColor`.
+- Portal food uses hardcoded `#AA44FF` (not `tier.color`) — `foodColor()` does NOT affect portal visuals by design.
+- Grid cache key includes `_cvd<palette>` suffix so toggling rebuilds the cache.
+- Hazard Zones (v10 C) use blue/violet `#6B3FA0` as default color — CVD-safe without remapping.
+- Settings UI: 4-button selector (Off/Protan/Deutan/Tritan) in `renderSettings()` via `cvdSeg()` helper. `setCvdPalette()` invalidates `gridCacheTheme`.
+
+## Meta-Achievements (v10 E)
+- `META_ACHIEVEMENTS` map (same shape as `ACHIEVEMENTS`) with `check` functions that read the module-scope `achievements` map by closure (NOT `stats`/`ctx` like base achievements).
+- Evaluated in `checkAchievements()` as a second loop AFTER the base loop, INSIDE the `achievementsEnabled` guard. Base achievements unlocked in the current tick are immediately visible to meta-checks (same-tick, intentional).
+- Token reward: +1 mutator token per meta (NOT a "large bundle" — avoids economy flooding per AGENTS.md Quest Board precedent). Includes `saveManager.set('snake_mutator_tokens', ...)` + `checkMutatorUnlocks()` per unlock.
+- Persisted in `snake_achievements` (meta IDs namespaced `meta_*`). Auto-included in `exportSaveData()`.
+- Meta `check` functions use EXISTING achievement IDs (e.g. `COMBO_3`, `COMBO_5`, `COMBO_10`, `RIVAL_SLAYER`, `SHIELD_MASTER`, `LONG_LEGACY`, `GLUTTON_II`). No new base achievements were added.
+
+## Daily Seed Leaderboard (v10 D)
+- `snake_daily_lb` — localStorage JSON map keyed by date string from `getDayString()`. Each day stores top-5 entries `{score, time, foodEaten, maxCombo, ts}`.
+- Written in `finalizeSession()` (single hook — covers both `gameOver()` and `endZenSession()` paths). Gated on `gameMode === 'daily'`.
+- Sort: score desc, maxCombo desc, ts asc (first-finished ranks higher on tie).
+- Rendered on the idle screen when daily mode is selected (top-3 visible), below streak info.
+- New localStorage key — no cross-version contamination with pre-v10 runs.
+
+## Bomb Food (v10 B)
+- `FOOD_TIERS.bomb` (weight 0.04, pts: 0, xp: 0). Rebalance: `common` 0.37→0.33 so weights sum to exactly 1.00. `pickRandomFoodType` has `return 'common'` fallback at line ~1751.
+- Bomb eat branch: BEFORE score/XP/combo award. Clears obstacles within 2-tile Manhattan radius, trims rival tails by `min(3, rival.length - 1)` segments. Skips score (`addScore`), XP (`awardXP`), and stat-bucketing (uses `stats.bombsEaten` instead of `normalFoodEaten`). Combo timer continues (bomb is an eat).
+- The bomb eat block is an `if (eatenType === 'bomb') { ... } else { ...normal eat... }` split inside the food-eat `if` block. The `else` closes before the food2 eat check.
+- Magnet skip: `food.type !== 'hunter' && food.type !== 'bomb'` (both primary food and extraFoods paths).
+- Echo-brew `food2` coerces `food.type === 'bomb'` to `'common'` (same as hunter/portal).
+- Walled exclusion: non-chaos path (`effectiveTiers` filter drops `k !== 'hunter' && k !== 'bomb'`), chaos path (`shuffleFoodWeights` filter drops `(k === 'hunter' || k === 'bomb')` when `wrap === false`).
+- `hasSeenBomb` first-time toast (mirrors `hasSeenPortal` pattern).
+- `EXPLORER` stays at `sessionFoodTypes.size >= 6` (now 6-of-8 non-Walled) — do NOT bump.
+- drawFood `bomb` case: pulsing dark-orange circle with fuse spark. Drawn at local origin per D1 discipline. Uses `foodColor('bomb')`.
+
+## Combo Bank (v10 A)
+- `comboCharges` (int, cap 5) + `comboBankSpendMode` (0=Clear, 1=Magnet, 2=Teleport). Declared beside `comboCount`. Reset in BOTH `resetGame()` AND `resetWaveState()`.
+- Charge banking: in `handleComboMilestone()`, after the existing floater, on ALL `COMBO_MILESTONES` entries (not a subset). Cap at 5 — overflow shows "FULL" in HUD.
+- **Spend-mode selector**: `X` key cycles mode (gated on `gameState === 'playing'` — no collision with Prestige's `X` on `idle`). `Z` key spends 1 charge on the current mode. Both are bare-name module-scope functions.
+- `spendComboCharge()`: Clear (3-tile obstacle clear, cyan ring), Magnet Pulse (instant 6-tile pull with 1-tile gap, skips hunter/bomb/portal, magenta ring), Food Teleport (relocate food via `findFreeTile`, skips portal epics, yellow ring).
+- Magnet Pulse is a NEW multi-step loop (NOT a reuse of the existing 1-tile/tick magnet). Instantly moves food to 1-tile gap from head (not onto head, to avoid auto-eat).
+- HUD badge: `drawComboBankHUD()` called after `drawXPBar()` in `drawGame()`. Shows `⚡[Mode] x<charges>` with mode-specific color. Wraps in `ctx.save()`/`ctx.restore()`.
+- `hasSeenComboBank` first-time toast on first charge banked.
+- Snapshot: `comboCharges`/`comboBankSpendMode` as additive fields (no `SNAPSHOT_VERSION` bump). Restore defaults to 0.
+- Zen mode: charges accrue (comboCount increments), but spend is inert (no obstacles/score). By design.
+
+## Hazard Zones (v10 C)
+- `hazards[]` array (entries: `{cx, cy, radius, phase, phaseTimer, lifeTimer, maxLife}`). Declared early (~line 205). Reset in `resetGame()` ONLY (Gauntlet-excluded, matching hoard precedent).
+- `hazardsEnabled` on ALL 8 `MODE_CONFIG` entries: Classic/TimeAttack/Daily/Snap = `true`, Zen/Walled/Painter/Gauntlet = `false`.
+- `tickHazards()`: called from `updateGame()` after `tickBounty()`, gated on `hazardsEnabled`. Advances phase timers (on for `HAZARD_ON_TICKS`=15, off for `HAZARD_OFF_TICKS`=10), expands/contracts radius over lifetime. Spawns new hazards on `HAZARD_INTERVAL`=3600 tick counter, cap 2 concurrent, min 4-tile Manhattan from snake head, 15s grace at run start (`HAZARD_GRACE_TICKS`=250).
+- **Lethality**: lethal when `phase === 'on'` AND head within `radius`. No linger counter — the pulse cycle IS the telegraph. The off-phase is the escape window. Fair at all speeds because the player can see the pulse and time movement.
+- **Death save chain**: shield → vampire → death. NO Serpentine (hazards aren't obstacles). NO Phoenix (hazard is not wall/rival death).
+- `isHazardCollision(pos)`: iterates `hazards[]`, returns true if `phase === 'on'` and Manhattan distance ≤ `radius`.
+- `drawHazards()`: drawn between `drawObstacles()` and `drawFood()` in `drawGame()`. Blue/violet `#6B3FA0` radial gradient (CVD-safe default). Pulsing alpha when on, dim when off. Calm mode: steady tint, no pulse. `ctx.save()`/`ctx.restore()`.
+- `generateFood()`: rejects active hazard tiles in the do-while collision check. `generateHoardFood()`: does NOT reject hazards (intentional emergent tension — hoard foods can spawn in active hazards).
+- `hasSeenHazard` first-time toast on first hazard spawn.
+- Snapshot: `hazards` as additive field (no `SNAPSHOT_VERSION` bump). Restore: `hazards = data.hazards || []`.
