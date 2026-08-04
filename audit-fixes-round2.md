@@ -107,11 +107,11 @@
 
 ## Test Results
 
-All tests pass (17/18, same pre-existing stale B9 as round 1):
+All tests pass (109/109 across 7 suites):
 - test-v11: 14/14 ✅
 - test-v10: 12/12 ✅
 - test-v9: 19/19 ✅
 - test-evolution: 11/11 ✅
 - test-feature-d: 14/14 ✅
 - test-quests: 21/21 ✅
-- test-bugfixes: 17/18 (B9 pre-existing stale)
+- test-bugfixes: 18/18 ✅ (B9/B10 stale assertions fixed in follow-up commit 69d9b72)
