@@ -480,6 +480,7 @@
         // v9 G: Retry Seed from Diary — mirrors the seedField input handler's hash computation
         function retrySeedFromDiary(seed) {
             if (!seed) return;
+            if (gameState === 'playing') return; // blocked mid-run — same guard as Q/B/C panel keys
             var field = document.getElementById('seedField');
             if (field) field.value = seed;
             activeSeed = seed;
