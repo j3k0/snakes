@@ -268,6 +268,7 @@
             if (gameTimeout) return;
             if (gameState !== 'playing') return;
             gameTimeout = setTimeout(() => {
+                gameTimeout = null;
                 updateGame();
                 if (gameState === 'playing') {
                     scheduleNextTick();
