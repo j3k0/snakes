@@ -1929,6 +1929,7 @@ const TRAIL_RENDER_CONFIG = {
                             if (food2 && food2.x === tx && food2.y === ty) continue;
                             if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
                             if (extraFoods.some(ef => ef.x === tx && ef.y === ty)) continue;
+                            freeTiles.push({ x: tx, y: ty });
                         }
                     }
                     if (freeTiles.length === 0) return null;
@@ -1989,6 +1990,7 @@ const TRAIL_RENDER_CONFIG = {
                     if (food2 && food2.x === tx && food2.y === ty) continue;
                     if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
                     if (extraFoods.some(function(ef) { return ef.x === tx && ef.y === ty; })) continue;
+                    if (hazards.some(function(h) { return h.phase === 'on' && Math.abs(h.cx - tx) + Math.abs(h.cy - ty) <= h.radius; })) continue;
                     // Wrap-aware per-axis distance
                     var ddx = tx - epicFood.x, ddy = ty - epicFood.y;
                     if (ddx > PLAY_WIDTH / 2) ddx -= PLAY_WIDTH; else if (ddx < -PLAY_WIDTH / 2) ddx += PLAY_WIDTH;
@@ -2109,6 +2111,7 @@ const TRAIL_RENDER_CONFIG = {
             activeBounty = null;
             bountyTickCounter = 0;
             sessionBonusFood = 0;
+            sessionSpeedFood = 0;
             gameTick = 0;
             lastEatTime = 0;
             sessionXP = 0;
@@ -2126,6 +2129,7 @@ const TRAIL_RENDER_CONFIG = {
             shakeTimer = 0;
             flashOverlay = null;
             eatAnimTimer = 0;
+            lastEatenType = 'common';
             if (comboFadeTimer) clearTimeout(comboFadeTimer);
             comboFadeTimer = null;
             paintGrid = null;
@@ -2143,6 +2147,7 @@ const TRAIL_RENDER_CONFIG = {
             powerUpType = null;
             powerUpSpawnCounter = 0;
             powerUpDespawnCounter = 0;
+            powerUpPickup = null;
             rivals = [];
             activeMutators = [];
             draftScreenVisible = false;
@@ -2843,7 +2848,7 @@ const TRAIL_RENDER_CONFIG = {
                 if (synesthesiaMode) startPad();
                 return true;
             } catch (e) {
-                if (fromStorage) clearSnapshot();
+                if (fromStorage) { quarantineKey(SNAPSHOT_KEY); clearSnapshot(); }
                 return false;
             }
         }
@@ -3241,9 +3246,10 @@ const TRAIL_RENDER_CONFIG = {
             stopGameLoop();
             gameState = 'gameover';
             clearSnapshot();
+            score = snake.length;
+            finalizeSession(true);
             saveReplay(score, snake.length);
             updateMenuFooter();
-            score = snake.length;
             awardXP(snake.length * 10);
             checkAchievements(score);
             checkDailyCompletion(score, {
@@ -3424,6 +3430,8 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 return;
             }
+            // v9 E: hold bounty in stasis during Golden Hoard (no tick-down, no completion)
+            if (hoardActive) return;
             activeBounty.ticksLeft--;
             if (activeBounty.ticksLeft <= 0) {
                 queueToast('⏳ Bounty expired', 1500);
@@ -3434,12 +3442,12 @@ const TRAIL_RENDER_CONFIG = {
             checkBounty();
         }
         // v10 C: Hazard Zones — temporal pulsing danger tiles
-        const HAZARD_INTERVAL = 3600; // ~60s between hazard spawns
-        const HAZARD_MAX_LIFE = 300;  // ~5s lifespan
+        const HAZARD_INTERVAL = 500; // ~60s at 120ms tick
+        const HAZARD_MAX_LIFE = 42;  // ~5s lifespan at 120ms tick
         const HAZARD_MAX_RADIUS = 2.5 * TILE_SIZE; // max expansion radius
-        const HAZARD_ON_TICKS = 15;  // on-phase duration
-        const HAZARD_OFF_TICKS = 10; // off-phase duration
-        const HAZARD_GRACE_TICKS = 250; // ~15s grace at run start (no hazards)
+        const HAZARD_ON_TICKS = 15;  // on-phase duration (~1.8s)
+        const HAZARD_OFF_TICKS = 10; // off-phase duration (~1.2s)
+        const HAZARD_GRACE_TICKS = 125; // ~15s grace at run start (no hazards)
         let hazardTickCounter = 0;
         function tickHazards() {
             // Advance existing hazards
@@ -3502,8 +3510,8 @@ const TRAIL_RENDER_CONFIG = {
             return false;
         }
         // v9 E: Golden Hoard Event — periodic food bonanza with 2x score + rival freeze.
-        const HOARD_INTERVAL = 5400; // ~90s at 60ms tick
-        const HOARD_DURATION = 900;  // ~15s
+        const HOARD_INTERVAL = 750; // ~90s at 120ms tick
+        const HOARD_DURATION = 125;  // ~15s at 120ms tick
         let hoardTimer = 0;
         let hoardTickCounter = 0;
         // v11 C: Hoard Pigment Rush — eating all 4 hoard foods triggers a 5s ×3 climax
@@ -4847,7 +4855,7 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.save();
                 ctx.globalAlpha = 0.7;
                 var f2Tier = FOOD_TIERS[food2.type] || FOOD_TIERS.common;
-                // v7 D1: echo food also pops on spawn; v8 B: calm mode skips the pop.
+                ctx.fillStyle = foodColor(food2.type);
                 var f2Elapsed = performance.now() - (food2.spawnTime || 0);
                 var f2Scale = calm ? 1 : (f2Elapsed < 250 ? Math.max(0, easeOutBack(f2Elapsed / 250)) : 1);
                 var f2cx = food2.x + TILE_SIZE / 2;
@@ -5163,28 +5171,27 @@ const TRAIL_RENDER_CONFIG = {
 
             // Snap mode timer ring around head
             if (gameMode === 'snap' && gameState === 'playing' && snake.length > 0) {
+                ctx.save();
                 const cx = headDrawX + TILE_SIZE / 2;
                 const cy = headDrawY + TILE_SIZE / 2;
                 const radius = TILE_SIZE * 0.8;
                 const fraction = Math.min(shrinkTimer, snapDuration) / snapDuration;
-
                 let ringColor;
                 if (fraction > 0.5) ringColor = '#44FF44';
                 else if (fraction > 0.25) ringColor = '#FFAA00';
                 else ringColor = '#FF4444';
-
                 ctx.strokeStyle = ringColor;
                 ctx.lineWidth = 2;
                 ctx.beginPath();
                 ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + fraction * 2 * Math.PI);
                 ctx.stroke();
-
                 // Text label for accessibility
                 ctx.fillStyle = ringColor;
                 ctx.font = 'bold 9px Arial';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'top';
                 ctx.fillText('SNAP ' + Math.round(fraction * 100) + '%', cx, cy + radius + 3);
+                ctx.restore();
             }
 
             // Shield aura around head
@@ -5255,6 +5262,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawMuteIndicator() {
+            ctx.save();
             if (muted) {
                 ctx.fillStyle = '#888';
                 ctx.font = hudFont(16);
@@ -5276,6 +5284,7 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textBaseline = 'bottom';
                 ctx.fillText('👻', CANVAS_WIDTH - 8 - (highContrast ? 24 : 0), CANVAS_HEIGHT - 4);
             }
+            ctx.restore();
         }
 
         function drawXPBar() {
@@ -5395,6 +5404,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function drawTimeAttackHUD() {
+            ctx.save();
             if (gameMode === 'timeAttack' && gameState === 'playing' && timeAttackEnd > 0) {
                 const remaining = Math.max(0, Math.ceil((timeAttackEnd - Date.now()) / 1000));
                 ctx.fillStyle = remaining <= 10 ? '#FF4444' : '#FFD700';
@@ -5403,9 +5413,11 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textBaseline = 'top';
                 ctx.fillText('TIME: ' + remaining + 's', CANVAS_WIDTH / 2, 5);
             }
+            ctx.restore();
         }
 
         function drawSnapHUD() {
+            ctx.save();
             if (gameMode === 'snap' && gameState === 'playing') {
                 const fraction = Math.min(shrinkTimer, snapDuration) / snapDuration;
                 ctx.fillStyle = fraction > 0.5 ? '#44FF44' : fraction > 0.25 ? '#FFAA00' : '#FF4444';
@@ -5413,7 +5425,6 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'top';
                 ctx.fillText('SNAP LV.' + snapLevel, CANVAS_WIDTH - 5, 5);
-
                 const barWidth = 80;
                 const barHeight = 6;
                 const barX = CANVAS_WIDTH - 10 - barWidth;
@@ -5423,9 +5434,11 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.fillStyle = fraction > 0.5 ? '#44FF44' : fraction > 0.25 ? '#FFAA00' : '#FF4444';
                 ctx.fillRect(barX, barY, barWidth * fraction, barHeight);
             }
+            ctx.restore();
         }
 
         function drawDailyHUD() {
+            ctx.save();
             if (gameMode === 'daily' && gameState === 'playing') {
                 const seed = getDailySeed();
                 const challenge = DAILY_CHALLENGES[seed % DAILY_CHALLENGES.length];
@@ -5442,15 +5455,17 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.fillText('Progress: ' + Math.min(progress, challenge.progressTarget) + '/' + challenge.progressTarget, CANVAS_WIDTH / 2, 18);
                 }
             }
+            ctx.restore();
         }
 
         function drawPowerUpHUD() {
+            ctx.save();
             if (powerUpType) {
                 const config = POWERUP_TYPES[powerUpType];
                 const timerDuration = POWERUP_TYPES[powerUpType].duration;
                 const fraction = Math.max(0, powerUpTimer / timerDuration);
                 // Flicker when about to expire
-                if (powerUpTimer > 0 && powerUpTimer < 2000 && Math.floor(renderTime / 80) % 2 === 0) return;
+                if (powerUpTimer > 0 && powerUpTimer < 2000 && Math.floor(renderTime / 80) % 2 === 0) { ctx.restore(); return; }
                 const barX = 5;
                 const barY = 5;
                 const barWidth = 100;
@@ -5470,6 +5485,7 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textBaseline = 'middle';
                 ctx.fillText(config.name, barX + 4, barY + barHeight / 2);
             }
+            ctx.restore();
         }
 
         function drawRivalHUD() {
@@ -5630,6 +5646,7 @@ const TRAIL_RENDER_CONFIG = {
             rivals = [];
             obstacles = [];
             generateObstaclesForWave(wave);
+            obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
             applyGauntletPicks();
             var combined = snake.concat(rivalCombinedSnake());
             food = generateFood(combined);
@@ -6062,11 +6079,13 @@ const TRAIL_RENDER_CONFIG = {
 
             // Seed display
             if (activeSeed !== null && (gameState === 'playing' || gameState === 'paused' || gameState === 'gameover')) {
+                ctx.save();
                 ctx.fillStyle = 'rgba(255,255,255,0.3)';
                 ctx.font = '10px monospace';
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'bottom';
                 ctx.fillText('Seed: ' + activeSeed, CANVAS_WIDTH - 5, CANVAS_HEIGHT - 5);
+                ctx.restore();
             }
 
             // Target score display for challenge URLs
@@ -6367,7 +6386,9 @@ const TRAIL_RENDER_CONFIG = {
             }
             // --- v6: extracted death check ---
             function checkPlayerDeath(wrappedHead, skipSelfCollision) {
-                if (checkCollision(wrappedHead) && !skipSelfCollision) {
+                var hitObstacle = isObstacleCollision(wrappedHead);
+                var hitSelf = !skipSelfCollision && checkCollision(wrappedHead);
+                if (hitObstacle || hitSelf) {
                     if (shieldActive) {
                         shieldActive = false; powerUpTimer = 0; powerUpType = null;
                         stats.shieldBlocks++;
@@ -6404,9 +6425,9 @@ const TRAIL_RENDER_CONFIG = {
                         lastDeathCause = 'Hit the wall!';
                         // v6: Phoenix Brew — resurrect once
                         if (activeBrews.indexOf('phoenix') !== -1 && !brewUsageFlags.phoenixUsed) {
-                            brewUsageFlags.phoenixUsed = true;
                             var freePos = findFreeTile(wrappedHead.x, wrappedHead.y);
                             if (freePos) {
+                                brewUsageFlags.phoenixUsed = true;
                                 snake[0] = { x: freePos.x, y: freePos.y };
                                 while (snake.length > 5) snake.pop();
                                 score = 0;
@@ -6487,9 +6508,9 @@ const TRAIL_RENDER_CONFIG = {
                                 lastDeathCause = 'You were caught by the rival!';
                                 // v6: Phoenix Brew in rival collision
                                 if (activeBrews.indexOf('phoenix') !== -1 && !brewUsageFlags.phoenixUsed) {
-                                    brewUsageFlags.phoenixUsed = true;
                                     var freePos2 = findFreeTile(wrappedHead.x, wrappedHead.y);
                                     if (freePos2) {
+                                        brewUsageFlags.phoenixUsed = true;
                                         snake[0] = { x: freePos2.x, y: freePos2.y };
                                         while (snake.length > 5) snake.pop();
                                         score = 0;
@@ -6622,8 +6643,16 @@ const TRAIL_RENDER_CONFIG = {
                     food = generateFood(snake.concat(rivalCombinedSnake()).concat(extraFoods));
                     if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
                     srSpeak('Bomb detonated');
+                    checkAchievements(score);
+                    checkQuestProgress();
                 } else {
                 // Stats tracking
+                sessionFoodEaten++;
+                stats.totalFoodEaten++;
+                stats.normalFoodEaten++;
+                if (eatenType === 'speed') sessionSpeedFood++;
+                if (eatenType === 'bonus') sessionBonusFood++;
+                sessionFoodTypes.add(eatenType);
 
                 srSpeak('Ate ' + eatenType + '. Score ' + score);
 
@@ -6866,7 +6895,7 @@ const TRAIL_RENDER_CONFIG = {
                             hoardPigmentCount++;
                             if (hoardPigmentCount >= 4 && !pigmentRushActive) {
                                 pigmentRushActive = true;
-                                pigmentRushTimer = 300; // ~5s at 60fps
+                                pigmentRushTimer = 42; // ~5s at 120ms tick
                                 // Extend rival freeze by 3s
                                 for (var pri = 0; pri < rivals.length; pri++) {
                                     if (rivals[pri].active) rivals[pri].respawnTimer = (rivals[pri].respawnTimer || 0) + 3000;
@@ -7075,7 +7104,7 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Progressive obstacle spawning
-            if (gameMode !== 'zen' && gameMode !== 'walled' && gameMode !== 'daily' && gameMode !== 'painter' && obstacles.length < Math.floor((PLAY_WIDTH / TILE_SIZE) * (PLAY_HEIGHT / TILE_SIZE) * MAX_OBSTACLE_PERCENT)) {
+            if (gameMode !== 'zen' && gameMode !== 'walled' && gameMode !== 'daily' && gameMode !== 'painter' && gameMode !== 'gauntlet' && obstacles.length < Math.floor((PLAY_WIDTH / TILE_SIZE) * (PLAY_HEIGHT / TILE_SIZE) * MAX_OBSTACLE_PERCENT)) {
                 if (obstacleSpawnTimer <= 0) {
                     obstacleSpawnTimer = OBSTACLE_SPAWN_INTERVAL;
                     const head = snake.length > 0 ? snake[0] : { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE };
