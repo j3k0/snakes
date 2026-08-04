@@ -149,24 +149,23 @@ async function run() {
     if (!hasSimpleGuard) throw new Error('generateFood guard not simplified');
   });
 
-  // B9: Magnet wrap edge fix
+  // B9: Magnet wrap edge fix (v8 E: uses PLAY_WIDTH/PLAY_HEIGHT, NOT CANVAS_WIDTH)
   test('B9: magnet pull uses wrapped delta', async () => {
     const source = await page.evaluate(() => {
-      // Find the magnet block in updateGame
       const fn = updateGame.toString();
-      return fn.includes('CANVAS_WIDTH / 2') && fn.includes('CANVAS_HEIGHT / 2');
+      return fn.includes('PLAY_WIDTH / 2') && fn.includes('PLAY_HEIGHT / 2');
     });
     if (!source) throw new Error('Magnet wrap check not found in updateGame');
   });
 
   // B10: endZenSession calls checkAchievements and checkDailyCompletion
+  // B10: endZenSession calls checkAchievements and checkDailyCompletion (v8 D: uses buildRecapData, not sessionSummary)
   test('B10: endZenSession calls checkAchievements', async () => {
     const source = await page.evaluate(() => endZenSession.toString());
     if (!source.includes('checkAchievements')) throw new Error('endZenSession missing checkAchievements call');
     if (!source.includes('checkDailyCompletion')) throw new Error('endZenSession missing checkDailyCompletion call');
-    if (!source.includes('sessionSummary')) throw new Error('endZenSession missing sessionSummary creation');
+    if (!source.includes('buildRecapData')) throw new Error('endZenSession missing buildRecapData call');
   });
-
   // B11: drawOverlay has save/restore
   test('B11: drawOverlay has ctx.save at start and ctx.restore at exits', async () => {
     const source = await page.evaluate(() => drawOverlay.toString());
