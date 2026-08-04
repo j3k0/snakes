@@ -168,3 +168,82 @@
 
 ## Load-Time Bindings (v7 fix)
 - `hasTouch` (touch-device boolean) was referenced at module-init (`let isMobile = hasTouch || ...`) since the v5 refactor but never declared, throwing a ReferenceError that HALTED the entire game script on load — every later `let`/`const` landed in the temporal dead zone and the game never initialized. Fixed by declaring `const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)` before its first use. Any future module-init expression that references an undeclared identifier has the same game-breaking effect; run `node test-bugfixes.mjs` ("No JS errors on load") as the first smoke check.
+
+## HiDPI/Retina Canvas Scaling (v8 A)
+- `DPR` is a module-scope `let` (`Math.min(window.devicePixelRatio || 1, 3)`), NOT a const — `resizeCanvas` reassigns it when a window moves between displays, resizes the backing store, and nulls `gridCacheTheme` to force a rebuild.
+- The base transform is set at the TOP of `drawGame()`: `ctx.setTransform(DPR, 0, 0, DPR, shakeOffsetX * DPR, shakeOffsetY * DPR)`. This is absolute, so `drawGame` is self-contained for every direct `drawGame(1)` call (~30 sites: menus, pause nav, gauntlet intermission, draft, restore, page-load) AND carries the shake when called from rAF. Do NOT add a separate `setTransform` in `animateVisuals`.
+- The shake is FOLDED into the base transform via module-level `shakeOffsetX`/`shakeOffsetY` (visual state, written only in `animateVisuals`, read in `drawGame`). The old `save()`/`translate()`/`restore()` shake wrapper around the `drawGame(t)` call was REMOVED — a `setTransform` inside `drawGame` would wipe a separate translate. Calm mode (`calmModeEffective()`) and the `shakeIntensity` slider both gate the shake inside this single site.
+- The grid cache (`ensureGridCache`) is DPR-scaled: `gridCacheCanvas.width/height = PLAY_WIDTH/HEIGHT * DPR`, `gctx.setTransform(DPR,...)`, and the cache key includes a `_dpr<N>` suffix. **The cache-key suffix is load-bearing** — `resizeCanvas` does NOT call `ensureGridCache`; the cache rebuilds only because the key mismatch triggers it on the next `drawGrid()`. `drawGrid()` blits with an explicit dest size: `ctx.drawImage(gridCacheCanvas, 0, 0, PLAY_WIDTH, PLAY_HEIGHT)`.
+
+## Calm Mode / Reduced Motion (v8 B)
+- `calmMode` ('auto'|'on'|'off') persists via saveManager; `calmModeEffective()` = `on` OR (`auto` AND `prefers-reduced-motion: reduce`). `prefersReducedMotion` is a `matchMedia` query with a `change` listener that sets `visualDirty`.
+- Gating is INTENSITY-ONLY at choke points — timers still decay, logic state is unchanged (keeps replays/snapshots deterministic): shake (folded-shake line → 0), flash alpha (clamped ≤ 0.15 in the `animateVisuals` flash consumption block, NOT in `drainVisualQueue` which only returns the effect), food spawn pop + idle bob (gated in `drawFood()` AND the echo-brew `food2` pop path), grid breathing (skipped), death fragments (capped at 60 in the `gameOver()` spawn loop).
+
+## Unified Settings Panel (v8 C)
+- `#settingsPanel` follows the cosmetics/quests DOM-panel pattern. The cross-hide contract is now **7 sites**: `showDiaryPanel`, `showBrewsPanel`, `showQuestsPanel`, `showAchievementsPanel`, `showCosmeticsPanel`, `showStatsPanel`, and `closeAllPanels`. `closeAllPanels` now also hides `diaryPanel` and `brewsPanel` (fixing a pre-existing gap where those two were never hidden). Adding a new panel requires the cross-hide line in every `show*Panel`.
+- `gridVisible` (`snake_grid_visible`) gates grid LINES only — the themed bg fill always paints (skipping `drawGrid()` entirely would remove the board background, which is baked into the cache). The cache key includes `_g`/`_bg` so toggling rebuilds bg-only vs full.
+- `S` key opens settings in idle/gameover only; it MUST be placed AFTER the gauntlet-intermission block in the keydown handler so it doesn't collide with intermission's `s` navigation.
+- `spawnParticles(x, y, count, color)` — the parameter is `count`, NOT `pCount`. The `particleDensity` slider scales it AFTER the `Math.min(count, 500 - particles.length)` perf clamp.
+
+## Game-Over Recap Card (v8 D)
+- `recapData` REPLACES `sessionSummary`/`sessionSummaryTimer` (both fully removed — construction in `gameOver`/`endZenSession`, the draw block in `animateVisuals`, AND the decay line in the rAF timer-decay section). When removing a decayed timer, grep for ALL three sites (build / draw / decay) or the leftover decay line throws a TDZ ReferenceError at load.
+- `buildRecapData()` is called from BOTH `gameOver()` AND `endZenSession()` (Zen-Mode-Gap rule), but NOT for gauntlet deaths (`if (gameMode !== 'gauntlet')`) — gauntlet keeps its existing `drawOverlay('Run Over — Wave X/5', ...)` overlay. Gauntlet-complete shows `drawGauntletCompleteScreen`.
+- `recapQuestBaseline` is snapshotted in `startGame()` (via `captureQuestBaseline()`); `buildRecapData` diffs per-quest `progress` to find the quests that moved (cap 3). `isNewBest = score > sessionModeHighStart` (the start-of-run best, NOT `modeHighScores[gameMode]` which may already be updated by `updateScoreDisplay`/`finalizeSession`). Zen shows length, no PB delta.
+- `endZenSession` MUST still call `stopDrone()` + `stopPad()` (synesthesia audio) — these were easy to lose when removing the sessionSummary block that sat between them.
+
+## Hunter Food / Fleeing Prey (v8 E)
+- `FOOD_TIERS.hunter` (weight 0.05). The existing weights were REBALANCED to sum 0.95 (`common 0.40→0.37`, `bonus 0.15→0.13`) because `pickRandomFoodType` does a cumulative scan with NO normalization — hunter appended at weight 0.05 reaches band [0.95, 1.00).
+- Hunter is excluded in Walled mode (`MODE_CONFIG[gameMode].wrap === false`) via TWO separate paths: the non-chaos path scans an `effectiveTiers` object filtered to drop `hunter`; the chaos path is handled SOLELY by a `shuffleFoodWeights()` filter (the chaos branch scans `chaosCurrentWeights`, NOT `effectiveTiers` — do not try to scan `effectiveTiers` there).
+- The food INSTANCE is `{x, y, type, spawnTime}` — the `hunter: true` flag lives on the tier def, so movement checks MUST use `food.type === 'hunter'`, NOT `food.hunter`.
+- `HUNTER_MOVE_INTERVAL = 3` is FIXED (no per-move random) so no extra food-snapshot field is needed. Movement uses `seededRandom()` for the tiebreak (NOT `Math.random()`) so seeded challenge runs stay deterministic. Wrap-aware flee math uses `PLAY_WIDTH`/`PLAY_HEIGHT` (NOT `CANVAS_WIDTH`).
+- Echo-brew `food2` copies the parent food's `type` — coerce `food.type === 'hunter' ? 'common' : food.type` at the food2 spawn site so a static hunter food2 (never moves) can't spawn. Magnet pull skips hunter (`food.type !== 'hunter'`). The hunter rejection list includes `food2` and `powerUpPickup` (not just snake/obstacle/rival) to avoid stacked entities.
+- `EXPLORER` stays at `sessionFoodTypes.size >= 6` (now 6-of-7 in non-Walled, all-6 in Walled) — do NOT bump to 7, it becomes uncompletable in Walled where hunter is excluded.
+
+## Bounty Rush / Timed Contracts (v8 F)
+- `activeBounty`/`bountyTickCounter` are game-logic state, written ONLY in the tick loop (`tickBounty()` from `updateGame`). The countdown ring in `animateVisuals` is READ-ONLY (never writes `activeBounty`). Bounties bank immediately on completion — NO session-end hook needed (deliberately avoids the dual `gameOver`/`endZenSession` burden); an active bounty simply dies with the run.
+- Bounty windows are TICK-COUNTED (not wall-clock) — they swing under slowMo/dynamic speed; bounties never punish so farming is a non-issue. The `combo` bounty measures the LIVE `comboCount` reaching target (auto-completes if already past at spawn — acceptable), NOT a delta against `sessionMaxCombo` (which never decreases and would be uncompletable).
+- Snapshot: `activeBounty`/`bountyTickCounter` are ADDITIVE fields (`data.activeBounty || null`). Do NOT bump `SNAPSHOT_VERSION` — `restoreFromSnapshot` enforces a strict version gate and would discard v1 saves; additive fields default safely. Reset in BOTH `resetGame()` AND `resetWaveState()`.
+- Toast mechanism is `queueToast()` → `toastQueue` → `processToastQueue()`. The "Toast Timer Sharing" section above (referencing `window.achToastTimer`) is STALE — that symbol no longer exists; `queueToast` already serializes toasts. Bounty toasts call `queueToast`, no new timer.
+
+## Canvas Save/Restore — New v8 Draw Functions
+- `drawRecapCard()` (gameover branch of the gameover overlay), the hunter paw-print shape (new `drawFood()` case), and the bounty countdown ring (in `animateVisuals`) all wrap in `ctx.save()`/`ctx.restore()` and draw shapes at the local origin where a transform applies. Follow the existing D1 discipline.
+
+
+## Save Data Export/Import (v9 A)
+- `exportSaveData()` / `importSaveData(file)` are bare-name module-scope functions (become `window.*` for `onclick`). Export collects all `snake_*` localStorage keys into a versioned JSON backup (`{ format: 'snakes-backup', version: 1, ... }`). Import overwrites localStorage with a confirm dialog. Import requires a page reload to take effect (module-scope `let`/`const` are already initialized from old values). Buttons live in `renderSettings()` inside the existing `#settingsPanel` — no new panel, no cross-hide contract impact.
+
+## Visibility-Safe Auto-Save (v9 B)
+- The `visibilitychange` handler calls `saveSnapshot()` BEFORE setting `gameState = 'paused'` on tab hidden. This closes the mobile data-loss gap where `beforeunload`/`pagehide` don't fire reliably on mobile Safari/Chrome. The snapshot is only restored on explicit user action (R key or tap "Resume Run").
+
+## Diary Seed Replay (v9 G)
+- `retrySeedFromDiary(seed)` mirrors the seedField input handler's hash computation (`seed.split('').reduce(...)` form, NOT the snapshot-restore `hashString` form). Sets `seedField.value`, `activeSeed`, `seedPrng`, calls `closeAllPanels()`, returns to idle. The button appears only when `entry.seed` is non-empty. No new state, no new DOM panel.
+
+## Combo Heat Aura (v9 C)
+- `comboHeatColor(combo)` returns a semi-transparent rgba tint for combo ≥ 3 (yellow → orange → red at 15+). Applied as a body fill overlay in `drawSnake()` after the main segment fill.
+- The head halo is a radial gradient drawn BEFORE the `snake.forEach` loop (z-order: halo bottom → body+evolution glow → shield aura top). Draws at ABSOLUTE head coords (like the shield aura), NOT at local origin. Alpha capped at 0.5; dimmed 50% when `shieldActive` so the shield remains the dominant head cue. Calm-mode gate: skip the pulse, keep the static tint.
+
+## Visual Feedback Pack (v9 F)
+- `transientRings[]` is a shared visual array (same pattern as `deathFragments`): delta-decayed in `animateVisuals`, capped at 50, reset in `resetGame()`/`resetWaveState()`. All pushes happen in the tick loop or event handlers (never from rAF). `pushTransientRing(x, y, maxRadius, color, maxLife, type, lineWidth)` is the helper.
+- **F1 Hunter Dust**: `moveHunter()` pushes a brown dust puff at the vacated cell. Calm-mode: skip. Determinism-safe: dust is pure visual (rAF-only), never affects snapshots/replays.
+- **F2 Bounty Ring Urgency**: the bounty countdown ring in `animateVisuals` oscillates radius + shifts to red when `ticksLeft < 0.3 * windowTicks`. Calm-mode gates ONLY the oscillation — the countdown arc (information) is NOT gated. Also suppressed during `hoardActive` (v9 E). Cash-in burst on bounty completion: `pushTransientRing` + `spawnParticles` at the head.
+- **F3 Power-Up Shockwave**: `activatePowerUp()` pushes a one-shot shockwave ring + particle burst at the head. Calm-mode: skip the ring, keep reduced particles.
+
+## Portal Food (v9 D)
+- `extraFoods[]` is a shared module-scope array for portal + hoard foods. Every food-touching site iterates it: eat-block (after primary `food` + `food2` checks), `moveHunter` rejection, magnet pull (skip portal, pull bonus), `drawFood` (at end, calls `drawExtraFood` per entry), snapshot serialization (additive field), `resetGame`/`resetWaveState` clear.
+- Epic food has `portal: true` in `FOOD_TIERS`. When an epic spawns (non-Walled only), `findPortalTile()` places a linked portal twin (min 10 tiles, wrap-aware per-axis distance) in `extraFoods[]`. Both foods get `portalLink` refs to each other.
+- **Eating the portal twin grants the epic's bonus** (score + XP + stats) AND removes the primary epic `food` (regenerates a new primary food). The snake is teleported Phoenix-style: `snake = [{exit.x, exit.y}]` then grows to min length 3. The exit is `snapToFreeTile()`-ed to avoid occupying snake/obstacle/rival.
+- **Eating the primary epic food** triggers the normal eat block, then `extraFoods = extraFoods.filter(ef => !ef.portalLink)` removes the portal twin.
+- `drawExtraFood()` draws portal foods as two concentric counter-rotating arcs (distinct from bonus pulse) with a prominent dashed purple connecting line + directional arrow. The label block wraps in `ctx.save()`/`ctx.restore()` per the sub-function leak rule.
+- Echo-brew `food2` coerces `food.type === 'portal'` to `'common'` (same as hunter). Magnet skips portal foods. `hasSeenPortal` flag gates a first-time toast (mirrors `snake_has_played` onboarding pattern).
+- The primary `generateFood` call includes `extraFoods` in the collision-check `currentSnake` parameter to prevent spawning on top of existing extra foods.
+
+## Golden Hoard Event (v9 E)
+- `hoardActive`/`hoardTimer`/`hoardTickCounter`/`scoreMultiplier` are module-scope state declared early (line ~204) so Feature F can reference `hoardActive` before E is implemented. Constants: `HOARD_INTERVAL = 5400` (~90s), `HOARD_DURATION = 900` (~15s). `hoardEnabled: true` in `MODE_CONFIG` for Classic, Time Attack, Daily, Snap only.
+- `activateHoard()` spawns 4 bonus foods into `extraFoods[]` via `generateHoardFood()` (direct placement, bypasses `generateFood`'s portal logic). Sets `scoreMultiplier = 2`, announces via `queueToast` + `queueGameEffect('flash')`.
+- `endHoard()` resets `scoreMultiplier = 1`, `hoardTickCounter = 0`. Uneaten hoard foods remain in `extraFoods[]` (they're still valid bonus foods).
+- **`scoreMultiplier` is inside `addScore()`** as a single outer multiplier: `score += Math.round(amount * multi * effectiveHoardMult)`. When `golden_food` mutator is active, the hoard multiplier is capped at 1.5 (Hoard + Golden Age = ×4.5 max, not ×6). Applies to ALL `addScore` calls (tier.pts, combustion, combo bonus, food2, bounty) — bounties are suppressed during hoard so bounty rewards don't fire.
+- **Rival freeze**: BOTH `updateRival()` AND the rival respawn-timer decrement are gated on `!hoardActive`. A dead rival stays dead for the hoard duration.
+- **Bounty suppression**: `tickBounty()` holds `bountyTickCounter` at 0 while `hoardActive` (no new bounties spawn). The urgency ring (F2) is also suppressed during hoard.
+- **Post-FX golden tint**: `drawPostFX()` adds a subtle gold tint (`rgba(255,215,0,0.06)`, or 0.03 in calm mode) when `hoardActive`.
+- **Snapshot**: `hoardActive`/`hoardTimer`/`hoardTickCounter`/`scoreMultiplier` are additive fields (no `SNAPSHOT_VERSION` bump). The 4 hoard foods are in `extraFoods[]` (snapshotted by D's infrastructure). Reset in `resetGame()` only (E is excluded from Gauntlet, so `resetWaveState()` is not needed).
+- **No session-end hook** — the event dies with the run, like bounty.

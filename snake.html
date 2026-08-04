@@ -103,6 +103,7 @@
         <div id="achievementsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #FFD700;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:350px;max-width:480px;"></div>
         <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
         <div id="questsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #44FF88;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;"></div>
+        <div id="settingsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #88AAFF;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;"></div>
         <div id="panelBackdrop" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;touch-action:manipulation;"></div>
         <!-- v6: Screen reader live region -->
         <div id="srAnnounce" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
@@ -136,6 +137,11 @@
         const TILE_SIZE = 20;
         const CANVAS_WIDTH = 440;
         const CANVAS_HEIGHT = 600;
+        // v8 A: HiDPI/Retina backing store — scale by devicePixelRatio (capped at 3).
+        // All draw code keeps using logical CANVAS_WIDTH/CANVAS_HEIGHT coords; the base
+        // transform (set in drawGame) maps logical→backing pixels. CSS size is managed
+        // separately by resizeCanvas().
+        let DPR = Math.min(window.devicePixelRatio || 1, 3);
         const PLAY_WIDTH = 400;
         const PLAY_HEIGHT = 400;
         const PLAY_MARGIN_LEFT = 20;
@@ -147,32 +153,40 @@
 
         function ensureGridCache() {
             const theme = GRID_THEMES[cosmetics.grid] || GRID_THEMES.grid_classic;
-            const cacheKey = cosmetics.grid + (highContrast ? '_hc' : '');
+            // v8 A: DPR in the cache key so a DPR change rebuilds the cache (resizeCanvas
+            // does not call ensureGridCache — the key mismatch triggers the rebuild).
+            // v8 C: gridVisible in the key so toggling lines rebuilds bg-only vs full.
+            const cacheKey = cosmetics.grid + (highContrast ? '_hc' : '') + (DPR !== 1 ? '_dpr' + DPR : '') + (gridVisible ? '_g' : '_bg');
             if (gridCacheCanvas && gridCacheTheme === cacheKey) return;
             if (!gridCacheCanvas) {
                 gridCacheCanvas = document.createElement('canvas');
-                gridCacheCanvas.width = PLAY_WIDTH;
-                gridCacheCanvas.height = PLAY_HEIGHT;
             }
+            gridCacheCanvas.width = PLAY_WIDTH * DPR;
+            gridCacheCanvas.height = PLAY_HEIGHT * DPR;
             gridCacheTheme = cacheKey;
             const gctx = gridCacheCanvas.getContext('2d');
+            gctx.setTransform(DPR, 0, 0, DPR, 0, 0);
             gctx.fillStyle = theme.bg;
             gctx.fillRect(0, 0, PLAY_WIDTH, PLAY_HEIGHT);
-            gctx.strokeStyle = highContrast ? 'rgba(255,255,255,0.15)' : theme.stroke;
-            gctx.lineWidth = 1;
-            gctx.beginPath();
-            for (let x = 0; x <= PLAY_WIDTH; x += TILE_SIZE) {
-                gctx.moveTo(x, 0);
-                gctx.lineTo(x, PLAY_HEIGHT);
+            if (gridVisible) {
+                gctx.strokeStyle = highContrast ? 'rgba(255,255,255,0.15)' : theme.stroke;
+                gctx.lineWidth = 1;
+                gctx.beginPath();
+                for (let x = 0; x <= PLAY_WIDTH; x += TILE_SIZE) {
+                    gctx.moveTo(x, 0);
+                    gctx.lineTo(x, PLAY_HEIGHT);
+                }
+                for (let y = 0; y <= PLAY_HEIGHT; y += TILE_SIZE) {
+                    gctx.moveTo(0, y);
+                    gctx.lineTo(PLAY_WIDTH, y);
+                }
+                gctx.stroke();
             }
-            for (let y = 0; y <= PLAY_HEIGHT; y += TILE_SIZE) {
-                gctx.moveTo(0, y);
-                gctx.lineTo(PLAY_WIDTH, y);
-            }
-            gctx.stroke();
         }
 
         const canvas = document.getElementById('gameCanvas');
+        canvas.width = CANVAS_WIDTH * DPR;
+        canvas.height = CANVAS_HEIGHT * DPR;
         const ctx = canvas.getContext('2d');
         canvas.addEventListener('contextmenu', e => e.preventDefault());
         const scoreEl = document.getElementById('score');
@@ -185,6 +199,10 @@
         let snake = [];
         let food = {};
         var food2 = null; // v6: Echo Brew duplicate food
+        let extraFoods = []; // v9 D: shared array for portal + hoard foods
+        let transientRings = []; // v9 F: shared visual rings (hunter dust, bounty burst, power-up shockwave)
+        let hoardActive = false; // v9 E: Golden Hoard event state (declared here so F can reference it before E)
+        let scoreMultiplier = 1; // v9 E: hoard score multiplier (declared here for same reason)
         let dx = 0;
         let dy = 0;
         let score = 0;
@@ -243,6 +261,21 @@
         let audioCtx = null;
         let muted = saveManager.getInt('snake_muted', 0);
         let highContrast = saveManager.get('snake_high_contrast', '') === '1';
+        // v8 C: grid-lines visibility (themed bg always paints; this gates lines only).
+        let gridVisible = saveManager.get('snake_grid_visible', '1') === '1';
+        // v8 B: Calm Mode — reduced-motion accessibility. 'auto' follows the OS
+        // prefers-reduced-motion setting; 'on'/'off' override it. Persists via saveManager.
+        let calmMode = saveManager.get('snake_calm_mode', 'auto');
+        let displayedScore = 0;
+        const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+        function calmModeEffective() {
+            return calmMode === 'on' || (calmMode === 'auto' && prefersReducedMotion.matches);
+        }
+        prefersReducedMotion.addEventListener('change', function() { visualDirty = true; });
+        // v8 C: Settings sliders (declared here so the folded-shake line and
+        // spawnParticles gating can reference them; populated by the Settings panel).
+        let shakeIntensity = saveManager.getInt('snake_shake_intensity', 100);
+        let particleDensity = saveManager.getInt('snake_particle_density', 100);
         let particles = [];
         // v7 D4: snake-decay death fragments — REPLACE the old death particle burst.
         // Spawned tail-to-head in gameOver(); updated/rendered additively in the rAF
@@ -250,10 +283,14 @@
         // no death sequence is in flight. Capped at 400 fragments.
         let deathFragments = [];
         let deathFragmentsActive = false;
-        let displayedScore = 0;
+        let shakeTimer = 0;
+        // v8 A: shake offset folded into drawGame's base transform (visual state,
+        // written only in animateVisuals, read in drawGame). Replaces the old
+        // save()/translate()/restore() shake wrapper around the drawGame call.
+        let shakeOffsetX = 0;
+        let shakeOffsetY = 0;
         let obstacles = [];
         let lastFrameTime = 0;
-        let shakeTimer = 0;
         // v7: Visual effect queues — producer-consumer pattern (replaces flashOverlay)
         // gameEffects: written ONLY by game-tick loop (updateGame)
         // rAFEffects: written ONLY by rAF loop (animateVisuals)
@@ -422,7 +459,8 @@
                 count++;
                 var dateStr = entry.date ? new Date(entry.date).toLocaleDateString() : '?';
                 var timeStr = formatDuration(entry.duration);
-                html += '<div class="diary-entry" onclick="toggleDiaryDetail(' + entry.id + ')"><div class="diary-summary"><span class="diary-mode">' + (entry.mode || '?') + '</span><span class="diary-score">' + (entry.score || 0) + '</span><span class="diary-time">' + timeStr + '</span><span class="diary-date">' + dateStr + '</span></div><div id="diary-detail-' + entry.id + '" class="diary-detail" style="display:none;"><div class="diary-stats"><span>Food: ' + (entry.foodEaten || 0) + '</span><span>Combo: ' + (entry.maxCombo || 0) + 'x</span><span>Level: ' + (entry.level || 0) + '</span><span>Prestige: ' + (entry.prestigeLevel || 0) + '</span><span>Death: ' + (entry.deathCause || '?') + '</span><span>Mutators: ' + (entry.mutators && entry.mutators.length ? entry.mutators.join(', ') : 'none') + '</span><span>Brews: ' + (entry.brews && entry.brews.length ? entry.brews.join(', ') : 'none') + '</span></div><button onclick="deleteDiaryEntry(' + entry.id + ')" class="diary-delete">Delete</button></div></div>';
+                var seedBtn = entry.seed ? '<button onclick="event.stopPropagation();retrySeedFromDiary(\'' + entry.seed.replace(/'/g, "\\'") + '\')" style="margin-top:8px;padding:6px 14px;border-radius:6px;border:1px solid #88AAFF;background:rgba(136,170,255,0.15);color:#88AAFF;cursor:pointer;font-size:12px;touch-action:manipulation;">↻ Retry Seed</button>' : '';
+                html += '<div class="diary-entry" onclick="toggleDiaryDetail(' + entry.id + ')"><div class="diary-summary"><span class="diary-mode">' + (entry.mode || '?') + '</span><span class="diary-score">' + (entry.score || 0) + '</span><span class="diary-time">' + timeStr + '</span><span class="diary-date">' + dateStr + '</span></div><div id="diary-detail-' + entry.id + '" class="diary-detail" style="display:none;"><div class="diary-stats"><span>Food: ' + (entry.foodEaten || 0) + '</span><span>Combo: ' + (entry.maxCombo || 0) + 'x</span><span>Level: ' + (entry.level || 0) + '</span><span>Prestige: ' + (entry.prestigeLevel || 0) + '</span><span>Death: ' + (entry.deathCause || '?') + '</span><span>Mutators: ' + (entry.mutators && entry.mutators.length ? entry.mutators.join(', ') : 'none') + '</span><span>Brews: ' + (entry.brews && entry.brews.length ? entry.brews.join(', ') : 'none') + '</span></div>' + seedBtn + '<button onclick="deleteDiaryEntry(' + entry.id + ')" class="diary-delete">Delete</button></div></div>';
             }
             list.innerHTML = html || '<p style="text-align:center;color:#888;padding:20px;">No entries yet. Play some games!</p>';
         }
@@ -439,6 +477,21 @@
             saveManager.setJSON('snake_diary', diary);
             renderDiary();
         }
+        // v9 G: Retry Seed from Diary — mirrors the seedField input handler's hash computation
+        function retrySeedFromDiary(seed) {
+            if (!seed) return;
+            if (gameState === 'playing') return; // blocked mid-run — same guard as Q/B/C panel keys
+            var field = document.getElementById('seedField');
+            if (field) field.value = seed;
+            activeSeed = seed;
+            var hash = seed.split('').reduce(function(h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0);
+            seedPrng = mulberry32(hash);
+            closeAllPanels();
+            gameState = 'idle';
+            drawGame(1);
+            updateMenuFooter();
+            queueToast('Seed loaded: ' + seed, 2000);
+        }
 
         function showDiaryPanel() {
             var el = document.getElementById('diaryPanel');
@@ -452,6 +505,8 @@
             if (qp) qp.style.display = 'none';
             var bp = document.getElementById('brewsPanel');
             if (bp) bp.style.display = 'none';
+            var ssp = document.getElementById('settingsPanel');
+            if (ssp) ssp.style.display = 'none';
             // Populate filter
             var filter = document.getElementById('diaryModeFilter');
             if (filter) {
@@ -598,14 +653,24 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let snapLevel = 1;                 // current snap difficulty level (increments every 10s)
         let snapLevelUpFlash = 0;
         let helpOverlayVisible = false;
+        let resumeRunTextY = CANVAS_HEIGHT - 95; // v7 E: capture position for tap band
         let welcomeOverlay = !saveManager.get('snake_has_played', '');
+        let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let lastDeathCause = '';
         let lastComboMilestone = 0;
         // v7: Evolution System per-run state (reset in resetGame / resetWaveState)
         let evolutionTier = -1;          // -1 = none; 0..3 = index into EVOLUTION_TIERS
         let obstaclePassUsed = false;    // Serpentine tier — one obstacle pass per run
-        let sessionSummary = null;
-        let sessionSummaryTimer = 0;          // countdown timer for "LEVEL N!" flash display
+        // v8 D: Game-Over Recap Card — replaces sessionSummary/sessionSummaryTimer.
+        // Built in BOTH gameOver() and endZenSession() (non-gauntlet only); reset in resetGame().
+        let recapData = null;
+        let recapQuestBaseline = null;
+        // v8 F: Bounty Rush — timed mid-run contracts. Bank immediately on completion
+        // (no session-end hook needed); die with the run if uncompleted. Additive in the
+        // snapshot (no SNAPSHOT_VERSION bump — missing fields default safely).
+        let activeBounty = null;
+        let bountyTickCounter = 0;
+        const BOUNTY_INTERVAL = 400;
         let levelUpFlash = 0;
         let pauseMenuSelection = 0;
         let pauseConfirmPending = false;
@@ -879,6 +944,8 @@ function showBrewsPanel() {
     document.getElementById('cosmeticsPanel').style.display = 'none';
     var qp = document.getElementById('questsPanel');
     if (qp) qp.style.display = 'none';
+    var ssp = document.getElementById('settingsPanel');
+    if (ssp) ssp.style.display = 'none';
     renderBrewsPanel();
     el.style.display = 'block';
     srSpeak('Brews panel opened');
@@ -962,7 +1029,7 @@ let padChangeTick = 0;
             IMMORTAL: { name:'Immortal', desc:'Survive 5 minutes in one game', xp:400, icon:'⏱️', check:function(s,c){return c.sessionTimeAlive>=300000;} },
             SPEED_DEMON_II: { name:'Speed Runner', desc:'Eat 25 speed foods total', xp:350, icon:'⚡', check:function(s,c){return s.speedFoodEaten>=25;} },
             BONUS_HUNTER: { name:'Bonus Hunter', desc:'Eat 25 bonus foods total', xp:350, icon:'🎯', check:function(s,c){return s.bonusFoodEaten>=25;} },
-            EXPLORER: { name:'Explorer', desc:'Eat all 6 food types in one game', xp:250, icon:'🗺️', check:function(s,c){return c.eatAllTypes;} },
+            EXPLORER: { name:'Explorer', desc:'Eat 6 different food types in one game', xp:250, icon:'🗺️', check:function(s,c){return c.eatAllTypes;} },
             DEDICATED: { name:'Dedicated', desc:'Play 200 games', xp:500, icon:'🎮', check:function(s,c){return s.gamesPlayed>=200;} },
             LEGENDARY: { name:'Legendary', desc:'Eat 1000 total food', xp:600, icon:'🏆', check:function(s,c){return s.totalFoodEaten>=1000;} },
         };
@@ -1080,11 +1147,11 @@ let padChangeTick = 0;
         const MODE_CONFIG = {
             classic: {
                 name:'Classic', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             timeAttack: {
                 name:'Time Attack', speed:80, selfCollision:true, wallDeath:false, wrap:true,
-                timer:60000, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:60000, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             zen: {
                 name:'Zen', speed:150, selfCollision:false, wallDeath:false, wrap:true,
@@ -1092,11 +1159,11 @@ let padChangeTick = 0;
             },
             daily: {
                 name:'Daily Challenge', speed:'dynamic', selfCollision:true, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             snap: {
                 name:'Snap', speed:90, selfCollision:true, wallDeath:false, wrap:true,
-                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true
+                timer:null, scoreIs:'points', earnXP:true, achievementsEnabled:true, hoardEnabled:true
             },
             walled: {
                 name:'Walled', speed:'dynamic', selfCollision:true, wallDeath:true, wrap:false,
@@ -1113,12 +1180,17 @@ let padChangeTick = 0;
         };
 
         const FOOD_TIERS = {
-            common:   { pts: 10, xp: 25, weight: 0.40, color: '#FF4444', pCount: 8,  sound: 'eat' },
+            // v8 E: weights rebalanced to sum 0.95 so hunter (0.05) reaches [0.95,1.00).
+            // common 0.40→0.37, bonus 0.15→0.13. pickRandomFoodType has no normalization.
+            common:   { pts: 10, xp: 25, weight: 0.37, color: '#FF4444', pCount: 8,  sound: 'eat' },
             uncommon: { pts: 15, xp: 30, weight: 0.25, color: '#4488FF', pCount: 10, sound: 'eat' },
             rare:     { pts: 20, xp: 40, weight: 0.12, color: '#44FF44', pCount: 14, sound: 'eat', glow: 8 },
-            epic:     { pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14 },
-            bonus:    { pts: 30, xp: 60, weight: 0.15, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
+            epic:     { pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14, portal: true },
+            bonus:    { pts: 30, xp: 60, weight: 0.13, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
             speed:    { pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed' },
+            // v8 E: hunter — fleeing prey, moves every 3 ticks away from the head.
+            // Excluded in Walled mode (non-wrapping flee bias) and from magnet pull.
+            hunter:   { pts: 50, xp: 60, weight: 0.05, color: '#FFAA00', pCount: 18, sound: 'eat', glow: 10, hunter: true },
         };
 
 const COMBO_MILESTONES = [3, 5, 7, 10, 15, 20, 30, 50];
@@ -1464,11 +1536,113 @@ const TRAIL_RENDER_CONFIG = {
             if (bp) bp.style.display = 'none';
             var dp = document.getElementById('diaryPanel');
             if (dp) dp.style.display = 'none';
+            var sp = document.getElementById('settingsPanel');
+            if (sp) sp.style.display = 'none';
             renderQuests();
             el.style.display = 'block';
             srSpeak('Quest board opened');
         }
         // --- end v7 Feature C ---
+
+        // v8 C: Unified Settings Panel — surfaces hidden toggles (mute, high-contrast,
+        // calm mode, grid lines) and sliders (shake intensity, particle density).
+        function renderSettings() {
+            const el = document.getElementById('settingsPanel');
+            if (!el) return;
+            const calmAuto = calmMode === 'auto', calmOn = calmMode === 'on', calmOff = calmMode === 'off';
+            const seg = function(label, val) {
+                const active = calmMode === val;
+                return '<button onclick="setCalmMode(\'' + val + '\')" style="padding:6px 12px;border-radius:6px;border:1px solid ' + (active ? '#88AAFF' : '#555') + ';background:' + (active ? 'rgba(136,170,255,0.2)' : '#222') + ';color:' + (active ? '#88AAFF' : '#aaa') + ';cursor:pointer;font-size:12px;touch-action:manipulation;">' + label + '</button>';
+            };
+            const toggle = function(label, on, onclickOn, onclickOff) {
+                return '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #333;">' +
+                    '<span style="font-size:13px;">' + label + '</span>' +
+                    '<button onclick="' + (on ? onclickOff : onclickOn) + '" style="padding:6px 14px;border-radius:6px;border:1px solid ' + (on ? '#44FF88' : '#555') + ';background:' + (on ? 'rgba(68,255,136,0.15)' : '#222') + ';color:' + (on ? '#44FF88' : '#888') + ';cursor:pointer;font-size:12px;touch-action:manipulation;">' + (on ? 'ON' : 'OFF') + '</button>' +
+                '</div>';
+            };
+            const slider = function(label, val, onchange) {
+                return '<div style="padding:10px 0;border-bottom:1px solid #333;">' +
+                    '<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;"><span>' + label + '</span><span style="color:#88AAFF;">' + val + '%</span></div>' +
+                    '<input type="range" min="0" max="100" value="' + val + '" oninput="' + onchange + '" style="width:100%;accent-color:#88AAFF;touch-action:manipulation;">' +
+                '</div>';
+            };
+            el.innerHTML =
+                '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button>' +
+                '<h2 style="text-align:center;margin-top:0;color:#88AAFF;">⚙ SETTINGS</h2>' +
+                toggle('Sound', !muted, 'toggleMute()', 'toggleMute()') +
+                toggle('High Contrast', highContrast, 'toggleHighContrast()', 'toggleHighContrast()') +
+                '<div style="padding:10px 0;border-bottom:1px solid #333;">' +
+                    '<div style="font-size:13px;margin-bottom:6px;">Calm Mode (reduced motion)</div>' +
+                    '<div style="display:flex;gap:6px;">' + seg('Auto', 'auto') + seg('On', 'on') + seg('Off', 'off') + '</div>' +
+                '</div>' +
+                toggle('Grid Lines', gridVisible, 'toggleGridVisible()', 'toggleGridVisible()') +
+                slider('Shake Intensity', shakeIntensity, 'setShakeIntensity(this.value)') +
+                slider('Particle Density', particleDensity, 'setParticleDensity(this.value)') +
+                '<div style="padding:14px 0;border-bottom:1px solid #333;"><div style="font-size:13px;margin-bottom:8px;">Data Backup</div><div style="display:flex;gap:8px;"><button onclick="exportSaveData()" style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;touch-action:manipulation;">⬇ Export</button><label style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;text-align:center;touch-action:manipulation;"><input type="file" accept=".json" style="display:none;" onchange="importSaveData(this.files[0])">⬆ Import</label></div></div>' +
+                '<div style="text-align:center;color:#666;font-size:11px;margin-top:14px;">Settings apply instantly. Press S or ✕ to close.</div>';
+        }
+        function showSettingsPanel() {
+            const el = document.getElementById('settingsPanel');
+            if (!el) return;
+            if (el.style.display === 'block') { el.style.display = 'none'; panelBackdropEl.style.display = 'none'; return; }
+            panelBackdropEl.style.display = 'block';
+            document.getElementById('statsPanel').style.display = 'none';
+            document.getElementById('achievementsPanel').style.display = 'none';
+            document.getElementById('cosmeticsPanel').style.display = 'none';
+            document.getElementById('questsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            var dp = document.getElementById('diaryPanel');
+            if (dp) dp.style.display = 'none';
+            renderSettings();
+            el.style.display = 'block';
+            srSpeak('Settings opened');
+        }
+        // v8 C: settings action handlers (bare-name globals — module-scope functions).
+        function toggleMute() { muted = muted ? 0 : 1; saveManager.set('snake_muted', muted); renderSettings(); }
+        function toggleHighContrast() { highContrast = !highContrast; saveManager.set('snake_high_contrast', highContrast ? '1' : '0'); gridCacheTheme = null; visualDirty = true; renderSettings(); }
+        function toggleGridVisible() { gridVisible = !gridVisible; saveManager.set('snake_grid_visible', gridVisible ? '1' : '0'); gridCacheTheme = null; visualDirty = true; renderSettings(); }
+        function setCalmMode(v) { calmMode = v; saveManager.set('snake_calm_mode', v); visualDirty = true; renderSettings(); }
+        function setShakeIntensity(v) { shakeIntensity = parseInt(v, 10) || 0; saveManager.set('snake_shake_intensity', shakeIntensity); }
+        function setParticleDensity(v) { particleDensity = parseInt(v, 10) || 0; saveManager.set('snake_particle_density', particleDensity); }
+        // --- end v8 Feature C ---
+        // v9 A: Save Data Export/Import — download/restore all snake_* localStorage keys.
+        function exportSaveData() {
+            var keys = {};
+            try {
+                Object.keys(localStorage).filter(function(k) { return k.indexOf('snake_') === 0; }).forEach(function(k) { keys[k] = localStorage.getItem(k); });
+            } catch (e) { queueToast('Export failed: ' + e.message, 2000); return; }
+            var data = { format: 'snakes-backup', version: 1, exportedAt: new Date().toISOString(), keys: keys };
+            var blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'snakes-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            queueToast('Backup exported!', 2000);
+        }
+        function importSaveData(file) {
+            if (!file) return;
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    var data = JSON.parse(e.target.result);
+                    if (!data || data.format !== 'snakes-backup' || data.version !== 1) {
+                        queueToast('Invalid backup file', 2000);
+                        return;
+                    }
+                    if (!confirm('Importing will overwrite all current save data. Continue?')) return;
+                    Object.keys(data.keys).forEach(function(k) { localStorage.setItem(k, data.keys[k]); });
+                    queueToast('Backup imported! Reload to apply.', 3000);
+                } catch (err) {
+                    queueToast('Import failed: ' + err.message, 2000);
+                }
+            };
+            reader.readAsText(file);
+        }
 
         let gameMode = 'classic';
         let modeSelectIndex = 0;
@@ -1536,7 +1710,12 @@ const TRAIL_RENDER_CONFIG = {
             if (activeMutators.indexOf('golden_food') !== -1) {
                 amount = Math.round(amount * 3);
             }
-            score += Math.round(amount * multi);
+            // v9 E: hoard scoreMultiplier (cap with golden_food to prevent ×6 trivialization)
+            var effectiveHoardMult = scoreMultiplier;
+            if (activeMutators.indexOf('golden_food') !== -1 && scoreMultiplier > 1) {
+                effectiveHoardMult = Math.min(scoreMultiplier, 1.5); // Hoard + Golden Age = ×4.5 max
+            }
+            score += Math.round(amount * multi * effectiveHoardMult);
             updateScoreDisplay();
         }
 
@@ -1559,13 +1738,55 @@ const TRAIL_RENDER_CONFIG = {
                     if (rand < chaosCum) return ck;
                 }
             }
-            const tiers = FOOD_TIERS;
+            // v8 E: in Walled (wrap:false) modes, hunter can't spawn (flee bias needs
+            // wrapping). The chaos branch above is handled by shuffleFoodWeights' filter.
+            const tiers = MODE_CONFIG[gameMode].wrap === false
+                ? Object.fromEntries(Object.entries(FOOD_TIERS).filter(([k]) => k !== 'hunter'))
+                : FOOD_TIERS;
             let cumulative = 0;
             for (const typeKey in tiers) {
                 cumulative += tiers[typeKey].weight;
                 if (rand < cumulative) return typeKey;
             }
             return 'common';
+        }
+        // v8 E: hunter food — fleeing prey. Fixed interval (no per-move random) so no
+        // extra food-snapshot field is needed; type:'hunter' round-trips in the snapshot.
+        const HUNTER_MOVE_INTERVAL = 3;
+        function moveHunter() {
+            if (!food || food.type !== 'hunter') return;
+            var head = snake[0];
+            var candidates = [
+                { x: food.x + TILE_SIZE, y: food.y },
+                { x: food.x - TILE_SIZE, y: food.y },
+                { x: food.x, y: food.y + TILE_SIZE },
+                { x: food.x, y: food.y - TILE_SIZE }
+            ];
+            var best = null, bestScore = -1;
+            for (var ci = 0; ci < candidates.length; ci++) {
+                var c = wrapPosition(candidates[ci]);
+                // Reject occupied tiles: snake body, obstacles, rival, food2, power-up.
+                if (snake.some(function(s) { return s.x === c.x && s.y === c.y; })) continue;
+                if (obstacles.some(function(o) { return o.x === c.x && o.y === c.y; })) continue;
+                if (rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === c.x && s.y === c.y; }); })) continue;
+                if (food2 && food2.x === c.x && food2.y === c.y) continue;
+                if (powerUpPickup && powerUpPickup.x === c.x && powerUpPickup.y === c.y) continue;
+                // v9 D: reject extraFoods[] tiles (portal + hoard foods)
+                if (extraFoods.some(function(ef) { return ef.x === c.x && ef.y === c.y; })) continue;
+                // Wrap-aware Manhattan distance from head (PLAY dims, not CANVAS).
+                var ddx = c.x - head.x, ddy = c.y - head.y;
+                if (ddx > PLAY_WIDTH / 2) ddx -= PLAY_WIDTH; else if (ddx < -PLAY_WIDTH / 2) ddx += PLAY_WIDTH;
+                if (ddy > PLAY_HEIGHT / 2) ddy -= PLAY_HEIGHT; else if (ddy < -PLAY_HEIGHT / 2) ddy += PLAY_HEIGHT;
+                var dist = Math.abs(ddx) + Math.abs(ddy);
+                // seededRandom() tiebreak so seeded challenge runs stay deterministic.
+                var score = dist + seededRandom() * 0.5;
+                if (score > bestScore) { bestScore = score; best = c; }
+            }
+            if (best) {
+                // v9 F1: dust trail at the vacated cell (calm-mode: skip)
+                if (!calmModeEffective()) pushTransientRing(food.x + TILE_SIZE / 2, food.y + TILE_SIZE / 2, 6, '#8B7355', 300, 'dust');
+                food.x = best.x; food.y = best.y; food.spawnTime = performance.now();
+            }
         }
 
         function generateFood(currentSnake) {
@@ -1612,7 +1833,68 @@ const TRAIL_RENDER_CONFIG = {
                      (minFoodSpawnDist !== null && currentSnake.length > 0 &&
                       Math.abs(newFood.x - currentSnake[0].x) + Math.abs(newFood.y - currentSnake[0].y) > Math.max(1, minFoodSpawnDist - ((evolutionTier >= 2) ? EVOLUTION_TIERS[2].foodProximity : 0)) * TILE_SIZE));
             if (newFood.type === 'rare' || newFood.type === 'epic') playSound('rare_spawn');
+            // v9 D: epic food spawns a linked portal twin in extraFoods[] (non-Walled only)
+            if (newFood && FOOD_TIERS[newFood.type] && FOOD_TIERS[newFood.type].portal && MODE_CONFIG[gameMode].wrap !== false) {
+                var portalFood = findPortalTile(newFood, currentSnake);
+                if (portalFood) {
+                    portalFood.type = 'portal';
+                    portalFood.spawnTime = performance.now();
+                    portalFood.portalLink = { x: newFood.x, y: newFood.y };
+                    newFood.portalLink = { x: portalFood.x, y: portalFood.y };
+                    extraFoods.push(portalFood);
+                    if (!hasSeenPortal) {
+                        hasSeenPortal = true;
+                        saveManager.set('snake_has_seen_portal', '1');
+                        queueToast('🌀 Portal food! Eat to teleport to its twin.', 3000);
+                    }
+                }
+            }
             return newFood;
+        }
+
+        // v9 D: find a distant free tile for the portal twin (min 10 tiles, wrap-aware distance)
+        function findPortalTile(epicFood, currentSnake) {
+            var cols = PLAY_WIDTH / TILE_SIZE;
+            var rows = PLAY_HEIGHT / TILE_SIZE;
+            var minDist = 10 * TILE_SIZE;
+            var candidates = [];
+            for (var x = 0; x < cols; x++) {
+                for (var y = 0; y < rows; y++) {
+                    var tx = x * TILE_SIZE, ty = y * TILE_SIZE;
+                    if (currentSnake.some(function(s) { return s.x === tx && s.y === ty; })) continue;
+                    if (obstacles.some(function(o) { return o.x === tx && o.y === ty; })) continue;
+                    if (food && food.x === tx && food.y === ty) continue;
+                    if (food2 && food2.x === tx && food2.y === ty) continue;
+                    if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
+                    if (extraFoods.some(function(ef) { return ef.x === tx && ef.y === ty; })) continue;
+                    // Wrap-aware per-axis distance
+                    var ddx = tx - epicFood.x, ddy = ty - epicFood.y;
+                    if (ddx > PLAY_WIDTH / 2) ddx -= PLAY_WIDTH; else if (ddx < -PLAY_WIDTH / 2) ddx += PLAY_WIDTH;
+                    if (ddy > PLAY_HEIGHT / 2) ddy -= PLAY_HEIGHT; else if (ddy < -PLAY_HEIGHT / 2) ddy += PLAY_HEIGHT;
+                    var d = Math.abs(ddx) + Math.abs(ddy);
+                    if (d >= minDist) candidates.push({ x: tx, y: ty });
+                }
+            }
+            if (candidates.length === 0) return null;
+            return candidates[Math.floor(seededRandom() * candidates.length)];
+        }
+        // v9 D: snap a teleport destination to the nearest free tile if occupied
+        function snapToFreeTile(x, y) {
+            if (!snake.some(function(s) { return s.x === x && s.y === y; }) &&
+                !obstacles.some(function(o) { return o.x === x && o.y === y; }) &&
+                !rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === x && s.y === y; }); })) {
+                return { x: x, y: y };
+            }
+            var neighbors = [{x:x+TILE_SIZE,y:y},{x:x-TILE_SIZE,y:y},{x:x,y:y+TILE_SIZE},{x:x,y:y-TILE_SIZE}];
+            for (var i = 0; i < neighbors.length; i++) {
+                var n = wrapPosition(neighbors[i]);
+                if (!snake.some(function(s) { return s.x === n.x && s.y === n.y; }) &&
+                    !obstacles.some(function(o) { return o.x === n.x && o.y === n.y; }) &&
+                    !rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === n.x && s.y === n.y; }); })) {
+                    return n;
+                }
+            }
+            return { x: x, y: y };
         }
 
         function spawnPowerUpPickup() {
@@ -1658,6 +1940,11 @@ const TRAIL_RENDER_CONFIG = {
                     restartGameTimeout();
                     break;
             }
+            // v9 F3: activation shockwave at the head
+            if (snake.length > 0) {
+                pushTransientRing(snake[0].x + TILE_SIZE / 2, snake[0].y + TILE_SIZE / 2, 25, config.color || '#FFFFFF', 500, 'ring', 3);
+                if (!calmModeEffective()) spawnParticles(snake[0].x, snake[0].y, 12, config.color || '#FFFFFF');
+            }
             
             const el = toastEl;
             if (el) {
@@ -1688,9 +1975,14 @@ const TRAIL_RENDER_CONFIG = {
             comboCount = 0;
             evolutionTier = -1;
             obstaclePassUsed = false;
+            // v8 D: clear recap state so the idle screen never shows a stale recap.
+            recapData = null;
+            recapQuestBaseline = null;
             sessionFoodEaten = 0;
             sessionFoodTypes = new Set();
-            sessionSpeedFood = 0;
+            // v8 F: clear bounty state for a fresh run.
+            activeBounty = null;
+            bountyTickCounter = 0;
             sessionBonusFood = 0;
             gameTick = 0;
             lastEatTime = 0;
@@ -1782,6 +2074,9 @@ const TRAIL_RENDER_CONFIG = {
              const combinedInitial = snake.concat(rivalCombinedSnake());
             food = generateFood(combinedInitial);
             food2 = null; // v6: Echo Brew duplicate food
+            extraFoods = []; // v9 D: clear portal + hoard foods
+            transientRings = []; // v9 F: clear visual rings
+            hoardActive = false; hoardTimer = 0; hoardTickCounter = 0; scoreMultiplier = 1; // v9 E: clear hoard state
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -1857,14 +2152,18 @@ const TRAIL_RENDER_CONFIG = {
             if (hasTouch) {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap to Start | Swipe \u2191\u2193 to change mode</span>';
             } else {
-                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests</span>';
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests  |  S Settings</span>';
             }
         }
 
         function startGame() {
+            // v7 E: starting a fresh run — discard any saved snapshot so the
+            // idle "Resume Run" button doesn't offer a stale unrelated run.
+            clearSnapshot();
             syncDailyState();
-            sessionSummary = null;
-            sessionSummaryTimer = 0;
+            // v8 D: reset recap state and snapshot quest progress for end-of-run delta.
+            recapData = null;
+            recapQuestBaseline = captureQuestBaseline();
             srSpeak('Game started. Mode: ' + gameMode);
             if (gameMode === 'daily') {
                 if (dailyAttempts <= 0) {
@@ -2041,6 +2340,17 @@ const TRAIL_RENDER_CONFIG = {
             var scale = Math.min(scaleX, scaleY, 1);
             canvasEl.style.width = Math.max(300, Math.round(CANVAS_WIDTH * scale)) + 'px';
             canvasEl.style.height = Math.max(300, Math.round(CANVAS_HEIGHT * scale)) + 'px';
+            // v8 A: recompute DPR + backing store on resize (covers moving a window
+            // between displays with different pixel densities). Invalidate the grid
+            // cache theme so ensureGridCache rebuilds at the new DPR on next drawGrid.
+            var newDpr = Math.min(window.devicePixelRatio || 1, 3);
+            if (newDpr !== DPR) {
+                DPR = newDpr;
+                canvasEl.width = CANVAS_WIDTH * DPR;
+                canvasEl.height = CANVAS_HEIGHT * DPR;
+                gridCacheTheme = null;
+                visualDirty = true;
+            }
         }
 
         function debouncedResize() {
@@ -2068,6 +2378,353 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState === 'playing') {
                 scheduleNextTick();
             }
+        }
+
+        // ===================================================================
+        // v7 Feature E: GameState Snapshot Engine (Save & Resume)
+        // Serializes the entire run state to a compact JSON blob in
+        // localStorage so a run survives tab close / browser restart. Also
+        // round-trips through a #snapshot=<base64> URL hash for sharing.
+        // ===================================================================
+
+        const SNAPSHOT_KEY = 'snake_snapshot';
+        const SNAPSHOT_VERSION = 1;
+
+        // Shared post-restore step: flip to playing and arm the tick chain.
+        // Used by restoreFromSnapshot(). startGame() sets tickInterval itself
+        // before scheduling, so it does not go through here.
+        function resumeGameLoop() {
+            gameState = 'playing';
+            scheduleNextTick();
+        }
+
+        // Build the serializable snapshot object from live state. All visual
+        // FX (particles, fragments, flashes, shake) are intentionally excluded
+        // — they reset cleanly and have no gameplay meaning. Returns null if
+        // there is no live run to snapshot.
+        function buildSnapshotObject() {
+            if (gameState !== 'playing' && gameState !== 'paused') return null;
+            return {
+                v: SNAPSHOT_VERSION,
+                savedAt: Date.now(),
+                // Core
+                mode: gameMode,
+                seed: activeSeed,
+                tick: gameTick,
+                score: score,
+                snake: snake.map(function (s) { return { x: s.x, y: s.y }; }),
+                dx: dx, dy: dy,
+                nextDirection: nextDirection,
+                food: food ? { x: food.x, y: food.y, type: food.type, pts: food.pts || 0, spawnTime: food.spawnTime || 0 } : null,
+                food2: food2 ? { x: food2.x, y: food2.y, type: food2.type, pts: food2.pts || 0, spawnTime: food2.spawnTime || 0 } : null,
+                extraFoods: extraFoods.map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: ef.spawnTime || 0, portalLink: ef.portalLink || null }; }),
+                tickInterval: tickInterval,
+                minFoodSpawnDist: minFoodSpawnDist,
+                // Combo
+                comboCount: comboCount,
+                lastComboMilestone: lastComboMilestone,
+                lastEatTime: lastEatTime,
+                // Speed
+                speedBoostCounter: speedBoostCounter,
+                // Obstacles
+                obstacles: obstacles.map(function (o) { return { x: o.x, y: o.y }; }),
+                obstacleSpawnTimer: obstacleSpawnTimer,
+                // Power-ups
+                powerUpType: powerUpType,
+                powerUpTimer: powerUpTimer,
+                powerUpSpawnCounter: powerUpSpawnCounter,
+                powerUpDespawnCounter: powerUpDespawnCounter,
+                powerUpPickup: powerUpPickup ? { x: powerUpPickup.x, y: powerUpPickup.y, type: powerUpPickup.type } : null,
+                shieldActive: shieldActive,
+                magnetActive: magnetActive,
+                slowMoActive: slowMoActive,
+                // Rival
+                rivals: rivals.map(function (r) { return { snake: r.snake.map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: r.active, respawnTimer: r.respawnTimer, color: r.color }; }),
+                // Mutators & brews
+                activeMutators: activeMutators.slice(),
+                activeBrews: activeBrews.slice(),
+                brewUsageFlags: Object.assign({}, brewUsageFlags),
+                // Evolution
+                evolutionTier: evolutionTier,
+                obstaclePassUsed: obstaclePassUsed,
+                // Mode-specific
+                gauntletWave: gauntletWave,
+                gauntletScore: gauntletScore,
+                gauntletPicks: gauntletPicks.slice(),
+                gauntletIntermission: gauntletIntermission,
+                gauntletWaveScore: gauntletWaveScore,
+                gauntletSelection: gauntletSelection,
+                gauntletPickOptions: gauntletPickOptions.slice(),
+                snapDuration: snapDuration,
+                snapLevel: snapLevel,
+                snapTimeSinceDecrease: snapTimeSinceDecrease,
+                shrinkTimer: shrinkTimer,
+                timeAttackEnd: timeAttackEnd,
+                zenActive: zenActive,
+                // Painter
+                paintGrid: paintGrid,
+                paintCoveredCount: paintCoveredCount,
+                paintTotalTiles: paintTotalTiles,
+                paintLayers: paintLayers,
+                currentPaintColor: currentPaintColor,
+                painterFoodEaten: painterFoodEaten,
+                // Mutator-specific
+                shrinkRows: shrinkRows,
+                shrinkCols: shrinkCols,
+                hungerStarted: hungerStarted,
+                hungerTickCounter: hungerTickCounter,
+                chaosShuffleTick: chaosShuffleTick,
+                chaosCurrentWeights: chaosCurrentWeights,
+                // Session stats
+                sessionFoodEaten: sessionFoodEaten,
+                sessionFoodTypes: Array.from(sessionFoodTypes),
+                sessionSpeedFood: sessionSpeedFood,
+                sessionBonusFood: sessionBonusFood,
+                sessionTimeAlive: sessionTimeAlive,
+                sessionMaxCombo: sessionMaxCombo,
+                sessionXP: sessionXP,
+                sessionPausedTime: sessionPausedTime,
+                sessionPauseStart: sessionPauseStart,
+                // v8 F: bounty state (additive — no SNAPSHOT_VERSION bump).
+                activeBounty: activeBounty,
+                bountyTickCounter: bountyTickCounter,
+                // v9 E: hoard state (additive — no SNAPSHOT_VERSION bump).
+                hoardActive: hoardActive,
+                hoardTimer: hoardTimer,
+                hoardTickCounter: hoardTickCounter,
+                scoreMultiplier: scoreMultiplier,
+                // Replay
+                replayEvents: replayEvents.slice(),
+                sessionStartTime: sessionStartTime,
+                sessionModeHighStart: sessionModeHighStart,
+                sessionUsedShield: sessionUsedShield,
+                lastEatenType: lastEatenType
+            };
+        }
+
+        // Persist the current run. Best-effort: localStorage may be full or
+        // unavailable (e.g. private mode). Returns true only on a successful write.
+        function saveSnapshot() {
+            var snap = buildSnapshotObject();
+            if (!snap) return false;
+            try {
+                saveManager.setJSON(SNAPSHOT_KEY, snap);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function clearSnapshot() {
+            saveManager.remove(SNAPSHOT_KEY);
+        }
+
+        function hasSnapshot() {
+            return saveManager.get(SNAPSHOT_KEY, null) !== null;
+        }
+
+        // Deserialize and resume. Returns true on success, false on invalid
+        // data. If fromStorage is true, the bad snapshot is cleared from
+        // localStorage so it can't loop. URL-hash restores (fromStorage=false)
+        // never touch local storage — a bad shared link must not destroy
+        // the user's own saved run.
+        function restoreFromSnapshot(data, fromStorage) {
+            if (!data || typeof data !== 'object' || data.v !== SNAPSHOT_VERSION || !MODE_CONFIG[data.mode]) {
+                if (fromStorage) clearSnapshot();
+                return false;
+            }
+            try {
+                gameMode = data.mode;
+                // Compute offline gap BEFORE field restores so timeAttackEnd
+                // can be rebased to the new wall clock. The gap runs from
+                // the last live moment to now.
+                var lastLive = data.sessionPauseStart || data.savedAt || Date.now();
+                var offlineGap = Date.now() - lastLive;
+
+                // Seed: re-derive the PRNG from the seed string. The PRNG
+                // stream position is NOT part of the snapshot (mulberry32
+                // holds its state in a closure we can't read back), so
+                // post-restore seeded randomness diverges from the original
+                // run. Current state (food, obstacles) is preserved exactly;
+                // only newly generated items differ. Acceptable for a
+                // save/resume convenience feature.
+                activeSeed = (data.seed == null) ? null : data.seed;
+                if (activeSeed !== null) {
+                    seedPrng = mulberry32(activeSeed.split('').reduce(function (h, c) { return ((h << 5) - h) + c.charCodeAt(0) | 0; }, 0));
+                } else {
+                    seedPrng = null;
+                }
+                gameTick = data.tick || 0;
+                score = data.score || 0;
+                snake = (data.snake || []).map(function (s) { return { x: s.x, y: s.y }; });
+                dx = data.dx || 1; dy = data.dy || 0;
+                nextDirection = data.nextDirection || null;
+                food = data.food ? { x: data.food.x, y: data.food.y, type: data.food.type, pts: data.food.pts || 0, spawnTime: performance.now() } : null;
+                food2 = data.food2 ? { x: data.food2.x, y: data.food2.y, type: data.food2.type, pts: data.food2.pts || 0, spawnTime: performance.now() } : null;
+                extraFoods = (data.extraFoods || []).map(function(ef) { return { x: ef.x, y: ef.y, type: ef.type, spawnTime: performance.now(), portalLink: ef.portalLink || null }; });
+                tickInterval = (data.tickInterval == null) ? getEffectiveSpeed() : data.tickInterval;
+                minFoodSpawnDist = (data.minFoodSpawnDist == null) ? null : data.minFoodSpawnDist;
+                comboCount = data.comboCount || 0;
+                lastComboMilestone = data.lastComboMilestone || 0;
+                lastEatTime = data.lastEatTime || 0;
+                speedBoostCounter = data.speedBoostCounter || 0;
+                obstacles = (data.obstacles || []).map(function (o) { return { x: o.x, y: o.y }; });
+                obstacleSpawnTimer = data.obstacleSpawnTimer || 0;
+                powerUpType = data.powerUpType || null;
+                powerUpTimer = data.powerUpTimer || 0;
+                powerUpSpawnCounter = data.powerUpSpawnCounter || 0;
+                powerUpDespawnCounter = data.powerUpDespawnCounter || 0;
+                powerUpPickup = data.powerUpPickup ? { x: data.powerUpPickup.x, y: data.powerUpPickup.y, type: data.powerUpPickup.type } : null;
+                shieldActive = !!data.shieldActive;
+                magnetActive = !!data.magnetActive;
+                slowMoActive = !!data.slowMoActive;
+                rivals = (data.rivals || []).map(function (r) { return { snake: (r.snake || []).map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: !!r.active, respawnTimer: r.respawnTimer || 0, color: r.color || '#FF4444' }; });
+                activeMutators = (data.activeMutators || []).slice();
+                activeBrews = (data.activeBrews || []).slice();
+                brewUsageFlags = Object.assign({}, data.brewUsageFlags || {});
+                evolutionTier = (data.evolutionTier == null) ? -1 : data.evolutionTier;
+                obstaclePassUsed = !!data.obstaclePassUsed;
+                gauntletWave = data.gauntletWave || 0;
+                gauntletScore = data.gauntletScore || 0;
+                gauntletPicks = (data.gauntletPicks || []).slice();
+                gauntletIntermission = !!data.gauntletIntermission;
+                gauntletWaveScore = data.gauntletWaveScore || 0;
+                gauntletSelection = data.gauntletSelection || 0;
+                gauntletPickOptions = (data.gauntletPickOptions || []).slice();
+                snapDuration = (data.snapDuration == null) ? 3000 : data.snapDuration;
+                snapLevel = (data.snapLevel == null) ? 1 : data.snapLevel;
+                snapTimeSinceDecrease = data.snapTimeSinceDecrease || 0;
+                shrinkTimer = (data.shrinkTimer == null) ? 3000 : data.shrinkTimer;
+                timeAttackEnd = data.timeAttackEnd ? data.timeAttackEnd + offlineGap : 0;
+                zenActive = !!data.zenActive;
+                paintGrid = data.paintGrid || null;
+                paintCoveredCount = data.paintCoveredCount || 0;
+                paintTotalTiles = data.paintTotalTiles || 0;
+                currentPaintColor = data.currentPaintColor || '#FF4444';
+                painterFoodEaten = data.painterFoodEaten || 0;
+                paintLayers = (data.paintLayers == null) ? 1 : data.paintLayers;
+                shrinkCols = data.shrinkCols || 0;
+                hungerStarted = !!data.hungerStarted;
+                hungerTickCounter = data.hungerTickCounter || 0;
+                chaosShuffleTick = data.chaosShuffleTick || 0;
+                chaosCurrentWeights = data.chaosCurrentWeights || null;
+                sessionFoodEaten = data.sessionFoodEaten || 0;
+                sessionFoodTypes = new Set(data.sessionFoodTypes || []);
+                sessionSpeedFood = data.sessionSpeedFood || 0;
+                sessionBonusFood = data.sessionBonusFood || 0;
+                sessionTimeAlive = data.sessionTimeAlive || 0;
+                sessionMaxCombo = data.sessionMaxCombo || 0;
+                sessionXP = data.sessionXP || 0;
+                sessionStartTime = data.sessionStartTime || Date.now();
+                sessionModeHighStart = data.sessionModeHighStart || 0;
+                sessionUsedShield = !!data.sessionUsedShield;
+                lastEatenType = (data.lastEatenType == null) ? 'common' : data.lastEatenType;
+                replayEvents = (data.replayEvents || []).slice();
+                // v8 F: bounty state — additive (missing => no active bounty).
+                activeBounty = data.activeBounty || null;
+                bountyTickCounter = data.bountyTickCounter || 0;
+                // v9 E: hoard state — additive (missing => no active hoard).
+                hoardActive = !!data.hoardActive;
+                hoardTimer = data.hoardTimer || 0;
+                hoardTickCounter = data.hoardTickCounter || 0;
+                scoreMultiplier = data.scoreMultiplier || 1;
+
+                sessionPausedTime = (data.sessionPausedTime || 0) + offlineGap;
+                sessionPauseStart = 0;
+                // Clean transient visual state (snapshot excludes it by design).
+                particles = [];
+                transientRings = []; // v9 F: clear visual rings on restore
+                deathFragments = [];
+                deathFragmentsActive = false;
+                flashOverlay = null;
+                gameEffects.length = 0;
+                rAFEffects.length = 0;
+                shakeTimer = 0;
+                eatAnimTimer = 0;
+                snapLevelUpFlash = 0;
+                levelUpFlash = 0;
+                touchIndicatorTimer = 0;
+                newObstacleFlash = [];
+                newObstacleToastTimer = 0;
+                if (comboFadeTimer) { clearTimeout(comboFadeTimer); comboFadeTimer = null; }
+                pauseMenuSelection = 0;
+                pauseConfirmPending = false;
+                pauseConfirmAction = null;
+                helpOverlayVisible = false;
+                ghostPositions = [];
+
+                // Snapshot consumed — clear so it can't be double-restored
+                // (only for localStorage path; URL hash restores never wrote).
+                if (fromStorage) clearSnapshot();
+
+                srSpeak('Run resumed.');
+                resumeGameLoop();
+                updateScoreDisplay();
+                updateMenuFooter();
+                drawGame(1);
+                visualDirty = true;
+                if (synesthesiaMode) startPad();
+                return true;
+            } catch (e) {
+                if (fromStorage) clearSnapshot();
+                return false;
+            }
+        }
+
+        // Restore from a #snapshot=<base64> URL hash. base64 wraps a
+        function restoreFromSnapshotHash(hashData) {
+            try {
+                var json = decodeURIComponent(atob(hashData));
+                var data = JSON.parse(json);
+                if (restoreFromSnapshot(data, false)) {
+                    // Strip the hash so a reload doesn't re-restore the old
+                    // shared state over the user's continued play.
+                    history.replaceState(null, '', window.location.pathname + window.location.search);
+                    return true;
+                }
+                return false;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        // Encode the current run state to a shareable URL hash string.
+        function encodeSnapshotHash() {
+            var snap = buildSnapshotObject();
+            if (!snap) return null;
+            try {
+                return 'snapshot=' + btoa(encodeURIComponent(JSON.stringify(snap)));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Clipboard share of the run state.
+        function copyRunState() {
+            var hash = encodeSnapshotHash();
+            if (!hash) { queueToast('No run to copy', 2000); return; }
+            var url = window.location.origin + window.location.pathname + '#' + hash;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(function () {
+                    queueToast('Run state copied to clipboard!', 2500);
+                }, function () { fallbackCopy(url); });
+            } else {
+                fallbackCopy(url);
+            }
+        }
+
+        // Pause-menu "Save & Quit": persist the run, then return to the title
+        // screen. The snapshot survives resetGame() (which does not touch it),
+        // so the "Resume Run" button lights up on the idle screen.
+        function saveAndQuit() {
+            if (!saveSnapshot()) {
+                queueToast('Could not save run', 2500);
+                return;
+            }
+            stopGameLoop();
+            sessionPauseStart = 0;
+            resetGame();
+            queueToast('\uD83D\uDCBE Run saved — Resume from title screen', 3000);
         }
 
         function pickWeightedPattern() {
@@ -2315,6 +2972,9 @@ const TRAIL_RENDER_CONFIG = {
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
+            // v7 E: run is finished — discard any saved snapshot so the idle
+            // "Resume Run" button doesn't offer a dead run.
+            clearSnapshot();
             if (shieldActive) sessionUsedShield = true;
             // v6: Cascade score multiplier
             if (activeMutators.length > 1) {
@@ -2339,16 +2999,12 @@ const TRAIL_RENDER_CONFIG = {
             });
             checkStatMilestones();
             checkQuestProgress();
-
-            // Session summary
-            sessionSummary = {
-                score: score,
-                time: Math.floor(sessionTimeAlive / 1000),
-                food: sessionFoodEaten,
-                combo: sessionMaxCombo,
-                xp: sessionXP,
-            };
-            sessionSummaryTimer = 4000; // show for 4 seconds
+            // v8 D: Game-Over Recap Card (replaces sessionSummary). Gauntlet deaths
+            // keep the existing "Run Over - Wave X/5" overlay, so only build recap
+            // data for non-gauntlet modes.
+            if (gameMode !== 'gauntlet') {
+                buildRecapData();
+            }
 
             vibrate(30);
             // v7 D4: snake-decay death effect — REPLACES the old death-particle burst.
@@ -2359,7 +3015,9 @@ const TRAIL_RENDER_CONFIG = {
             var dSkin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
             var dHeadRaw = dSkin.head, dBodyRaw = dSkin.body;
             deathFragments = [];
-            for (var fi = snake.length - 1; fi >= 0; fi--) {
+            // v8 B: calm mode caps fragments at 60 (reduced-motion accessibility).
+            var fragCap = calmModeEffective() ? 60 : 400;
+            for (var fi = snake.length - 1; fi >= 0 && deathFragments.length < fragCap; fi--) {
                 var seg = snake[fi];
                 var isHead = (fi === 0);
                 var fragColor = isHead
@@ -2395,6 +3053,7 @@ const TRAIL_RENDER_CONFIG = {
         function endZenSession() {
             stopGameLoop();
             gameState = 'gameover';
+            clearSnapshot();
             saveReplay(score, snake.length);
             updateMenuFooter();
             score = snake.length;
@@ -2411,20 +3070,221 @@ const TRAIL_RENDER_CONFIG = {
             });
             checkStatMilestones();
             checkQuestProgress();
-            // Session summary
-            sessionSummary = {
-                score: score,
-                time: Math.floor(sessionTimeAlive / 1000),
-                food: sessionFoodEaten,
-                combo: sessionMaxCombo,
-                xp: sessionXP,
-            };
-            sessionSummaryTimer = 4000;
+            // v8 D: Game-Over Recap Card (replaces sessionSummary). Zen always uses
+            // the recap card (no gauntlet-style overlay for Zen).
             stopDrone();
             stopPad();
+            buildRecapData();
             zenActive = false;
             // v6: diary entry
             saveDiaryEntry();
+        }
+        // v8 D: Game-Over Recap Card helpers.
+        function captureQuestBaseline() {
+            return {
+                daily: dailyQuests.map(function(q) { return q.progress || 0; }),
+                weekly: weeklyQuests.map(function(q) { return q.progress || 0; })
+            };
+        }
+        function buildRecapData() {
+            var prevBest = sessionModeHighStart || 0;
+            var isZen = gameMode === 'zen';
+            var isNewBest = !isZen && score > prevBest;
+            // Quest progress deltas (per-run-best semantics mirror quests themselves).
+            var questDeltas = [];
+            if (recapQuestBaseline) {
+                var collect = function(quests, base, period) {
+                    for (var i = 0; i < quests.length; i++) {
+                        var before = base[i] || 0;
+                        var after = quests[i].progress || 0;
+                        if (after > before) {
+                            questDeltas.push({ desc: quests[i].desc, delta: after - before, target: quests[i].target, completed: quests[i].completed });
+                        }
+                    }
+                };
+                collect(dailyQuests, recapQuestBaseline.daily, 'daily');
+                collect(weeklyQuests, recapQuestBaseline.weekly, 'weekly');
+            }
+            questDeltas.sort(function(a, b) { return b.delta - a.delta; });
+            var tierName = evolutionTier >= 0 ? EVOLUTION_TIERS[evolutionTier].name : null;
+            recapData = {
+                score: score,
+                isZen: isZen,
+                prevBest: prevBest,
+                isNewBest: isNewBest,
+                xpEarned: sessionXP || 0,
+                evolutionTier: tierName,
+                questDeltas: questDeltas.slice(0, 3)
+            };
+        }
+        function drawRecapCard() {
+            if (!recapData) return;
+            ctx.save();
+            // Card panel
+            var cardW = 320, cardH = 168;
+            var cardX = (CANVAS_WIDTH - cardW) / 2;
+            var cardY = CANVAS_HEIGHT / 2 - cardH / 2 + 6;
+            ctx.fillStyle = 'rgba(0,0,0,0.88)';
+            ctx.fillRect(cardX, cardY, cardW, cardH);
+            ctx.strokeStyle = recapData.isNewBest ? '#FFD700' : '#555';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(cardX, cardY, cardW, cardH);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            // Title
+            ctx.fillStyle = recapData.isNewBest ? '#FFD700' : '#CCC';
+            ctx.font = 'bold 18px Arial';
+            ctx.fillText(recapData.isZen ? 'ZEN SESSION ENDED' : (recapData.isNewBest ? '★ NEW BEST! ★' : 'RUN OVER'), CANVAS_WIDTH / 2, cardY + 10);
+            // Score line
+            ctx.font = 'bold 22px Arial';
+            ctx.fillStyle = '#FFF';
+            var scoreLabel = recapData.isZen ? 'Length: ' + recapData.score : 'Score: ' + recapData.score;
+            ctx.fillText(scoreLabel, CANVAS_WIDTH / 2, cardY + 36);
+            if (!recapData.isZen) {
+                ctx.font = '12px Arial';
+                ctx.fillStyle = recapData.isNewBest ? '#FFD700' : '#888';
+                var deltaStr = recapData.isNewBest ? '＋' + (recapData.score - recapData.prevBest) + ' vs best' : (recapData.prevBest > 0 ? '−' + (recapData.prevBest - recapData.score) + ' vs best' : '');
+                if (deltaStr) ctx.fillText(deltaStr, CANVAS_WIDTH / 2, cardY + 62);
+            }
+            // XP + evolution line
+            ctx.font = '13px Arial';
+            ctx.fillStyle = '#9B59B6';
+            var xpLine = '＋' + recapData.xpEarned + ' XP';
+            if (recapData.evolutionTier) xpLine += '  |  Tier: ' + recapData.evolutionTier;
+            ctx.fillText(xpLine, CANVAS_WIDTH / 2, cardY + (recapData.isZen ? 62 : 80));
+            // Quest progress lines (up to 3)
+            ctx.font = '11px Arial';
+            ctx.fillStyle = '#44FF88';
+            var qy = cardY + (recapData.isZen ? 82 : 100);
+            for (var qi = 0; qi < recapData.questDeltas.length; qi++) {
+                var qd = recapData.questDeltas[qi];
+                var qStr = '▸ ' + qd.desc + ' (+' + qd.delta + (qd.completed ? ' ✓' : '') + ')';
+                ctx.fillText(qStr, CANVAS_WIDTH / 2, qy);
+                qy += 14;
+            }
+            // Retry prompt
+            ctx.font = '12px Arial';
+            ctx.fillStyle = '#888';
+            ctx.fillText('Press ENTER to retry', CANVAS_WIDTH / 2, cardY + cardH - 22);
+            ctx.restore();
+        }
+        // v8 F: Bounty Rush — templates and logic.
+        const BOUNTY_TEMPLATES = [
+            { id: 'score',  desc: 'Score +{n} within the window',        kind: 'score',     target: 50,  windowTicks: 120, reward: { pts: 40 } },
+            { id: 'food',   desc: 'Eat {n} more foods within the window', kind: 'food',      target: 3,   windowTicks: 90,  reward: { xp: 50 } },
+            { id: 'combo',  desc: 'Reach a {n}x combo within the window', kind: 'combo',     target: 5,   windowTicks: 100, reward: { pts: 60 } },
+            { id: 'length', desc: 'Grow by {n} segments within the window', kind: 'length',  target: 2,   windowTicks: 120, reward: { xp: 60 } },
+            { id: 'speed',  desc: 'Eat {n} speed food within the window',   kind: 'speedFood', target: 1, windowTicks: 150, reward: { pts: 50 } }
+        ];
+        function pickBountyTemplate() {
+            // Exclude kinds irrelevant to the current mode (e.g. speedFood where it
+            // can't spawn). Weighted equally among valid templates.
+            var valid = BOUNTY_TEMPLATES.filter(function(t) {
+                if (t.kind === 'speedFood' && (gameMode === 'zen' || gameMode === 'painter' || gameMode === 'walled')) return false;
+                return true;
+            });
+            if (!valid.length) return null;
+            return valid[Math.floor(seededRandom() * valid.length)];
+        }
+        function spawnBounty() {
+            var tpl = pickBountyTemplate();
+            if (!tpl) return;
+            // Scale targets to the current run so difficulty stays roughly stable.
+            var target = tpl.target;
+            if (tpl.kind === 'score') target = tpl.target + Math.floor(score / 50) * 25;
+            if (tpl.kind === 'combo') target = Math.max(tpl.target, Math.min(15, comboCount + 3));
+            if (tpl.kind === 'length') target = Math.max(tpl.target, Math.floor(snake.length / 10) + 1);
+            activeBounty = {
+                id: tpl.id,
+                desc: tpl.desc.replace('{n}', target),
+                kind: tpl.kind,
+                target: target,
+                windowTicks: tpl.windowTicks,
+                reward: tpl.reward,
+                ticksLeft: tpl.windowTicks,
+                baseline: { score: score, sessionFoodEaten: sessionFoodEaten, comboCount: comboCount, snakeLen: snake.length, sessionSpeedFood: sessionSpeedFood }
+            };
+            queueToast('📋 Bounty: ' + activeBounty.desc, 2500);
+        }
+        function checkBounty() {
+            if (!activeBounty) return;
+            var b = activeBounty;
+            var done = false;
+            if (b.kind === 'score')      done = (score - b.baseline.score) >= b.target;
+            else if (b.kind === 'food')   done = (sessionFoodEaten - b.baseline.sessionFoodEaten) >= b.target;
+            else if (b.kind === 'combo')  done = comboCount >= b.target; // live combo (auto-completes if already past)
+            else if (b.kind === 'length') done = (snake.length - b.baseline.snakeLen) >= b.target;
+            else if (b.kind === 'speedFood') done = (sessionSpeedFood - b.baseline.sessionSpeedFood) >= b.target;
+            if (done) {
+                if (b.reward.pts) addScore(b.reward.pts);
+                if (b.reward.xp) awardXP(b.reward.xp);
+                queueGameEffect('flash', { color: '#FFD700', alpha: 0.4, priority: 'high' });
+                queueToast('✅ Bounty complete! +' + (b.reward.pts || b.reward.xp) + (b.reward.pts ? ' pts' : ' XP'), 2500);
+                // v9 F2: cash-in burst at the head
+                if (snake.length > 0) {
+                    pushTransientRing(snake[0].x + TILE_SIZE / 2, snake[0].y + TILE_SIZE / 2, 20, '#FFD700', 400, 'ring', 3);
+                    spawnParticles(snake[0].x, snake[0].y, calmModeEffective() ? 6 : 15, '#FFD700');
+                }
+                activeBounty = null;
+            }
+        }
+        function tickBounty() {
+            if (!activeBounty) {
+                if (!hoardActive) bountyTickCounter++; // v9 E: suppress bounty spawns during hoard
+                if (bountyTickCounter >= BOUNTY_INTERVAL && gameState === 'playing') {
+                    spawnBounty();
+                    bountyTickCounter = 0;
+                }
+                return;
+            }
+            activeBounty.ticksLeft--;
+            if (activeBounty.ticksLeft <= 0) {
+                queueToast('⏳ Bounty expired', 1500);
+                activeBounty = null;
+                bountyTickCounter = 0;
+                return;
+            }
+            checkBounty();
+        }
+        // v9 E: Golden Hoard Event — periodic food bonanza with 2x score + rival freeze.
+        const HOARD_INTERVAL = 5400; // ~90s at 60ms tick
+        const HOARD_DURATION = 900;  // ~15s
+        let hoardTimer = 0;
+        let hoardTickCounter = 0;
+        function activateHoard() {
+            hoardActive = true;
+            hoardTimer = HOARD_DURATION;
+            scoreMultiplier = 2;
+            // Spawn 4 bonus foods into extraFoods[] (bypass portal logic — direct placement)
+            for (var i = 0; i < 4; i++) {
+                var combined = snake.concat(rivalCombinedSnake()).concat(extraFoods);
+                var hf = generateHoardFood(combined);
+                if (hf) extraFoods.push(hf);
+            }
+            queueToast('\u26A1 Golden Hoard! 2x score!', 3000);
+            queueGameEffect('flash', { color: '#FFD700', alpha: 0.3, priority: 'normal' });
+        }
+        function endHoard() {
+            hoardActive = false;
+            scoreMultiplier = 1;
+            hoardTickCounter = 0;
+            queueToast('Hoard ended', 1500);
+        }
+        // v9 E: place a bonus food directly (bypasses generateFood's portal logic)
+        function generateHoardFood(currentSnake) {
+            var cols = PLAY_WIDTH / TILE_SIZE;
+            var rows = PLAY_HEIGHT / TILE_SIZE;
+            for (var attempt = 0; attempt < 50; attempt++) {
+                var tx = Math.floor(seededRandom() * cols) * TILE_SIZE;
+                var ty = Math.floor(seededRandom() * rows) * TILE_SIZE;
+                if (currentSnake.some(function(s) { return s.x === tx && s.y === ty; })) continue;
+                if (obstacles.some(function(o) { return o.x === tx && o.y === ty; })) continue;
+                if (food && food.x === tx && food.y === ty) continue;
+                if (food2 && food2.x === tx && food2.y === ty) continue;
+                if (powerUpPickup && powerUpPickup.x === tx && powerUpPickup.y === ty) continue;
+                return { x: tx, y: ty, type: 'bonus', spawnTime: performance.now() };
+            }
+            return null;
         }
 
         function playSound(name) {
@@ -2768,6 +3628,8 @@ const TRAIL_RENDER_CONFIG = {
 
         function spawnParticles(x, y, count, color) {
             count = Math.min(count, 500 - particles.length);
+            // v8 C: particle-density slider scales spawn count (after the perf clamp).
+            count = Math.round(count * particleDensity / 100);
             if (count <= 0) return;
             for (let i = 0; i < count; i++) {
                 particles.push({
@@ -2781,6 +3643,12 @@ const TRAIL_RENDER_CONFIG = {
                     size: Math.random() * 3 + 2
                 });
             }
+        }
+        // v9 F: Transient rings — shared visual ring/puff array (hunter dust, bounty burst, power-up shockwave).
+        // Drained in animateVisuals with delta time; capped at 50; reset in resetGame/resetWaveState.
+        function pushTransientRing(x, y, maxRadius, color, maxLife, type, lineWidth) {
+            if (transientRings.length >= 50) transientRings.shift();
+            transientRings.push({ x: x, y: y, maxRadius: maxRadius, alpha: 0.8, color: color, life: maxLife, maxLife: maxLife, type: type || 'ring', lineWidth: lineWidth || 2 });
         }
 
         function drawHelpOverlay() {
@@ -2958,7 +3826,7 @@ const TRAIL_RENDER_CONFIG = {
             if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - delta);
             if (eatAnimTimer > 0) eatAnimTimer = Math.max(0, eatAnimTimer - delta);
             if (snapLevelUpFlash > 0) snapLevelUpFlash = Math.max(0, snapLevelUpFlash - delta);
-            if (sessionSummaryTimer > 0) sessionSummaryTimer = Math.max(0, sessionSummaryTimer - delta);
+
             if (touchIndicatorTimer > 0) touchIndicatorTimer = Math.max(0, touchIndicatorTimer - delta);
 
             // v6: Floater lifecycle decay
@@ -2993,15 +3861,19 @@ const TRAIL_RENDER_CONFIG = {
             const needsRedraw = gameState === 'playing' || visualDirty || particles.length > 0 || flashOverlay || hasPendingEffects() || shakeTimer > 0 || eatAnimTimer > 0 || snapLevelUpFlash > 0 || (gameMode === 'snap' && gameState === 'playing');
             if (needsRedraw) {
                 visualDirty = false;
-                let didShake = false;
+                // v8 A: fold the shake into drawGame's base transform instead of a
+                // save()/translate()/restore() wrapper (which a setTransform inside
+                // drawGame would wipe). shakeOffsetX/Y are read by drawGame's setTransform.
                 if (shakeTimer > 0 && gameState !== 'paused') {
-                    const intensity = (shakeTimer / 200) * 5;
-                    ctx.save();
-                    ctx.translate((Math.random() - 0.5) * 2 * intensity, (Math.random() - 0.5) * 2 * intensity);
-                    didShake = true;
+                    // v8 B: calm mode kills shake; v8 C: shakeIntensity slider scales it.
+                    const intensity = calmModeEffective() ? 0 : (shakeTimer / 200) * 5 * (shakeIntensity / 100);
+                    shakeOffsetX = (Math.random() - 0.5) * 2 * intensity;
+                    shakeOffsetY = (Math.random() - 0.5) * 2 * intensity;
+                } else {
+                    shakeOffsetX = 0;
+                    shakeOffsetY = 0;
                 }
                 drawGame(t);
-                if (didShake) ctx.restore();
             }
 
             // Render particles on top of game state
@@ -3039,6 +3911,33 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.restore(); // restores globalAlpha, compositeOp, shadowBlur, shadowColor
                 if (deathFragments.length === 0) deathFragmentsActive = false;
             }
+            // v9 F: Transient rings (hunter dust, bounty burst, power-up shockwave)
+            if (transientRings.length > 0) {
+                ctx.save();
+                for (var tri = transientRings.length - 1; tri >= 0; tri--) {
+                    var tr = transientRings[tri];
+                    tr.life -= delta;
+                    if (tr.life <= 0) { transientRings.splice(tri, 1); continue; }
+                    var lifeFrac = tr.life / tr.maxLife;
+                    var r = tr.maxRadius * (1 - lifeFrac);
+                    var a = lifeFrac * tr.alpha;
+                    ctx.globalAlpha = a;
+                    ctx.strokeStyle = tr.color;
+                    ctx.lineWidth = tr.lineWidth || 2;
+                    if (tr.type === 'dust') {
+                        ctx.fillStyle = tr.color;
+                        ctx.globalAlpha = a * 0.5;
+                        ctx.beginPath();
+                        ctx.arc(tr.x, tr.y, r * 0.5, 0, 2 * Math.PI);
+                        ctx.fill();
+                    } else {
+                        ctx.beginPath();
+                        ctx.arc(tr.x, tr.y, r, 0, 2 * Math.PI);
+                        ctx.stroke();
+                    }
+                }
+                ctx.restore();
+            }
 
             // v6: Render floaters on top of particles
             if (floaters.length > 0) drawFloaters(ctx);
@@ -3059,24 +3958,6 @@ const TRAIL_RENDER_CONFIG = {
                 drawHelpOverlay();
             }
 
-            // Session summary overlay
-            if (sessionSummary && sessionSummaryTimer > 0) {
-                const alpha = Math.min(1, sessionSummaryTimer / 1000);
-                ctx.save();
-                ctx.globalAlpha = alpha;
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-                ctx.fillRect(10, CANVAS_HEIGHT - 110, CANVAS_WIDTH - 20, 100);
-                ctx.fillStyle = '#FFD700';
-                ctx.font = 'bold 12px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.fillText('\uD83D\uDCCA Session Summary', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 105);
-                ctx.fillStyle = '#CCC';
-                ctx.font = '11px Arial';
-                ctx.fillText('Score: ' + sessionSummary.score + '  |  Time: ' + sessionSummary.time + 's  |  Food: ' + sessionSummary.food, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 88);
-                ctx.fillText('Best Combo: ' + sessionSummary.combo + 'x  |  XP Earned: +' + sessionSummary.xp, CANVAS_WIDTH / 2, CANVAS_HEIGHT - 73);
-                ctx.restore();
-            }
 
             // New obstacle toast
             if (newObstacleToastTimer > 0 && gameState === 'playing') {
@@ -3086,6 +3967,35 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'top';
                 ctx.fillText('\u26A0 New obstacles!', CANVAS_WIDTH / 2, 10);
+                ctx.restore();
+            }
+            // v8 F: Bounty countdown ring (read-only — never writes activeBounty).
+            if (activeBounty && gameState === 'playing') {
+                ctx.save();
+                var ringX = CANVAS_WIDTH / 2, ringY = 38, ringR = 14;
+                var frac = Math.max(0, activeBounty.ticksLeft / activeBounty.windowTicks);
+                // v9 F2: urgency pulse when time is running low (calm-mode: skip oscillation, keep arc)
+                var urgencyActive = frac < 0.3 && !calmModeEffective() && !hoardActive;
+                var ringR_eff = urgencyActive ? ringR + Math.sin(renderTime * 0.01) * 3 : ringR;
+                var ringColor = urgencyActive ? '#FF4444' : (frac > 0.3 ? '#FFD700' : '#FF6B35');
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(ringX, ringY, ringR_eff, 0, 2 * Math.PI);
+                ctx.stroke();
+                ctx.strokeStyle = ringColor;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(ringX, ringY, ringR_eff, -Math.PI / 2, -Math.PI / 2 + frac * 2 * Math.PI);
+                ctx.stroke();
+                ctx.font = 'bold 9px Arial';
+                ctx.fillStyle = '#FFD700';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('📋', ringX, ringY);
+                ctx.font = '9px Arial';
+                ctx.fillStyle = '#CCC';
+                ctx.fillText(activeBounty.desc, ringX, ringY + ringR + 6);
                 ctx.restore();
             }
 
@@ -3122,7 +4032,10 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.fillStyle = visualFX.flash.color === 'rainbow'
                     ? 'hsl(' + (Date.now() % 2000 / 2000 * 360) + ', 100%, 50%)'
                     : visualFX.flash.color;
-                ctx.globalAlpha = Math.max(0, visualFX.flash.alpha);
+                // v8 B: calm mode clamps flash alpha so screen flashes stay subtle.
+                var flashAlpha = visualFX.flash.alpha;
+                if (calmModeEffective()) flashAlpha = Math.min(flashAlpha, 0.15);
+                ctx.globalAlpha = Math.max(0, flashAlpha);
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
                 ctx.globalAlpha = 1;
             }
@@ -3213,6 +4126,14 @@ const TRAIL_RENDER_CONFIG = {
                         }
                     } catch(e) {}
                 }
+                // v7 E: Resume saved run
+                if (hasSnapshot()) {
+                    resumeRunTextY = currentY;
+                    ctx.fillStyle = '#44AAFF';
+                    ctx.font = 'bold 16px Arial';
+                    ctx.fillText('\u25B6 Resume Run  (R)', CANVAS_WIDTH / 2, currentY);
+                    currentY += 20;
+                }
                 // v7: PWA install prompt
                 if (deferredInstallPrompt && !isStandalone) {
                     ctx.fillStyle = '#44FF44';
@@ -3255,6 +4176,7 @@ const TRAIL_RENDER_CONFIG = {
                     const menuItems = [
                         { label: '\u25B6 Resume', color: '#44FF44' },
                         { label: '\uD83D\uDD04 Restart', color: '#FFD700' },
+                        { label: '\uD83D\uDCBE Save & Quit', color: '#44AAFF' },
                         { label: '\u2302 Quit to Menu', color: '#FF4444' }
                     ];
                     for (let i = 0; i < menuItems.length; i++) {
@@ -3268,7 +4190,7 @@ const TRAIL_RENDER_CONFIG = {
 
                     ctx.font = '13px Arial';
                     ctx.fillStyle = '#666';
-                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 120);
+                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  C Copy Run  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 145);
                 }
                 ctx.restore();
                 ctx.restore();
@@ -3321,7 +4243,8 @@ const TRAIL_RENDER_CONFIG = {
 
         function drawGrid() {
             ensureGridCache();
-            ctx.drawImage(gridCacheCanvas, 0, 0);
+            // v8 A: explicit dest size so the DPR-scaled cache paints at logical dims.
+            ctx.drawImage(gridCacheCanvas, 0, 0, PLAY_WIDTH, PLAY_HEIGHT);
         }
 
         function drawObstacles() {
@@ -3369,16 +4292,21 @@ const TRAIL_RENDER_CONFIG = {
             // Shapes are drawn around the LOCAL ORIGIN (0,0) below; the transform
             // (translate → scale → rotate) carries them to the tile center so a
             // single scale applies the pop and a single rotate applies the bob.
+            // v8 B: calm mode — no spawn pop, no idle bob (shapes stay centered).
+            const calm = calmModeEffective();
             const spawnElapsed = performance.now() - (food.spawnTime || 0);
-            const spawnScale = spawnElapsed < 250 ? Math.max(0, easeOutBack(spawnElapsed / 250)) : 1;
+            const spawnScale = calm ? 1 : (spawnElapsed < 250 ? Math.max(0, easeOutBack(spawnElapsed / 250)) : 1);
             var bobX = 0, bobY = 0, bobRot = 0, bobPulse = 1;
-            switch (food.type) {
-                case 'common':  bobY = Math.sin(renderTime / 300) * 1.5; break;            // circle: vertical wobble
-                case 'uncommon': bobRot = Math.sin(renderTime / 500) * 0.25; break;         // diamond: slow rotation
-                case 'rare':    bobPulse = 1 + 0.08 * Math.sin(renderTime / 400); break;    // triangle: gentle breathe
-                case 'epic':    bobPulse = 1 + 0.10 * Math.sin(renderTime / 350); break;    // hexagon: pulse
-                case 'speed':   bobX = Math.sin(renderTime / 250) * 2; break;               // chevron: horizontal drift
-                // 'bonus' keeps its own internal pulse mechanic (see its case below)
+            if (!calm) {
+                switch (food.type) {
+                    case 'common':  bobY = Math.sin(renderTime / 300) * 1.5; break;            // circle: vertical wobble
+                    case 'uncommon': bobRot = Math.sin(renderTime / 500) * 0.25; break;         // diamond: slow rotation
+                    case 'rare':    bobPulse = 1 + 0.08 * Math.sin(renderTime / 400); break;    // triangle: gentle breathe
+                    case 'epic':    bobPulse = 1 + 0.10 * Math.sin(renderTime / 350); break;    // hexagon: pulse
+                    case 'speed':   bobX = Math.sin(renderTime / 250) * 2; break;               // chevron: horizontal drift
+                    case 'hunter':  bobX = Math.sin(renderTime / 160) * 2.5; bobRot = Math.sin(renderTime / 220) * 0.3; break; // v8 E: nervous fidget
+                    // 'bonus' keeps its own internal pulse mechanic (see its case below)
+                }
             }
 
             ctx.save();
@@ -3465,6 +4393,21 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.stroke();
                     break;
                 }
+                case 'hunter': {
+                    // v8 E: paw-print — four small toes around a pad. Drawn at local origin.
+                    const r = TILE_SIZE * 0.4;
+                    ctx.fillStyle = tier.color;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, r * 0.55, 0, 2 * Math.PI);
+                    ctx.fill();
+                    for (var ti = 0; ti < 4; ti++) {
+                        var ang = (ti / 4) * Math.PI * 2 + Math.PI / 4;
+                        ctx.beginPath();
+                        ctx.arc(Math.cos(ang) * r * 0.75, Math.sin(ang) * r * 0.75, r * 0.22, 0, 2 * Math.PI);
+                        ctx.fill();
+                    }
+                    break;
+                }
                 default: {
                     ctx.fillRect(-TILE_SIZE / 2, -TILE_SIZE / 2, TILE_SIZE, TILE_SIZE);
                     break;
@@ -3475,7 +4418,7 @@ const TRAIL_RENDER_CONFIG = {
 
             // Letter labels for non-common types with text outline for contrast
             if (!highContrast) {
-                const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
+                const labels = { uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S', hunter: 'H' };
                 if (labels[food.type]) {
                     ctx.save();
                     ctx.font = 'bold 10px Arial';
@@ -3490,7 +4433,7 @@ const TRAIL_RENDER_CONFIG = {
                 }
             } else {
                 // High-contrast: universal labels for ALL food types
-                const hcLabels = { common: 'C', uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S' };
+                const hcLabels = { common: 'C', uncommon: 'U', rare: 'R', epic: 'E', bonus: 'B', speed: 'S', hunter: 'H' };
                 ctx.save();
                 ctx.font = 'bold 13px Arial';
                 ctx.textAlign = 'center';
@@ -3507,12 +4450,12 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.save();
                 ctx.globalAlpha = 0.7;
                 var f2Tier = FOOD_TIERS[food2.type] || FOOD_TIERS.common;
+                // v7 D1: echo food also pops on spawn; v8 B: calm mode skips the pop.
+                var f2Elapsed = performance.now() - (food2.spawnTime || 0);
+                var f2Scale = calm ? 1 : (f2Elapsed < 250 ? Math.max(0, easeOutBack(f2Elapsed / 250)) : 1);
                 var f2cx = food2.x + TILE_SIZE / 2;
                 var f2cy = food2.y + TILE_SIZE / 2;
                 ctx.fillStyle = f2Tier.color;
-                // v7 D1: echo food also pops on spawn
-                var f2Elapsed = performance.now() - (food2.spawnTime || 0);
-                var f2Scale = f2Elapsed < 250 ? Math.max(0, easeOutBack(f2Elapsed / 250)) : 1;
                 ctx.beginPath();
                 ctx.arc(f2cx, f2cy, TILE_SIZE * 0.35 * f2Scale, 0, 2 * Math.PI);
                 ctx.fill();
@@ -3569,6 +4512,87 @@ const TRAIL_RENDER_CONFIG = {
             }
             
             ctx.restore();
+            // v9 D: draw extraFoods[] (portal + hoard foods) at end of drawFood
+            for (var efdi = 0; efdi < extraFoods.length; efdi++) {
+                drawExtraFood(extraFoods[efdi]);
+            }
+        }
+        // v9 D: draw extraFoods[] (portal + hoard foods) — called from drawFood after primary food/food2
+        function drawExtraFood(ef) {
+            var cx = ef.x + TILE_SIZE / 2;
+            var cy = ef.y + TILE_SIZE / 2;
+            var calm = calmModeEffective();
+            var spawnElapsed = performance.now() - (ef.spawnTime || 0);
+            var spawnScale = calm ? 1 : (spawnElapsed < 250 ? Math.max(0, easeOutBack(spawnElapsed / 250)) : 1);
+            // Portal connecting line (prominent, dashed, calm-safe)
+            if (ef.type === 'portal' && ef.portalLink) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(170,68,255,0.4)';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(ef.portalLink.x + TILE_SIZE / 2, ef.portalLink.y + TILE_SIZE / 2);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+            ctx.save();
+            ctx.translate(cx, cy);
+            if (ef.type === 'portal') {
+                // Two concentric counter-rotating arcs (distinct from bonus pulse)
+                var totalScale = spawnScale;
+                ctx.scale(totalScale, totalScale);
+                ctx.strokeStyle = '#AA44FF';
+                ctx.lineWidth = 2;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#AA44FF';
+                ctx.beginPath();
+                ctx.arc(0, 0, TILE_SIZE * 0.35, renderTime * 0.003, renderTime * 0.003 + Math.PI * 1.5);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(0, 0, TILE_SIZE * 0.25, -renderTime * 0.004, -renderTime * 0.004 + Math.PI * 1.5);
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                // Directional arrow toward the twin
+                if (ef.portalLink) {
+                    var adx = ef.portalLink.x - ef.x, ady = ef.portalLink.y - ef.y;
+                    if (Math.abs(adx) > PLAY_WIDTH / 2) adx = adx > 0 ? adx - PLAY_WIDTH : adx + PLAY_WIDTH;
+                    if (Math.abs(ady) > PLAY_HEIGHT / 2) ady = ady > 0 ? ady - PLAY_HEIGHT : ady + PLAY_HEIGHT;
+                    var angle = Math.atan2(ady, adx);
+                    ctx.rotate(angle);
+                    ctx.fillStyle = '#CC88FF';
+                    ctx.beginPath();
+                    ctx.moveTo(TILE_SIZE * 0.45, 0);
+                    ctx.lineTo(TILE_SIZE * 0.3, -3);
+                    ctx.lineTo(TILE_SIZE * 0.3, 3);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.rotate(-angle);
+                }
+            } else {
+                // Hoard bonus food: reuse the bonus visual (single pulsing circle)
+                var pulse = calm ? 1 : (1 + 0.5 * Math.sin(renderTime / 200));
+                var totalScale2 = spawnScale * pulse;
+                ctx.scale(totalScale2, totalScale2);
+                ctx.fillStyle = FOOD_TIERS.bonus.color;
+                ctx.shadowBlur = FOOD_TIERS.bonus.glow || 0;
+                ctx.shadowColor = FOOD_TIERS.bonus.color;
+                ctx.beginPath();
+                ctx.arc(0, 0, TILE_SIZE * 0.3, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+            ctx.restore();
+            // Label after restore (wrapped in save/restore per AGENTS.md sub-function leak rule)
+            ctx.save();
+            ctx.fillStyle = '#FFF';
+            ctx.font = 'bold 9px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            if (ef.type === 'portal') ctx.fillText('P', cx, cy);
+            else ctx.fillText('\u2605', cx, cy);
+            ctx.restore();
         }
 
         function drawEyes(drawX, drawY, dx, dy, scleraColor, pupilColor) {
@@ -3593,6 +4617,13 @@ const TRAIL_RENDER_CONFIG = {
             ctx.beginPath(); ctx.arc(ex1, ey1, 2, 0, 2 * Math.PI); ctx.fill();
             ctx.beginPath(); ctx.arc(ex2, ey2, 2, 0, 2 * Math.PI); ctx.fill();
         }
+        // v9 C: Combo Heat Aura — body tint + head halo that warms with comboCount.
+        function comboHeatColor(combo) {
+            if (combo < 3) return null;
+            if (combo < 7) { var t = (combo - 3) / 4; return 'rgba(255,' + Math.round(255 - t * 100) + ',' + Math.round(255 - t * 200) + ',0.15)'; }
+            if (combo < 15) { var t2 = (combo - 7) / 8; return 'rgba(255,' + Math.round(155 - t2 * 100) + ',' + Math.round(55 - t2 * 55) + ',0.2)'; }
+            return 'rgba(255,55,0,0.25)';
+        }
 
         function drawSnake(t) {
             const skin = SNAKE_SKINS[cosmetics.snake] || SNAKE_SKINS.snake_green;
@@ -3609,6 +4640,25 @@ const TRAIL_RENDER_CONFIG = {
             var evoGlowColor = evo ? (evo.color === 'rainbow' ? '#FF44FF' : evo.color) : null;
             var evoWavy = (evoTier === 1);                  // Serpentine: sine-wave body
             let headDrawX = 0, headDrawY = 0;
+            // v9 C: Combo Heat halo — drawn before the body so the body covers the center.
+            // Z-order: halo (bottom) → body+evolution glow → shield aura (top). Alpha capped
+            // so it never occludes the evolution glow; dimmed 50% when shield is active.
+            if (comboCount >= 3 && snake.length > 0) {
+                var comboFrac = Math.min(1, comboCount / 15);
+                var haloAlpha = (0.3 + 0.2 * comboFrac) * (shieldActive ? 0.5 : 1);
+                var pulseR = calmModeEffective() ? TILE_SIZE * 0.6 : (TILE_SIZE * 0.6 + Math.sin(renderTime * (0.005 + comboFrac * 0.01)) * 3);
+                var hcx = snake[0].x + TILE_SIZE / 2;
+                var hcy = snake[0].y + TILE_SIZE / 2;
+                ctx.save();
+                ctx.globalAlpha = haloAlpha;
+                var haloColor = comboCount >= 15 ? '#FF4400' : comboCount >= 7 ? '#FF8800' : '#FFCC00';
+                var grad = ctx.createRadialGradient(hcx, hcy, 0, hcx, hcy, pulseR);
+                grad.addColorStop(0, haloColor);
+                grad.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(hcx - pulseR, hcy - pulseR, pulseR * 2, pulseR * 2);
+                ctx.restore();
+            }
             snake.forEach(function(segment, index) {
                 let drawX, drawY;
                 
@@ -3685,6 +4735,12 @@ const TRAIL_RENDER_CONFIG = {
                     const offset = Math.round((segSize - size) / 2);
                     ctx.fillRect(drawX + segPad + offset, drawY + segPad + offset, size, size);
                 } else {
+                    ctx.fillRect(drawX + segPad, drawY + segPad + wavyY, segSize, segSize);
+                }
+                // v9 C: Combo Heat body tint — semi-transparent overlay warming with comboCount
+                var heatColor = comboHeatColor(comboCount);
+                if (heatColor && index > 0) {
+                    ctx.fillStyle = heatColor;
                     ctx.fillRect(drawX + segPad, drawY + segPad + wavyY, segSize, segSize);
                 }
                 if (evoGlow > 0) ctx.shadowBlur = 0;
@@ -3870,6 +4926,11 @@ const TRAIL_RENDER_CONFIG = {
             // Slow-mo tint — replaces the old flat drawSlowMoTint()
             if (slowMoActive) {
                 ctx.fillStyle = 'rgba(80,0,120,0.08)';
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            }
+            // v9 E: Golden Hoard tint
+            if (hoardActive) {
+                ctx.fillStyle = calmModeEffective() ? 'rgba(255, 215, 0, 0.03)' : 'rgba(255, 215, 0, 0.06)';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             }
             // Death vignette crush — intensifies as shakeTimer winds down
@@ -4075,6 +5136,8 @@ const TRAIL_RENDER_CONFIG = {
             dy = 0;
             nextDirection = null;
             food = null;
+            extraFoods = []; // v9 D: clear portal + hoard foods per wave
+            transientRings = []; // v9 F: clear visual rings per wave
             score = 0;
             gauntletWaveScore = 0;
             displayedScore = 0;
@@ -4087,6 +5150,9 @@ const TRAIL_RENDER_CONFIG = {
             lastComboMilestone = 0;
             evolutionTier = -1;
             obstaclePassUsed = false;
+            // v8 F: clear bounty state per gauntlet wave.
+            activeBounty = null;
+            bountyTickCounter = 0;
             var hasComboSave = false;
             for (var cp = 0; cp < gauntletPicks.length; cp++) {
                 if (gauntletPicks[cp].id === 'combo_save') hasComboSave = true;
@@ -4311,7 +5377,10 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function shuffleFoodWeights() {
-            var keys = Object.keys(FOOD_TIERS);
+            // v8 E: exclude hunter in Walled (wrap:false) so chaos_seed never puts it
+            // into rotation there. Self-normalizing (divides by total) so dropping a
+            // key is safe.
+            var keys = Object.keys(FOOD_TIERS).filter(function(k) { return !(MODE_CONFIG[gameMode].wrap === false && k === 'hunter'); });
             var weights = keys.map(function() { return Math.random(); });
             var total = weights.reduce(function(a,b) { return a+b; }, 0);
             var result = {};
@@ -4397,6 +5466,12 @@ const TRAIL_RENDER_CONFIG = {
         // --- end v6 ---
 
                 function drawGame(t) {
+            // v8 A: absolute base transform — DPR scale + folded shake offset.
+            // setTransform is absolute, so this is self-contained for every direct
+            // drawGame(1) call (shakeOffset is 0 outside rAF) AND carries the shake
+            // when called from animateVisuals. The play-area save()/translate() below
+            // composes on top of this base.
+            ctx.setTransform(DPR, 0, 0, DPR, shakeOffsetX * DPR, shakeOffsetY * DPR);
             ctx.imageSmoothingEnabled = false;
 
             // Clear entire canvas (including margin areas) before drawing
@@ -4414,7 +5489,7 @@ const TRAIL_RENDER_CONFIG = {
             // v7 D2: ambient grid breathing — soft radial gradient centered on the
             // snake head, alpha modulated by a ~3s sine cycle. Sits behind obstacles
             // and food (drawn right after the grid) and only while actively playing.
-            if (gameState === 'playing' && snake.length > 0) {
+            if (gameState === 'playing' && snake.length > 0 && !calmModeEffective()) {
                 ctx.save();
                 var bx = snake[0].x + TILE_SIZE / 2;
                 var by = snake[0].y + TILE_SIZE / 2;
@@ -4578,6 +5653,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (gameMode === 'gauntlet' && !(gauntletWave >= GAUNTLET_WAVES.length - 1)) {
                     var runOverMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
                     drawOverlay('Run Over — Wave ' + (gauntletWave + 1) + '/5', 'Score: ' + (gauntletScore + score) + ' | ' + runOverMsg + 'Press ENTER to Restart');
+                } else if (recapData && gameMode !== 'gauntlet') {
+                    // v8 D: recap card replaces the minimal GAME OVER overlay.
+                    drawRecapCard();
                 } else {
                     const deathMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
                     drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + 'Press ENTER to Restart');
@@ -4590,6 +5668,18 @@ const TRAIL_RENDER_CONFIG = {
 
         function updateGame() {
             if (gameState !== 'playing') return;
+            // v8 F: Bounty Rush — tick/resolve contracts (game-logic only).
+            tickBounty();
+            // v9 E: Golden Hoard event — tick-counted, game-logic only, no session-end hook.
+            if (MODE_CONFIG[gameMode].hoardEnabled) {
+                if (!hoardActive) {
+                    hoardTickCounter++;
+                    if (hoardTickCounter >= HOARD_INTERVAL && gameState === 'playing') activateHoard();
+                } else {
+                    hoardTimer--;
+                    if (hoardTimer <= 0) endHoard();
+                }
+            }
 
             // v6: extracted functions (declared here for closure over updateGame's locals)
             function handleComboMilestone() {
@@ -4912,6 +6002,11 @@ const TRAIL_RENDER_CONFIG = {
                     }
                 }
             }
+            // v8 E: hunter food flees the head every HUNTER_MOVE_INTERVAL ticks (after
+            // the snake has moved, so it flees the NEW head position). Game-logic only.
+            if (food && food.type === 'hunter' && gameTick % HUNTER_MOVE_INTERVAL === 0) {
+                moveHunter();
+            }
 
             // v6: Phantom Brew — cross ghost trail for +1.0x combo (5s cooldown)
             if (activeBrews.indexOf('phantom') !== -1) {
@@ -5089,7 +6184,11 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 checkAchievements(score);
                 checkQuestProgress();
-                const playerCombined = snake.concat(rivalCombinedSnake());
+                // v9 D: if the eaten food was a portal epic, remove its twin from extraFoods[]
+                if (eatenType === 'epic') {
+                    extraFoods = extraFoods.filter(function(ef) { return !ef.portalLink; });
+                }
+                const playerCombined = snake.concat(rivalCombinedSnake()).concat(extraFoods);
                 food = generateFood(playerCombined);
                 if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
                 // v6: Rampage Brew — food spawns closer to head (min 3 tiles)
@@ -5103,7 +6202,10 @@ const TRAIL_RENDER_CONFIG = {
                         var adj = [{x: food.x + TILE_SIZE, y: food.y}, {x: food.x - TILE_SIZE, y: food.y}, {x: food.x, y: food.y + TILE_SIZE}, {x: food.x, y: food.y - TILE_SIZE}];
                         for (var ai = 0; ai < adj.length; ai++) {
                             if (adj[ai].x >= 0 && adj[ai].x < PLAY_WIDTH && adj[ai].y >= 0 && adj[ai].y < PLAY_HEIGHT) {
-                                food2 = { x: adj[ai].x, y: adj[ai].y, type: food.type, pts: Math.floor((FOOD_TIERS[food.type] ? FOOD_TIERS[food.type].pts : 10) / 2), spawnTime: performance.now() };
+                                // v8 E: food2 copies the eaten food's type — coerce hunter to
+                                // common so a static hunter food2 (never moves) can't spawn.
+                                var f2Type = (food.type === 'hunter' || food.type === 'portal') ? 'common' : food.type;
+                                food2 = { x: adj[ai].x, y: adj[ai].y, type: f2Type, pts: Math.floor((FOOD_TIERS[f2Type] ? FOOD_TIERS[f2Type].pts : 10) / 2), spawnTime: performance.now() };
                                 break;
                             }
                         }
@@ -5124,6 +6226,66 @@ const TRAIL_RENDER_CONFIG = {
                 spawnParticles(food2.x, food2.y, 8, '#44FF88');
                 playSound('eat');
                 food2 = null;
+            }
+            // v9 D: extraFoods[] eat check (portal + hoard foods)
+            for (var efi = extraFoods.length - 1; efi >= 0; efi--) {
+                var ef = extraFoods[efi];
+                if (wrappedHead.x === ef.x && wrappedHead.y === ef.y) {
+                    if (ef.portalLink) {
+                        // Portal food: teleport the entire snake (Phoenix-style re-anchor)
+                        // Eating the portal grants the epic's bonus (score + XP) and removes both foods.
+                        var exitTile = snapToFreeTile(ef.portalLink.x, ef.portalLink.y);
+                        spawnParticles(ef.x, ef.y, 18, '#AA44FF');
+                        spawnParticles(exitTile.x, exitTile.y, 18, '#AA44FF');
+                        playSound('bonus');
+                        // Grant the epic's bonus
+                        sessionFoodEaten++;
+                        stats.totalFoodEaten++;
+                        stats.epicFoodEaten++;
+                        sessionFoodTypes.add('epic');
+                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.epic.pts);
+                        awardXP(FOOD_TIERS.epic.xp);
+                        spawnFloater(exitTile.x, exitTile.y, '+' + FOOD_TIERS.epic.pts + ' EPIC!', '#AA44FF', 18);
+                        // Remove the portal food from extraFoods[]
+                        extraFoods.splice(efi, 1);
+                        // Remove the primary epic food (it's the `food` variable, not in extraFoods[])
+                        // The epic's portalLink points to the portal food we just removed.
+                        // Check if food is the epic twin: its portalLink matches the eaten portal's position.
+                        if (food && food.portalLink && food.portalLink.x === ef.x && food.portalLink.y === ef.y) {
+                            food = null;
+                            // Generate a new primary food (without portal, since we don't want another portal immediately)
+                            var combinedAfterPortal = snake.concat(rivalCombinedSnake()).concat(extraFoods);
+                            food = generateFood(combinedAfterPortal);
+                            if (!food) { lastDeathCause = 'The board filled up!'; gameOver(); return; }
+                        }
+                        // Re-anchor: snake becomes a short segment at the exit
+                        snake = [{ x: exitTile.x, y: exitTile.y }];
+                        while (snake.length < 3) {
+                            var tailSeg = wrapPosition({ x: snake[snake.length - 1].x - dx, y: snake[snake.length - 1].y - dy });
+                            if (snake.some(function(s) { return s.x === tailSeg.x && s.y === tailSeg.y; })) break;
+                            snake.push(tailSeg);
+                        }
+                        triggerEvolutionIfReady();
+                        queueToast('🌀 Teleported!', 1500);
+                    } else {
+                        // Hoard bonus food: normal eat logic
+                        snake.push(tail);
+                        snakeGrew = true;
+                        triggerEvolutionIfReady();
+                        if (activeSeed !== null) recordReplayGrow(gameTick);
+                        sessionFoodEaten++;
+                        stats.totalFoodEaten++;
+                        stats.bonusFoodEaten++;
+                        sessionBonusFood++;
+                        sessionFoodTypes.add('bonus');
+                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.bonus.pts);
+                        spawnParticles(ef.x, ef.y, FOOD_TIERS.bonus.pCount, FOOD_TIERS.bonus.color);
+                        spawnFloater(ef.x, ef.y, '+30 BONUS!', '#FFD700', 18);
+                        playSound('bonus');
+                        extraFoods.splice(efi, 1);
+                    }
+                    break; // only eat one food per tick
+                }
             }
 
             // Check power-up collection
@@ -5170,7 +6332,9 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Magnet effect: pull food toward snake
-            if (magnetActive && food) {
+            // v8 E: magnet pull skips hunter food (a fleeing hunter pulled 1 tile/tick
+            // toward the head would be a free lunch, defeating the challenge).
+            if (magnetActive && food && food.type !== 'hunter') {
                 const head = snake[0];
                 let dx_food = head.x - food.x;
                 let dy_food = head.y - food.y;
@@ -5202,6 +6366,28 @@ const TRAIL_RENDER_CONFIG = {
                     }
                 }
             }
+            // v9 D: magnet also pulls extraFoods[] (hoard bonus foods, not portal foods)
+            if (magnetActive) {
+                for (var efi2 = 0; efi2 < extraFoods.length; efi2++) {
+                    var ef2 = extraFoods[efi2];
+                    if (ef2.type === 'portal') continue;
+                    var head2 = snake[0];
+                    var dfx = head2.x - ef2.x, dfy = head2.y - ef2.y;
+                    if (Math.abs(dfx) > PLAY_WIDTH / 2) dfx = dfx > 0 ? dfx - PLAY_WIDTH : dfx + PLAY_WIDTH;
+                    if (Math.abs(dfy) > PLAY_HEIGHT / 2) dfy = dfy > 0 ? dfy - PLAY_HEIGHT : dfy + PLAY_HEIGHT;
+                    var d2 = Math.abs(dfx) + Math.abs(dfy);
+                    if (d2 > 0 && d2 <= 4 * TILE_SIZE) {
+                        var nfx = ef2.x, nfy = ef2.y;
+                        if (Math.abs(dfx) >= Math.abs(dfy)) nfx += dfx > 0 ? TILE_SIZE : -TILE_SIZE;
+                        else nfy += dfy > 0 ? TILE_SIZE : -TILE_SIZE;
+                        var wp = wrapPosition({ x: nfx, y: nfy });
+                        if (!snake.some(function(s) { return s.x === wp.x && s.y === wp.y; }) &&
+                            !obstacles.some(function(o) { return o.x === wp.x && o.y === wp.y; })) {
+                            ef2.x = wp.x; ef2.y = wp.y;
+                        }
+                    }
+                }
+            }
 
             // Power-up spawn timer
             if (gameMode !== 'zen' && gameMode !== 'walled' && !powerUpPickup && !powerUpType) {
@@ -5222,7 +6408,7 @@ const TRAIL_RENDER_CONFIG = {
 
             // Rival respawn timer
             var anyRivalAlive = anyRivalActive();
-            if (!anyRivalAlive && rivals.length > 0 && rivals[0].respawnTimer > 0) {
+            if (!anyRivalAlive && rivals.length > 0 && rivals[0].respawnTimer > 0 && !hoardActive) {
                 rivals[0].respawnTimer -= getEffectiveSpeed();
                 if (rivals[0].respawnTimer <= 0) {
                     spawnRival(0);
@@ -5230,7 +6416,7 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // Update rival
-            if (anyRivalActive()) {
+            if (anyRivalActive() && !hoardActive) {
                 for (var rii = 0; rii < rivals.length; rii++) {
                     if (rivals[rii].active) updateRival(rii);
                 }
@@ -5402,7 +6588,7 @@ const TRAIL_RENDER_CONFIG = {
         function showFoodLegend() {
             const el = toastEl;
             if (!el) return;
-            el.textContent = '\uD83C\uDF4E Common=10pts Epic=50pts Bonus=30pts Rare=20pts Uncommon=15pts Speed=5pts(speed!)';
+            el.textContent = '\uD83C\uDF4E Common=10pts Epic=50pts Bonus=30pts Rare=20pts Uncommon=15pts Speed=5pts(speed!) 🐾 Hunter=50pts(fleeing!)';
             el.style.display = 'block';
             setTimeout(function() { el.style.display = 'none'; }, 5000);
         }
@@ -5537,6 +6723,11 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
+            document.getElementById('settingsPanel').style.display = 'none';
+            var bp = document.getElementById('brewsPanel');
+            if (bp) bp.style.display = 'none';
+            var dp = document.getElementById('diaryPanel');
+            if (dp) dp.style.display = 'none';
             panelBackdropEl.style.display = 'none';
             srSpeak('Panel closed');
         }
@@ -5549,6 +6740,7 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
+            document.getElementById('settingsPanel').style.display = 'none';
             let html = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;color:#FFD700;">🏆 ACHIEVEMENTS</h2><div style="max-height:400px;overflow-y:auto;">';
             for (const id in ACHIEVEMENTS) {
                 const ach = ACHIEVEMENTS[id];
@@ -5575,6 +6767,7 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('statsPanel').style.display = 'none';
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
+            document.getElementById('settingsPanel').style.display = 'none';
 
             function cycle(currentId, categoryMap, direction) {
                 const keys = Object.keys(categoryMap);
@@ -5666,6 +6859,7 @@ const TRAIL_RENDER_CONFIG = {
             document.getElementById('achievementsPanel').style.display = 'none';
             document.getElementById('cosmeticsPanel').style.display = 'none';
             document.getElementById('questsPanel').style.display = 'none';
+            document.getElementById('settingsPanel').style.display = 'none';
             el.innerHTML = '<button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button><h2 style="text-align:center;margin-top:0;">📊 STATS</h2>' +
                 '<table style="width:100%;border-collapse:collapse;">' +
                 '<tr><td style="padding:4px 8px;">Games Played</td><td style="text-align:right;padding:4px 8px;">' + stats.gamesPlayed + '</td></tr>' +
@@ -5801,6 +6995,13 @@ const TRAIL_RENDER_CONFIG = {
                     drawGame(1);
                     return;
                 }
+                return;
+            }
+            // v8 C: S key opens the Settings panel (idle/gameover only — placed after
+            // the gauntlet-intermission and draft blocks so it never collides with
+            // their 's'/S navigation, and blocked during playing/paused).
+            if ((e.key === 's' || e.key === 'S') && (gameState === 'idle' || gameState === 'gameover')) {
+                showSettingsPanel();
                 return;
             }
 
@@ -5952,6 +7153,18 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
+            // v7 E: Resume saved run with 'R' on idle
+            if ((e.key === 'r' || e.key === 'R') && gameState === 'idle' && hasSnapshot()) {
+                var snap = saveManager.getJSON(SNAPSHOT_KEY, null);
+                if (snap) {
+                    if (restoreFromSnapshot(snap, true)) {
+                        drawGame(1);
+                        visualDirty = true;
+                    }
+                }
+                return;
+            }
+
             if (e.key === 'v' || e.key === 'V') {
                 highContrast = !highContrast;
                 saveManager.set('snake_high_contrast', highContrast ? '1' : '0');
@@ -6085,13 +7298,13 @@ const TRAIL_RENDER_CONFIG = {
                 if (gameState === 'paused') {
                     if (e.key === 'ArrowUp') {
                         if (pauseConfirmPending) return;
-                        pauseMenuSelection = (pauseMenuSelection - 1 + 3) % 3;
+                        pauseMenuSelection = (pauseMenuSelection - 1 + 4) % 4;
                         drawGame(1);
                         return;
                     }
                     if (e.key === 'ArrowDown') {
                         if (pauseConfirmPending) return;
-                        pauseMenuSelection = (pauseMenuSelection + 1) % 3;
+                        pauseMenuSelection = (pauseMenuSelection + 1) % 4;
                         drawGame(1);
                         return;
                     }
@@ -6126,10 +7339,20 @@ const TRAIL_RENDER_CONFIG = {
                             return;
                         }
                         if (pauseMenuSelection === 2) {
+                            saveAndQuit();
+                            return;
+                        }
+                        if (pauseMenuSelection === 3) {
                             pauseConfirmPending = true;
                             pauseConfirmAction = 'quit';
                             drawGame(1);
                             return;
+                        }
+                        return;
+                    }
+                    if (e.key === 'c' || e.key === 'C') {
+                        if (!pauseConfirmPending) {
+                            copyRunState();
                         }
                         return;
                     }
@@ -6254,16 +7477,31 @@ const TRAIL_RENDER_CONFIG = {
                 return;
               }
               const menuTopY = CANVAS_HEIGHT / 2 - 10;
-              for (let i = 0; i < 3; i++) {
+              for (let i = 0; i < 4; i++) {
                 const itemY = menuTopY + i * 40;
                 if (tapY >= itemY - 15 && tapY <= itemY + 20 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
                   if (i === 0) { resumeGame(); }
                   else if (i === 1) { pauseConfirmPending = true; pauseConfirmAction = 'restart'; drawGame(1); }
-                  else if (i === 2) { pauseConfirmPending = true; pauseConfirmAction = 'quit'; drawGame(1); }
+                  else if (i === 2) { saveAndQuit(); }
+                  else if (i === 3) { pauseConfirmPending = true; pauseConfirmAction = 'quit'; drawGame(1); }
                   return;
                 }
               }
-              return;
+            }
+            // v7 E: Resume Run tap on idle screen
+            if (gameState === 'idle' && hasSnapshot()) {
+              const rect = canvas.getBoundingClientRect();
+              const scaleY = CANVAS_HEIGHT / rect.height;
+              const tapY = (e.changedTouches[0].clientY - rect.top) * scaleY;
+              const tapX = (e.changedTouches[0].clientX - rect.left) * (CANVAS_WIDTH / rect.width);
+              if (tapY >= resumeRunTextY - 15 && tapY <= resumeRunTextY + 20 && tapX >= 50 && tapX <= CANVAS_WIDTH - 50) {
+                var snap = saveManager.getJSON(SNAPSHOT_KEY, null);
+                if (snap && restoreFromSnapshot(snap, true)) {
+                  drawGame(1);
+                  visualDirty = true;
+                }
+                return;
+              }
             }
             // v7: PWA install tap on idle screen
             if (gameState === 'idle' && deferredInstallPrompt && !isStandalone) {
@@ -6318,6 +7556,7 @@ const TRAIL_RENDER_CONFIG = {
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden && gameState === 'playing') {
+                saveSnapshot(); // v9 B: save before pausing so mobile backgrounding doesn't lose the run
                 autoPaused = true;
                 sessionPauseStart = Date.now();
                 gameState = 'paused';
@@ -6338,20 +7577,37 @@ const TRAIL_RENDER_CONFIG = {
             closeAllPanels();
         });
 
+        // v7 E: Auto-save on tab close / navigation (pagehide for mobile iOS)
+        function autoSaveOnClose() {
+            if (gameState === 'playing' || gameState === 'paused') {
+                saveSnapshot();
+            }
+        }
+        window.addEventListener('beforeunload', autoSaveOnClose);
+        window.addEventListener('pagehide', autoSaveOnClose);
+
         syncDailyState();
         syncQuestState();
 
         window.addEventListener('load', function() {
             var hash = window.location.hash.slice(1);
             if (hash) {
-                challengeFromUrl = parseChallengeUrl(hash);
+                if (hash.startsWith('snapshot=')) {
+                    restoreFromSnapshotHash(hash.slice(9));
+                } else {
+                    challengeFromUrl = parseChallengeUrl(hash);
+                }
             }
         });
 
         window.addEventListener('hashchange', function() {
             if (gameState === 'idle') {
                 var hash = window.location.hash.slice(1);
-                challengeFromUrl = hash ? parseChallengeUrl(hash) : null;
+                if (hash && hash.startsWith('snapshot=')) {
+                    restoreFromSnapshotHash(hash.slice(9));
+                } else {
+                    challengeFromUrl = hash ? parseChallengeUrl(hash) : null;
+                }
                 visualDirty = true;
             }
         });
