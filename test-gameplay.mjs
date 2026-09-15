@@ -10,7 +10,7 @@
 
 import { chromium } from 'playwright';
 
-const FILE = 'file:///opt/projects/experiments/snakes/snake.html';
+const FILE = 'file://' + new URL('./snake.html', import.meta.url).pathname;
 // Fixed seed so generateFood()'s seededRandom() calls are deterministic.
 // The exact food positions don't matter — each test overrides food.x/y
 // directly to place food adjacent to the head — but a fixed seed keeps

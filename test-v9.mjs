@@ -6,7 +6,7 @@
 // generateFood path. Drives real game functions via updateGame()/generateFood().
 import { chromium } from 'playwright';
 
-const FILE = 'file:///opt/projects/experiments/snakes/snake.html';
+const FILE = 'file://' + new URL('./snake.html', import.meta.url).pathname;
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
