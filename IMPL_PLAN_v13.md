@@ -690,3 +690,16 @@ found two more assertions of the same class — plus the leader's own sweep foun
 | **C5b** asserted `typeof moveCounter === 'number'`, which `restoreFromSnapshot`'s own `moveCounter \|\| 0` default satisfies, so a snapshot that dropped the field entirely still passed. | **Fixed** — asserts the field is SERIALISED (`hasOwnProperty`) and round-trips a non-zero value (5), plus new **C5c** asserting the restored stride phase (moves on the next call, skips the one after). Falsified: dropping the field from the builder fails C5b and C5c. |
 | **Found by the leader's own 13-mutation sweep** the first-class rival onboarding toast (`snake_has_seen_rival` + the directional `srSpeak`) had no assertion at all — deleting it entirely left the suite green. | **Fixed** — new **B19/B19b/B19c/B19d**: the first spawn warns once with the dashed-ring hint, does not repeat, announces a direction to the screen reader, and the flag persists. Falsified: deleting the toast fails B19/B19d. |
 | **Non-findings the reviewer checked and correctly reported as neutral** — F1b (the enclosing save/restore already restores dash state), E3 (the first mutation flipped a zero `dx`, so `-0 === 0`), and `si = 1` (behaviourally equivalent to `si = 0` now that `rivalHeadContactIdx` suppresses the head tile). | Recorded. `si = 1` is belt-and-braces rather than a pinned invariant; the comment at the scan is a second line of defence, not the mechanism. |
+
+---
+
+## Reviewer round 9 (`d0547bf`) — final
+
+All three round-8 fixes verified by mutation. One more instance of the same class, in the commit
+that fixed two of them.
+
+| Finding | Disposition |
+|---|---|
+| **B19c** the title promised "a direction" but the regex matched only the `^Rival incoming, ` prefix. Pinning `dirWord` to a constant or the tile count to `0` left it green — so a screen-reader user could be told "left" for a rival above, with the suite at 96/0. It matters because AGENTS.md documents this line as carrying the same information as the dashed ring. | **Fixed.** The fixture now places the rival in all four directions and asserts the full payload (`right/left` 7 tiles, `above/below` 8 tiles), plus a shape check requiring a non-zero numeric distance. Falsified both ways: a constant direction and a zeroed tile count each fail. |
+| **Cosmetic, deliberately unpinned** — the telegraph's alpha ramp and `double_rival`'s two rival colours. | **Left as-is**, agreeing with the reviewer's line: "a documented contract nothing reads" is a finding; "a cosmetic detail nothing reads" is not. F3b pins the informational channel (ring + arc), and F4 pins rival-vs-food distinctness. |
+| **Reviewer's recommendation: ship.** | **Accepted.** Production has been frozen and verified for three commits; the remaining items are single assertions, each narrower than the last. No further sweep round. |

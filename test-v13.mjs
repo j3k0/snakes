@@ -676,7 +676,10 @@ try {
 try {
     const r = await page.evaluate(`(() => {
         ${PRE}
-        const spawnOne = () => {
+        // The spawn tile is placed by findFreeTile, so rather than guessing it we place the
+        // rival ourselves in a KNOWN direction — which is what makes the direction word
+        // observable at all.
+        const spawnOne = (place) => {
             cleanRun();
             snake = [{ x: 40, y: 40 }, { x: 20, y: 40 }];
             rivals = []; obstacles = []; hazards = []; extraFoods = []; food = null;
@@ -695,19 +698,55 @@ try {
             return { first, second, flag: hasSeenRival,
                      stored: saveManager.get('snake_has_seen_rival', '') };
         };
-        return spawnOne();
+        // Directional payloads, one per axis so the word is not merely present but correct.
+        const directional = (rivalXY) => {
+            cleanRun();
+            snake = [{ x: 200, y: 200 }, { x: 180, y: 200 }];
+            rivals = []; obstacles = []; hazards = []; extraFoods = []; food = null;
+            const spoken = [];
+            const os = window.srSpeak;
+            window.srSpeak = function (m) { spoken.push(String(m)); };
+            hasSeenRival = true;              // silence the toast; we are reading srSpeak
+            rivals = [{ snake: [{ x: rivalXY[0], y: rivalXY[1] },
+                                { x: rivalXY[0] + 20, y: rivalXY[1] }],
+                        dx: 20, dy: 0, active: false, respawnTimer: 999, moveCounter: 0,
+                        deferCount: 0, color: '#B71C1C' }];
+            announceRivalIncoming(rivals[0]);
+            window.srSpeak = os;
+            return spoken[0] || '';
+        };
+        return {
+            base: spawnOne(),
+            right: directional([340, 200]),   // 140px right, same row
+            left:  directional([60, 200]),    // 140px left, same row
+            above: directional([200, 40]),    // 160px above, same column
+            below: directional([200, 360])
+        };
     })()`);
-    const taught = r.first.heard.filter(function (m) { return /Rival incoming/.test(m); });
+    const taught = r.base.first.heard.filter(function (m) { return /Rival incoming/.test(m); });
     check('B19: the first rival warns once, with the dashed-ring hint',
-          taught.length === 1 && /dashed ring/i.test(taught[0]), JSON.stringify(r));
+          taught.length === 1 && /dashed ring/i.test(taught[0]), JSON.stringify(r.base));
     check('B19b: it does not repeat on later spawns',
-          r.second.heard.filter(function (m) { return /Rival incoming/.test(m); }).length === 0,
-          JSON.stringify(r.second));
-    check('B19c: the arrival is announced to the screen reader with a direction',
-          r.first.spoken.filter(function (m) { return /^Rival incoming, /.test(m); }).length === 1,
-          JSON.stringify(r.first.spoken));
+          r.base.second.heard.filter(function (m) { return /Rival incoming/.test(m); }).length === 0,
+          JSON.stringify(r.base.second));
     check('B19d: the one-shot flag persists',
-          r.flag === true && r.stored === '1', JSON.stringify({ flag: r.flag, stored: r.stored }));
+          r.base.flag === true && r.base.stored === '1',
+          JSON.stringify({ flag: r.base.flag, stored: r.base.stored }));
+    // B19c: this srSpeak line is the ONLY channel carrying direction and distance — AGENTS.md
+    // records it as information, not decoration. A prefix-only regex passed with the direction
+    // pinned to a constant and the tiles pinned to 0, so assert the PAYLOAD against a known
+    // placement: right/left are 140px along x (7 tiles), above/below 160px along y (8 tiles).
+    check('B19c: the arrival line names the correct direction and distance',
+          r.right === 'Rival incoming, right, 7 tiles' &&
+          r.left === 'Rival incoming, left, 7 tiles' &&
+          r.above === 'Rival incoming, above, 8 tiles' &&
+          r.below === 'Rival incoming, below, 8 tiles',
+          JSON.stringify({ right: r.right, left: r.left, above: r.above, below: r.below }));
+    check('B19c2: the line is well formed in every direction',
+          [r.right, r.left, r.above, r.below].every(function (m) {
+              return /^Rival incoming, (left|right|above|below), [1-9][0-9]* tiles$/.test(m);
+          }),
+          JSON.stringify({ right: r.right, left: r.left, above: r.above, below: r.below }));
 } catch (e) { fail_('B19: rival onboarding', e.message); }
 
 // B16: the head-on rule is taught exactly once, and only on a genuine head-on. The cause
