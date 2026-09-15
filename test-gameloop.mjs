@@ -56,7 +56,13 @@ async function run() {
     // (setTimeout chain stalling) from gameplay hazards (obstacle/wall death),
     // which would otherwise end the run and flip gameState to 'gameover'. The
     // obstacles array is module-scope and writable from page.evaluate.
-    await page.evaluate(() => { obstacles = []; });
+    //
+    // Rivals are cleared for the same reason and were the cause of a ~1-in-4
+    // flake: startGame() always calls spawnRival(0) in Classic, and a rival can
+    // reach the player within the 2s window and end the run. Hazards and portal
+    // foods are cleared too, so nothing on the board can kill the snake and the
+    // only thing under test is whether the setTimeout chain keeps ticking.
+    await page.evaluate(() => { obstacles = []; rivals = []; hazards = []; extraFoods = []; });
 
     // Snapshot the starting head position right after the game begins.
     const start = await page.evaluate(() => ({ x: snake[0].x, y: snake[0].y, tick: gameTick }));
