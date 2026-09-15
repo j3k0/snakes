@@ -424,7 +424,6 @@
         let lastTickTime = 0;
         let tickInterval = 120;
         let snakeGrew = false;
-        let prevRivalSnake = [];
         // Touch-device detection (referenced by isMobile and the touch UI guards).
         // Was missing since the v5 refactor, throwing a ReferenceError that halted
         // the entire game script on load — every symbol below landed in the TDZ.
@@ -742,6 +741,7 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
+        let hasSeenRival = saveManager.get('snake_has_seen_rival', '') === '1'; // v13: rival onboarding toast
         // v12 A: one-shot onboarding the first time any resonance becomes active.
         let hasSeenResonance = saveManager.get('snake_has_seen_resonance', '') === '1';
         let lastDeathCause = '';
@@ -1100,7 +1100,7 @@ var BREWS_CONFIG = [
     { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
     { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
     { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
-    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival steals 3 segments',                cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival: steal 3 segments, destroy it',     cost: 3 },
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
@@ -1216,6 +1216,15 @@ let padChangeTick = 0;
         let newObstacleFlash = [];
         let newObstacleToastTimer = 0;
         const RIVAL_MAX_LENGTH = 20;
+        // v13 rival tuning — all tick-counted, never wall-clock.
+        const RIVAL_SPAWN_LENGTH = 3;      // arena spec: the rival spawns with a body
+        const RIVAL_RESPAWN_MS = 10000;    // dead → active, unchanged from the old literal
+        const RIVAL_WINDUP_MS = 1600;      // materialising window before the rival is lethal
+        const RIVAL_MIN_SPAWN_TILES = 5;   // wrap-aware separation from the player's head
+        const RIVAL_CADENCE_MID = 7;       // stride 2 from this length
+        const RIVAL_CADENCE_LONG = 14;     // stride 3 from this length
+        const RIVAL_TELEGRAPH_TILES = 3;   // proximity-ring radius (tiles)
+        const RIVAL_MAX_DEFERRALS = 20;    // cap on activation deferrals before relocating
 
         let toastQueue = [];
         let toastActive = false;
@@ -2627,7 +2636,7 @@ const TRAIL_RENDER_CONFIG = {
             if ((gameMode === 'classic' || gameMode === 'timeAttack') && gameMode !== 'painter') {
                 spawnRival(0);
             }
-            if (activeMutators.indexOf('double_rival') !== -1 && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+            if (activeMutators.indexOf('double_rival') !== -1 && rivalEnabledInMode(gameMode)) {
                 spawnRival(1);
             }
             // v6: Cascade guard - gauntlet limited to 1 mutator
@@ -2645,6 +2654,7 @@ const TRAIL_RENDER_CONFIG = {
                 resetWaveState();
                 var firstWave = GAUNTLET_WAVES[0];
                 if (firstWave.rival) spawnRival(0);
+                if (firstWave.rival && activeMutators.indexOf('double_rival') !== -1) spawnRival(1); // v13
                 tickInterval = firstWave.speedBase;
             }
             drawGame(1);
@@ -2731,8 +2741,9 @@ const TRAIL_RENDER_CONFIG = {
 
         // shrink_zone advance — extracted so the Pressure Cooker resonance
         // (rivalShrink: a rival eating ALSO shrinks the board) can share it.
-        // NOTE: that rival-eat call site is NOT wired yet — only the shrink_zone
-        // timer path below calls this. Returns true when the player is caught.
+        // v13: the rival-eat call site IS wired (updateRival's food branch) and is pinned
+        // behaviourally by test-v12.mjs A14. The old comment here claimed it was not.
+        // Returns true when the player is caught.
         function advanceShrinkZone() {
             if (shrinkCols < PLAY_WIDTH / TILE_SIZE / 2 - 1) {
                 shrinkCols++;
@@ -2884,7 +2895,7 @@ const TRAIL_RENDER_CONFIG = {
                 magnetActive: magnetActive,
                 slowMoActive: slowMoActive,
                 // Rival
-                rivals: rivals.map(function (r) { return { snake: r.snake.map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: r.active, respawnTimer: r.respawnTimer, color: r.color }; }),
+                rivals: rivals.map(function (r) { return { snake: r.snake.map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: r.active, respawnTimer: r.respawnTimer, moveCounter: r.moveCounter || 0, color: r.color }; }),
                 // Mutators & brews
                 activeMutators: activeMutators.slice(),
                 activeBrews: activeBrews.slice(),
@@ -3057,7 +3068,10 @@ const TRAIL_RENDER_CONFIG = {
                 shieldActive = !!data.shieldActive;
                 magnetActive = !!data.magnetActive;
                 slowMoActive = !!data.slowMoActive;
-                rivals = (data.rivals || []).map(function (r) { return { snake: (r.snake || []).map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: !!r.active, respawnTimer: r.respawnTimer || 0, color: r.color || '#FF4444' }; });
+                // v13: moveCounter is additive — a pre-v13 snapshot restores to 0, which the
+                // rival's cadence treats as "not yet moved", so a resumed rival moves on its
+                // first post-restore tick. No SNAPSHOT_VERSION bump.
+                rivals = (data.rivals || []).map(function (r) { return { snake: (r.snake || []).map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: !!r.active, respawnTimer: r.respawnTimer || 0, moveCounter: r.moveCounter || 0, color: r.color || '#B71C1C' }; });
                 activeMutators = (data.activeMutators || []).slice();
                 // v12 A: derived AFTER the mutator restore — computing it in the
                 // counter block above read the PRE-restore mutators, so the HUD
@@ -3229,19 +3243,46 @@ const TRAIL_RENDER_CONFIG = {
         // ignoreObstacleCap: the MAX_OBSTACLE_PERCENT early-out exists for obstacle
         // SPAWNING; death saves (Phoenix/streak charge) and combo-bank teleports
         // must still find a tile on a capped board, or the save silently fails.
-        function findFreeTile(headX, headY, ignoreObstacleCap) {
+        //
+        // v13: the third parameter also accepts an options object. Defaults reproduce the
+        // pre-v13 behaviour EXACTLY for every existing caller (3 raw tiles, today's
+        // occupancy set) — tightening the shared guard would silently cost a death save
+        // its only free tile on a crowded board. The object form is used by spawnRival:
+        //   { minTiles, wrapAware, avoidExtras }
+        function findFreeTile(headX, headY, opts) {
+            var o = (opts === true || opts === false) ? { ignoreObstacleCap: opts } : (opts || {});
+            var minTiles = o.minTiles === undefined ? 3 : o.minTiles;
+            var wrapAware = !!o.wrapAware;
+            var avoidExtras = !!o.avoidExtras;
             const cols = PLAY_WIDTH / TILE_SIZE, rows = PLAY_HEIGHT / TILE_SIZE;
             const maxObs = Math.floor((cols * rows) * MAX_OBSTACLE_PERCENT);
-            if (!ignoreObstacleCap && obstacles.length >= maxObs) return null;
+            if (!o.ignoreObstacleCap && obstacles.length >= maxObs) return null;
             for (let attempt = 0; attempt < 50; attempt++) {
                 const x = Math.floor(seededRandom() * cols) * TILE_SIZE;
                 const y = Math.floor(seededRandom() * rows) * TILE_SIZE;
-                if (Math.abs(x - headX) + Math.abs(y - headY) < 3 * TILE_SIZE) continue;
+                // v13: raw Manhattan measured "3 tiles away" on a wrapping board while the
+                // tile was 1 step across the seam (head (0,10) -> tile (19,10): raw 19,
+                // wrap-aware 1). wrapAware is opt-in so no save path changes meaning.
+                var ddx = Math.abs(x - headX), ddy = Math.abs(y - headY);
+                if (wrapAware) {
+                    ddx = Math.min(ddx, PLAY_WIDTH - ddx);
+                    ddy = Math.min(ddy, PLAY_HEIGHT - ddy);
+                }
+                if (ddx + ddy < minTiles * TILE_SIZE) continue;
                 if (snake.some(s => s.x === x && s.y === y)) continue;
-                if (obstacles.some(o => o.x === x && o.y === y)) continue;
+                if (obstacles.some(o2 => o2.x === x && o2.y === y)) continue;
                 if (food && food.x === x && food.y === y) continue;
                 var rivalSegsFree = rivalCombinedSnake();
                 if (rivalSegsFree.some(s => s.x === x && s.y === y)) continue;
+                if (avoidExtras) {
+                    // v13: without this a rival could materialise on the hoard food, the
+                    // portal twin, the echo food, a power-up or inside an on-phase hazard
+                    // the player is running for — announced by its own countdown arc.
+                    if (hazards.some(h => h.phase === 'on' && Math.abs(h.cx - x) + Math.abs(h.cy - y) <= h.radius)) continue;
+                    if (extraFoods.some(function (ef) { return ef.x === x && ef.y === y; })) continue;
+                    if (food2 && food2.x === x && food2.y === y) continue;
+                    if (powerUpPickup && powerUpPickup.x === x && powerUpPickup.y === y) continue;
+                }
                 return { x, y };
             }
             return null;
@@ -3304,13 +3345,27 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
 
+        // v13: the rival is offered by the draft pool, not by a literal mode list scattered
+        // across four call sites. `double_rival` used to be draftable in modes where no
+        // second rival can ever spawn (see pickDraftOptions) — an advertised mutator that
+        // did nothing, which is the v12 "nothing advertised is a lie" defect.
+        function rivalEnabledInMode(mode) {
+            return mode === 'classic' || mode === 'timeAttack' || mode === 'gauntlet';
+        }
+
+        // v13: spawnRival now performs the MATERIALISING step. It picks the tile and the
+        // body but leaves the rival inert (`active = false` with a non-empty body is the
+        // materialising state — a state built entirely from fields that already
+        // round-trip, so the snapshot needs no change). The respawn loop promotes it to
+        // active after RIVAL_WINDUP_MS, which is what gives the player warning.
         function spawnRival(idx) {
             if (idx === undefined) idx = 0;
             while (rivals.length <= idx) {
-                rivals.push({ snake: [], dx: TILE_SIZE, dy: 0, active: false, respawnTimer: 0, color: idx === 0 ? '#FF4444' : '#FF8844' });
+                rivals.push({ snake: [], dx: TILE_SIZE, dy: 0, active: false, respawnTimer: 0, moveCounter: 0, deferCount: 0, color: idx === 0 ? '#B71C1C' : '#AD1457' });
             }
-            if (rivals[idx].active) return;
-            if (gameMode === 'zen' || gameMode === 'snap' || gameMode === 'daily' || gameMode === 'walled' || gameMode === 'painter') return;
+            // Never re-pick over an active OR materialising rival.
+            if (rivals[idx].active || rivals[idx].snake.length > 0) return;
+            if (!rivalEnabledInMode(gameMode)) return;
             var r = rivals[idx];
             // Spawn at a free tile AWAY from the player. The old fixed center
             // (10*TILE_SIZE) is exactly the player's spawn tile: the rival appeared
@@ -3318,7 +3373,12 @@ const TRAIL_RENDER_CONFIG = {
             // could materialize on the player's next tile (unfair death), and
             // double_rival rivals stacked on the same tile.
             var ph = (snake && snake.length > 0) ? snake[0] : { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE };
-            var spawnPos = findFreeTile(ph.x, ph.y, true);
+            var spawnPos = findFreeTile(ph.x, ph.y, {
+                ignoreObstacleCap: true,
+                minTiles: RIVAL_MIN_SPAWN_TILES,
+                wrapAware: true,
+                avoidExtras: true
+            });
             if (!spawnPos) {
                 // No free tile right now — re-arm the respawn timer so it retries,
                 // instead of stacking onto an occupied tile (or never spawning
@@ -3326,11 +3386,60 @@ const TRAIL_RENDER_CONFIG = {
                 r.respawnTimer = Math.max(r.respawnTimer, 2000);
                 return;
             }
-            r.snake = [{ x: spawnPos.x, y: spawnPos.y }];
             r.dx = TILE_SIZE;
             r.dy = 0;
-            r.active = true;
-            r.respawnTimer = 0;
+            r.moveCounter = 0;
+            r.deferCount = 0;
+            // v13: the rival spawns WITH a body (arena spec, Feature 1), laid backwards
+            // along -dx and truncated at the first blocked tile. A fresh rival is a
+            // creature, not a single 20x20 dot, and the telegraph ghost renders the whole
+            // body so the shape is announced too.
+            r.snake = [{ x: spawnPos.x, y: spawnPos.y }];
+            for (var sl = 1; sl < RIVAL_SPAWN_LENGTH; sl++) {
+                var prevSeg = r.snake[sl - 1];
+                var seg = MODE_CONFIG[gameMode].wrap
+                    ? wrapPosition({ x: prevSeg.x - r.dx, y: prevSeg.y - r.dy })
+                    : { x: prevSeg.x - r.dx, y: prevSeg.y - r.dy };
+                if (seg.x < 0 || seg.x >= PLAY_WIDTH || seg.y < 0 || seg.y >= PLAY_HEIGHT) break;
+                if (snake.some(function (s) { return s.x === seg.x && s.y === seg.y; })) break;
+                if (obstacles.some(function (ob) { return ob.x === seg.x && ob.y === seg.y; })) break;
+                if (r.snake.some(function (s) { return s.x === seg.x && s.y === seg.y; })) break;
+                // v13: the body gets the SAME occupancy set as the head tile (findFreeTile's
+                // avoidExtras), or the rival could materialise with its tail over the hoard
+                // food, a portal twin or inside an on-phase rift — and the telegraph ghost
+                // would then be drawn on top of the very thing the player is running for.
+                if (extraFoods.some(function (ef) { return ef.x === seg.x && ef.y === seg.y; })) break;
+                if (food2 && food2.x === seg.x && food2.y === seg.y) break;
+                if (powerUpPickup && powerUpPickup.x === seg.x && powerUpPickup.y === seg.y) break;
+                if (hazards.some(function (h) { return h.phase === 'on' && Math.abs(h.cx - seg.x) + Math.abs(h.cy - seg.y) <= h.radius; })) break;
+                r.snake.push(seg);
+            }
+            r.active = false;
+            r.respawnTimer = RIVAL_WINDUP_MS;
+            announceRivalIncoming(r);
+        }
+
+        // v13: the rival's entry cue, fired when the wind-up STARTS (not at activation), so
+        // the player gets the full RIVAL_WINDUP_MS to react. Informational only — nothing
+        // here gates gameplay, and sound is never the sole channel (srSpeak + the dashed
+        // ring carry the same information).
+        function announceRivalIncoming(r) {
+            if (!r.snake.length) return;
+            if (snake && snake.length > 0) {
+                var adx = wrapAxisDelta(r.snake[0].x - snake[0].x, PLAY_WIDTH);
+                var ady = wrapAxisDelta(r.snake[0].y - snake[0].y, PLAY_HEIGHT);
+                var tiles = Math.round((Math.abs(adx) + Math.abs(ady)) / TILE_SIZE);
+                var dirWord = Math.abs(adx) > Math.abs(ady)
+                    ? (adx > 0 ? 'right' : 'left')
+                    : (ady > 0 ? 'below' : 'above');
+                srSpeak('Rival incoming, ' + dirWord + ', ' + tiles + ' tiles');
+            }
+            playSound('rival_warn');
+            if (!hasSeenRival) {
+                hasSeenRival = true;
+                saveManager.set('snake_has_seen_rival', '1');
+                queueToast('\u26A0 Rival incoming — avoid the dashed ring!', 3000, 'high');
+            }
         }
 
         function updateRival(idx) {
@@ -3338,6 +3447,17 @@ const TRAIL_RENDER_CONFIG = {
             if (idx >= rivals.length) return;
             var r = rivals[idx];
             if (!r.active) return;
+
+            // v13: the rival's stride is derived from its OWN length — a short rival competes
+            // for food at full parity with the player, a long one is the slow wall it should
+            // be. Tick-counted (never wall-clock), so slowMo / speed food / the Swift divider
+            // / Time Attack's fixed cadence all scale the rival with the player exactly as
+            // before. The skip sits BEFORE the AI re-roll so a skipped tick cannot make the
+            // rival turn in place.
+            var rStride = r.snake.length >= RIVAL_CADENCE_LONG ? 3
+                        : r.snake.length >= RIVAL_CADENCE_MID ? 2 : 1;
+            r.moveCounter = (r.moveCounter || 0) + 1;
+            if (r.moveCounter % rStride !== 0) return;
 
             if (food) {
                 var rand = seededRandom();
@@ -3362,7 +3482,39 @@ const TRAIL_RENDER_CONFIG = {
                     // the previous head tile, so a reversal is a GUARANTEED self-hit
                     // (the AI suicided whenever the food ended up behind it). The
                     // random-turn branch below already guards this.
-                    possible = possible.filter(function(d) { return !(d.dx === -r.dx && d.dy === -r.dy); });
+                    var reverseOfHead = function(d) { return d.dx === -r.dx && d.dy === -r.dy; };
+                    possible = possible.filter(function(d) { return !reverseOfHead(d); });
+                    // v13: stern deadlock. When the food sits directly astern, the axis
+                    // filter above leaves `possible` EMPTY, there was no `else`, and
+                    // r.dx/r.dy kept their old values — so the rival drove AWAY from the
+                    // food for up to a half-lap (traced: food at x=80, rival at x=100
+                    // facing +x moved to x=120). Fall back to the perpendicular axis; one
+                    // such step makes the food diagonal and the normal chase resumes, so
+                    // this cannot oscillate.
+                    if (possible.length === 0) {
+                        possible = [
+                            { dx: 0, dy: TILE_SIZE }, { dx: 0, dy: -TILE_SIZE },
+                            { dx: TILE_SIZE, dy: 0 }, { dx: -TILE_SIZE, dy: 0 }
+                        ].filter(function(d) { return !reverseOfHead(d); });
+                    }
+                    // v13: 1-ply self-rejection — the rule the arena spec promised and
+                    // never got. Without it the rival's every turn is a coin-flip on its own
+                    // body, which (with the old per-tick growth) made it suicide constantly.
+                    // Only indices 0..n-2 are tested: the tail (n-1) is vacated by the pop
+                    // that runs before the self test, exactly as it is for the player.
+                    var bodyHit = function(d) {
+                        var nx = head.x + d.dx, ny = head.y + d.dy;
+                        if (MODE_CONFIG[gameMode].wrap) {
+                            nx = ((nx % PLAY_WIDTH) + PLAY_WIDTH) % PLAY_WIDTH;
+                            ny = ((ny % PLAY_HEIGHT) + PLAY_HEIGHT) % PLAY_HEIGHT;
+                        }
+                        for (var bi = 0; bi < r.snake.length - 1; bi++) {
+                            if (r.snake[bi].x === nx && r.snake[bi].y === ny) return true;
+                        }
+                        return false;
+                    };
+                    var safe = possible.filter(function(d) { return !bodyHit(d); });
+                    if (safe.length > 0) possible = safe;
                     if (possible.length > 0) {
                         var chosen = possible[Math.floor(seededRandom() * possible.length)];
                         r.dx = chosen.dx;
@@ -3390,6 +3542,12 @@ const TRAIL_RENDER_CONFIG = {
                 newHead.y = ((newHead.y % PLAY_HEIGHT) + PLAY_HEIGHT) % PLAY_HEIGHT;
             }
 
+            // v13: mirror the player's movement contract — vacate the tail BEFORE the self
+            // test (the player pops at L7014 and tests at L7063), and grow only by eating.
+            // The old form unshifted and popped only PAST RIVAL_MAX_LENGTH, so the rival
+            // gained a segment per tick of empty movement and saturated at 20 in 19 ticks
+            // (~2.3s) without eating anything.
+            var rTail = r.snake.pop();
             var selfHit = false;
             for (var rs = 0; rs < r.snake.length; rs++) {
                 if (r.snake[rs].x === newHead.x && r.snake[rs].y === newHead.y) {
@@ -3397,7 +3555,7 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
             if (selfHit) {
-                removeRival(idx);
+                removeRival(idx, false); // a rival that tangles itself is NOT a player kill
                 return;
             }
 
@@ -3405,7 +3563,11 @@ const TRAIL_RENDER_CONFIG = {
             if (r.snake.length > RIVAL_MAX_LENGTH) r.snake.pop();
 
             if (food && newHead.x === food.x && newHead.y === food.y) {
-                r.snake.push({ x: newHead.x, y: newHead.y });
+                // v13: growth is the vacated tail returned to the body. The old
+                // `push({ x: newHead.x, y: newHead.y })` duplicated the head's own tile —
+                // +2 length per food, two identical cells, and one segment permanently over
+                // RIVAL_MAX_LENGTH at the cap (pop 19, unshift 20, push 21, pop 21).
+                r.snake.push(rTail);
                 if (r.snake.length > RIVAL_MAX_LENGTH) r.snake.pop();
                 // v9 D: if the rival ate a portal epic, its twin is now stale — remove it
                 // (mirrors the player-path cleanup) so it can't grant a phantom epic bonus.
@@ -3426,9 +3588,10 @@ const TRAIL_RENDER_CONFIG = {
                 // v12 A: Pressure Cooker resonance (rivalShrink) — a rival eating also
                 // shrinks the board. advanceShrinkZone() tests the PLAYER's head, so a
                 // rival's meal can kill the player; that is what the descriptor promises.
-                // Must honour its death return: the caller's tick-tail guard
-                // (`if (gameState !== 'playing') return;`) handles the propagation, and
-                // it is only reached between rivals, not inside this loop.
+                // Must honour its death return: the guard immediately after the hoisted
+                // rival block in updateGame() (`if (gameState !== 'playing') return;`)
+                // handles the propagation, and it is only reached between rivals, not
+                // inside this loop.
                 if (resonanceActive('rivalShrink')) {
                     if (advanceShrinkZone()) {
                         gameOver();
@@ -3437,30 +3600,83 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            if (snake.length > 0) {
-                var playerHead = snake[0];
-                if (playerHead.x === newHead.x && playerHead.y === newHead.y) {
-                    removeRival(idx);
-                    return;
-                }
-            }
+            // v13: the head-on branch that used to live here is DELETED. It compared the
+            // rival's new head against the player's PRE-move head and called removeRival()
+            // on a match — so a player who charged a rival destroyed it, took no damage and
+            // was credited with a kill (the "I sometimes run through it" report). Contact is
+            // now resolved entirely in the player's phase, against post-move positions:
+            //   rule 1 — player head on a rival segment  → player dies (checkPlayerDeath)
+            //   rule 2 — rival head on the player's body → rival dies   (resolveRivalRams)
+            // A head-on is a player death, per the arena spec's collision contract.
         }
 
-        function removeRival(idx) {
+        // v13: `defeatedByPlayer` is REQUIRED and decides the credit. Only player-caused
+        // removals count — a rival that tangles itself used to pay the player a defeat,
+        // which (with the free-growth bug) was the dominant source of RIVAL_SLAYER and the
+        // 25 / 100 rival milestones.
+        function removeRival(idx, defeatedByPlayer) {
             if (idx === undefined) idx = 0;
             if (idx >= rivals.length) return;
             var r = rivals[idx];
             var wasActive = r.active;
+            // The arena spec's "particle explosion" — must run while r.snake[0] exists.
             if (r.active && r.snake.length > 0) {
                 spawnParticles(r.snake[0].x, r.snake[0].y, 20, r.color);
+                if (wasActive && defeatedByPlayer) {
+                    spawnFloater(r.snake[0].x, r.snake[0].y - TILE_SIZE, '+50', '#FF8888', 14, 0.9);
+                }
             }
             r.snake = [];
             r.active = false;
-            r.respawnTimer = 10000;
-            // A removed rival is a DEFEAT: this is the only increment site for
-            // stats.rivalsDefeated — without it RIVAL_SLAYER, meta_rival_slayer and
-            // the 25/100 rival milestones were structurally unachievable.
-            if (wasActive) stats.rivalsDefeated++;
+            r.respawnTimer = RIVAL_RESPAWN_MS;
+            if (wasActive && defeatedByPlayer) {
+                stats.rivalsDefeated++;
+                addScore(50);             // spec: +50 bonus score
+                awardXP(100);             // spec: +100 XP
+                playSound('powerdown');   // reused — the defeat needs no new sound case
+                queueToast('\u2694\uFE0F Rival defeated!', 1500);
+            }
+            srSpeak('Rival destroyed');
+        }
+
+        // v13: wrap-aware Manhattan distance between two tiles, in tiles.
+        function rivalTileDistance(x1, y1, x2, y2) {
+            var dx = Math.abs(wrapAxisDelta(x2 - x1, PLAY_WIDTH));
+            var dy = Math.abs(wrapAxisDelta(y2 - y1, PLAY_HEIGHT));
+            return (dx + dy) / TILE_SIZE;
+        }
+
+        // v13: a materialising rival must not activate on top of the player — the telegraph
+        // exists to be reacted to, not to ambush. Re-measured at the activation instant.
+        function playerInsideRivalSpawnRadius(r) {
+            if (!r.snake.length || !snake || snake.length === 0) return false;
+            return rivalTileDistance(snake[0].x, snake[0].y, r.snake[0].x, r.snake[0].y) < RIVAL_MIN_SPAWN_TILES;
+        }
+
+        // v13: rule 2 of the collision contract — the rival's head touching the player's
+        // BODY kills the rival, credited and rewarded. Called once per tick, immediately
+        // after the player's move is committed, so `snake` is the player's real post-move
+        // occupancy (new head + post-pop body). Testing this from inside updateRival would
+        // use the PRE-move body, which still holds the tile the player is about to vacate
+        // — so a rival merely following the player was destroyed and credited.
+        // Rule 1 (checkPlayerDeath) runs first and returns on a hit, so reaching here
+        // proves the two heads are not on the same tile: a head-on is never double-resolved.
+        //
+        // v13: the scan starts at si = 1 — the player's HEAD tile is rule 1's business, never
+        // rule 2's. A save (shield especially) cancels rule 1 without relocating the head, so
+        // the head legitimately ends the tick on the rival's tile; scoring that as a body ram
+        // would hand the player a credited, rewarded kill for being saved.
+        function resolveRivalRams() {
+            for (var ri = 0; ri < rivals.length; ri++) {
+                if (!rivals[ri].active || rivals[ri].snake.length === 0) continue;
+                var rHead = rivals[ri].snake[0];
+                for (var si = 1; si < snake.length; si++) {
+                    if (snake[si].x === rHead.x && snake[si].y === rHead.y) {
+                        removeRival(ri, true);
+                        break;
+                    }
+                }
+            }
         }
 
         function resumeGame() {
@@ -4073,6 +4289,16 @@ const TRAIL_RENDER_CONFIG = {
                     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
                     osc.start(now);
                     osc.stop(now + 0.1);
+                    break;
+                case 'rival_warn':
+                    // v13: low two-tone descending 233→196, 0.25s — the "something is
+                    // arriving" cue. Pitches chosen to collide with none of the existing
+                    // 220/330/440/523/660/784/880/1047/1100 cases.
+                    osc.frequency.setValueAtTime(233, now);
+                    osc.frequency.setValueAtTime(196, now + 0.12);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+                    osc.start(now);
+                    osc.stop(now + 0.25);
                     break;
                 case 'rare_spawn':
                     // Two quick ascending notes, 0.2s total
@@ -5844,14 +6070,56 @@ const TRAIL_RENDER_CONFIG = {
             if (etherealSaved) ctx.restore();
         }
 
+        // v13: the rival now has THREE visual states, and the materialising one is the
+        // warning the player never had. The cue vocabulary (dashed ring + countdown arc) is
+        // the one v12 B introduced for hazard pre-ignition, so a single learned legend
+        // covers both. Everything here is information and always renders — calm mode gates
+        // only the brightness ramp, never the ring or the arc.
         function drawRival(t) {
             for (var ri = 0; ri < rivals.length; ri++) {
                 var r = rivals[ri];
-                if (!r.active || r.snake.length === 0) continue;
+                if (r.snake.length === 0) continue;
                 ctx.save();
+                if (!r.active) {
+                    // ---- materialising: inert, drawn as a ghost with a countdown ----
+                    var windFrac = 1 - Math.max(0, Math.min(1, (r.respawnTimer || 0) / RIVAL_WINDUP_MS));
+                    var calm = calmModeEffective();
+                    ctx.globalAlpha = calm ? 0.5 : 0.15 + 0.35 * (1 - windFrac);
+                    for (var rw = 0; rw < r.snake.length; rw++) {
+                        ctx.fillStyle = rw === 0 ? '#FF5555' : r.color;
+                        ctx.fillRect(r.snake[rw].x + 1, r.snake[rw].y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+                    }
+                    ctx.globalAlpha = 1;
+                    var hx = r.snake[0].x + TILE_SIZE / 2, hy = r.snake[0].y + TILE_SIZE / 2;
+                    ctx.setLineDash([5, 5]);
+                    ctx.strokeStyle = 'rgba(255,90,90,' + (calm ? 0.7 : 0.35 + 0.45 * (1 - windFrac)) + ')';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath(); ctx.arc(hx, hy, TILE_SIZE * 0.75, 0, Math.PI * 2); ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.strokeStyle = 'rgba(255,120,120,0.75)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(hx, hy, TILE_SIZE * 0.75, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * windFrac);
+                    ctx.stroke();
+                    ctx.restore();
+                    continue;
+                }
                 for (var rj = 0; rj < r.snake.length; rj++) {
-                    ctx.fillStyle = rj === 0 ? '#FF6666' : r.color;
+                    ctx.fillStyle = rj === 0 ? '#FF5555' : r.color;
                     ctx.fillRect(r.snake[rj].x + 1, r.snake[rj].y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+                }
+                // Proximity cue: same dashed-ring vocabulary, so "dashed red ring" means
+                // "lethal thing here" in both systems. Wrap-aware, since a rival can be one
+                // step away across the seam and read as a whole board away.
+                if (snake && snake.length > 0 &&
+                    rivalTileDistance(snake[0].x, snake[0].y, r.snake[0].x, r.snake[0].y) <= RIVAL_TELEGRAPH_TILES) {
+                    ctx.setLineDash([5, 5]);
+                    ctx.strokeStyle = 'rgba(255,60,60,0.85)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(r.snake[0].x + TILE_SIZE / 2, r.snake[0].y + TILE_SIZE / 2, TILE_SIZE * 1.1, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);   // dash state is global — never leave it set
                 }
                 ctx.restore();
             }
@@ -6113,19 +6381,31 @@ const TRAIL_RENDER_CONFIG = {
             ctx.restore();
         }
 
+        // v13: three states instead of one, and it renders while the rival is ABSENT —
+        // "Rival: 20" from ~2s after spawn was information-free, and a dead rival showed
+        // nothing at all, so the respawn was a surprise. Deliberately NO "frozen" state:
+        // the collision test is not gated by hoard/rivalFreezeMs, so labelling a frozen
+        // rival as stopped would be a cue that says "safe" on a lethal object.
         function drawRivalHUD() {
             if (rivals.length === 0) return;
-            var rivalLen = 0;
+            var liveLen = 0, windupLeft = -1, deadLeft = -1;
             for (var ri = 0; ri < rivals.length; ri++) {
-                if (rivals[ri].active) rivalLen = Math.max(rivalLen, rivals[ri].snake.length);
+                var r = rivals[ri];
+                if (r.active) liveLen = Math.max(liveLen, r.snake.length);
+                else if (r.snake.length > 0) windupLeft = Math.max(windupLeft, r.respawnTimer || 0);
+                else if (r.respawnTimer > 0 && (deadLeft < 0 || r.respawnTimer < deadLeft)) deadLeft = r.respawnTimer;
             }
-            if (rivalLen === 0) return;
+            var text, color;
+            if (liveLen > 0) { text = 'Rival: ' + liveLen; color = '#FF8888'; }
+            else if (windupLeft >= 0) { text = '\u26A0 Rival in ' + Math.max(0, windupLeft / 1000).toFixed(1) + 's'; color = '#FFB0B0'; }
+            else if (deadLeft >= 0) { text = 'Rival \u29D7 ' + (deadLeft / 1000).toFixed(1) + 's'; color = '#FF8888'; }
+            else return;
             ctx.save();
-            ctx.fillStyle = '#FF8888';
+            ctx.fillStyle = color;
             ctx.font = hudFont(10);
             ctx.textAlign = 'left';
             ctx.textBaseline = 'top';
-            ctx.fillText('Rival: ' + rivalLen, 5, 40);
+            ctx.fillText(text, 5, 40);
             ctx.restore();
         }
 
@@ -6334,6 +6614,9 @@ const TRAIL_RENDER_CONFIG = {
              var wave = GAUNTLET_WAVES[gauntletWave];
              if (wave.rival && gameMode === 'gauntlet') {
                  spawnRival(0);
+                 // v13: double_rival is offered in the gauntlet draft pool, so it has to
+                 // actually do something there — otherwise the descriptor lies.
+                 if (activeMutators.indexOf('double_rival') !== -1) spawnRival(1);
              }
              tickInterval = wave.speedBase;
              restartGameTimeout();
@@ -6469,7 +6752,14 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function pickDraftOptions(count) {
-            var pool = unlockedMutators.slice();
+            // v13: drop mutators that cannot run in the current mode. `double_rival` was
+            // draftable in Zen/Walled/Painter/Snap/Daily (where spawnRival is inert) and in
+            // the Gauntlet — the name appeared in the HUD and nothing happened, which is
+            // exactly the "nothing advertised is a lie" defect v12 was about.
+            var pool = unlockedMutators.filter(function (k) {
+                if (k !== 'double_rival') return true;
+                return rivalEnabledInMode(gameMode);
+            });
             if (pool.length <= count) return pool;
             var options = [];
             var safety = 0;
@@ -6814,6 +7104,86 @@ const TRAIL_RENDER_CONFIG = {
             // the real cadence; gates rival updates AND respawns.
             if (rivalFreezeMs > 0) rivalFreezeMs -= tickInterval;
 
+            // v13: THE RIVAL MOVES FIRST. This block used to sit at the tick tail (~600
+            // lines below the player's collision test), which is the root of the inverted
+            // collision: checkPlayerDeath compared the player's NEW head against the
+            // rival's PRE-move body, and the rival's own head-on branch then ran against a
+            // player who had already moved. Hoisting it makes both comparisons use
+            // post-move positions, so a charge is resolved as a charge.
+            //
+            // The guard below MUST stay immediately after the block: a rival eat can end
+            // the run through the Pressure Cooker resonance (advanceShrinkZone → gameOver).
+            //
+            // v13 accepted consequences of running here rather than at the tick tail:
+            //  · The rival's food competition now precedes the player's by one tick. Intended.
+            //  · `checkAchievements`/`checkQuestProgress` see the same tick's rival-defeat
+            //    increment. A one-tick-earlier RIVAL_SLAYER/quest unlock. Accepted.
+            //  · The Pressure Cooker's shrink kill (advanceShrinkZone, called from the rival's
+            //    eat block) now evaluates the PRE-move head. That MATCHES the two existing
+            //    callers — the shrink_zone timer and the rapidDoom hunger pop both run in the
+            //    tick prologue, ahead of the player's move — so the rival path is now
+            //    consistent with them rather than the odd one out.
+            //  · A freeze STARTED later in this tick (the Pigment Rush climax writes
+            //    rivalFreezeMs) has not yet been observed, so the rival takes one further
+            //    move on that single tick. Bounded, rare, and not unfair.
+            //  · `!gauntletIntermission` keeps the rival frozen behind the wave-pick screen,
+            //    exactly as the tick-tail ordering did (the intermission `return` sits below).
+            //
+            // Rival respawn timers — EACH rival respawns on its own timer, and a respawn is
+            // now two-stage: dead (empty body) → materialising (body present, inactive) →
+            // active. The materialising stage is the telegraph. respawnTimer is wall-clock
+            // ms — subtract the real cadence so a speed boost doesn't respawn rivals early.
+            // Frozen during the Golden Hoard and the Pigment Rush climax (rivalFreezeMs),
+            // which pauses the wind-up too while still drawing it.
+            for (var rri = 0; rri < rivals.length; rri++) {
+                var rr = rivals[rri];
+                if (rr.active || !(rr.respawnTimer > 0) || hoardActive || rivalFreezeMs > 0 || gauntletIntermission) continue;
+                rr.respawnTimer -= tickInterval;
+                if (rr.respawnTimer <= 0) {
+                    if (rr.snake.length === 0) {
+                        // Dead → materialising. spawnRival re-arms at RIVAL_WINDUP_MS, so
+                        // dead→active still totals RIVAL_RESPAWN_MS.
+                        spawnRival(rri);
+                    } else {
+                        // Materialising → active, deferred while the player is inside the
+                        // spawn radius. A telegraph that activates inside the player is not
+                        // a warning, it is an ambush.
+                        if (playerInsideRivalSpawnRadius(rr)) {
+                            rr.deferCount = (rr.deferCount || 0) + 1;
+                            if (rr.deferCount < RIVAL_MAX_DEFERRALS) {
+                                rr.respawnTimer += tickInterval;
+                                continue;
+                            }
+                            // v13: the player has camped the telegraph for
+                            // RIVAL_MAX_DEFERRALS ticks. Materialising inside them would be
+                            // an ambush and deferring forever would disarm the rival — so
+                            // RELOCATE the telegraph and re-arm instead. The warning restarts.
+                            rr.snake = [];
+                            rr.respawnTimer = RIVAL_WINDUP_MS;
+                            rr.deferCount = 0;
+                            spawnRival(rri);
+                            continue;
+                        }
+                        rr.deferCount = 0;
+                        rr.active = true;
+                        rr.respawnTimer = 0;
+                        spawnParticles(rr.snake[0].x, rr.snake[0].y, 12, rr.color);
+                    }
+                } else if (rr.snake.length === 0 && rr.respawnTimer <= RIVAL_WINDUP_MS) {
+                    spawnRival(rri); // start the wind-up; dead→active stays RIVAL_RESPAWN_MS
+                }
+            }
+
+            // Update rival
+            if (anyRivalActive() && !hoardActive && rivalFreezeMs <= 0 && !gauntletIntermission) {
+                for (var rii = 0; rii < rivals.length; rii++) {
+                    if (rivals[rii].active) updateRival(rii);
+                }
+            }
+            // A rival-eat can kill the player via the Pressure Cooker resonance —
+            // stop the tick cleanly instead of running the player's move and the rest.
+            if (gameState !== 'playing') return;
+
 
             // v6: extracted functions (declared here for closure over updateGame's locals)
             function handleComboMilestone() {
@@ -6970,7 +7340,6 @@ const TRAIL_RENDER_CONFIG = {
 
             prevSnake = snake.map(s => ({ x: s.x, y: s.y }));
             snakeGrew = false;
-            prevRivalSnake = rivalCombinedSnake().map(s => ({ x: s.x, y: s.y }));
 
             gameTick++;
 
@@ -7171,10 +7540,23 @@ const TRAIL_RENDER_CONFIG = {
                                 // DEFEATED and respawns later. The old direct active=false
                                 // left respawnTimer at 0 (never respawns) and didn't count
                                 // the defeat.
-                                if (rivals[rci].snake.length <= 1) removeRival(rci);
+                                // v7: evolution trigger — Leech steal is a 3rd growth site.
+                                // Must run BEFORE the removal decision below: the drain has
+                                // already grown the snake, and a `continue` past this point
+                                // would silently skip the evolution check.
                                 spawnParticles(wrappedHead.x, wrappedHead.y, 10, '#44FF88');
-                                // v7: evolution trigger — Leech steal is a 3rd growth site
                                 triggerEvolutionIfReady();
+                                // v13: the drain RESOLVES the contact. Drained to <=1 the
+                                // rival is gone; drained to >=2 it survives — but if the
+                                // player's head is on its head tile the segment test below
+                                // would still kill them, so the advertised head-to-head
+                                // counter backfired above length 4. Remove the rival in
+                                // that case too, and skip the segment test for it.
+                                if (rivals[rci].snake.length <= 1 ||
+                                    (wrappedHead.x === rHead.x && wrappedHead.y === rHead.y)) {
+                                    removeRival(rci, true);
+                                    continue;
+                                }
                             }
                         }
                         for (var rcj = 0; rcj < rivals[rci].snake.length; rcj++) {
@@ -7232,6 +7614,9 @@ const TRAIL_RENDER_CONFIG = {
             } else {
                 snake.unshift(wrappedHead);
             }
+            // v13: the player's move is committed — `snake` is now its real post-move
+            // occupancy, so rival-vs-body contacts can be resolved exactly (rule 2).
+            resolveRivalRams();
             // Painter mode: paint the head position too
             if (gameMode === 'painter' && paintGrid) {
                 var hcol = Math.floor(wrappedHead.x / TILE_SIZE);
@@ -7778,30 +8163,10 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            // Rival respawn timers — EACH dead rival respawns on its own timer.
-            // The old single-slot form only ever respawned rivals[0] and froze all
-            // timers while any rival was alive: with double_rival, rival 1 stayed
-            // dead forever. respawnTimer is wall-clock ms — subtract the real
-            // cadence so a speed boost doesn't respawn rivals early. Frozen during
-            // the Golden Hoard and the Pigment Rush climax (rivalFreezeMs).
-            for (var rri = 0; rri < rivals.length; rri++) {
-                if (!rivals[rri].active && rivals[rri].respawnTimer > 0 && !hoardActive && rivalFreezeMs <= 0) {
-                    rivals[rri].respawnTimer -= tickInterval;
-                    if (rivals[rri].respawnTimer <= 0) {
-                        spawnRival(rri);
-                    }
-                }
-            }
-
-            // Update rival
-            if (anyRivalActive() && !hoardActive && rivalFreezeMs <= 0) {
-                for (var rii = 0; rii < rivals.length; rii++) {
-                    if (rivals[rii].active) updateRival(rii);
-                }
-            }
-            // A rival-eat can kill the player via the Pressure Cooker resonance —
-            // stop the tick tail cleanly instead of running post-death effects.
-            if (gameState !== 'playing') return;
+            // v13: the rival respawn + update block moved to the TOP of the tick (see the
+            // hoisted block after the rivalFreezeMs decay). It must run before the player
+            // moves so the player's collision test sees the rival's post-move body.
+            // The `if (gameState !== 'playing') return;` guard that stood here moved with it.
 
             // Sparkle trail spawn
             if (cosmetics.trace === 'trace_sparkle' && gameTick % 5 === 0 && snake.length > 1) {
@@ -8447,7 +8812,7 @@ const TRAIL_RENDER_CONFIG = {
                         if (activeMutators.length >= 3) {
                             draftScreenVisible = false;
                             draftModeEnabled = false;
-                            if (activeMutators.indexOf('double_rival') !== -1 && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+                            if (activeMutators.indexOf('double_rival') !== -1 && rivalEnabledInMode(gameMode)) {
                                 spawnRival(1);
                             }
                             startGame();
@@ -8464,7 +8829,7 @@ const TRAIL_RENDER_CONFIG = {
                     draftScreenVisible = false;
                     draftModeEnabled = false;
                     var mutDef = MUTATOR_DEFS[activeMutators[0]];
-                    if (activeMutators.indexOf('double_rival') !== -1 && (gameMode === 'classic' || gameMode === 'timeAttack')) {
+                    if (activeMutators.indexOf('double_rival') !== -1 && rivalEnabledInMode(gameMode)) {
                         spawnRival(1);
                     }
                     startGame();

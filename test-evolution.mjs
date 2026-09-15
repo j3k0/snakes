@@ -179,12 +179,17 @@ test('Leech steal growth triggers evolution (3rd growth site)', async (page) => 
     // 8-seg snake; moving right into a rival head -> Leech steals 3 -> length
     // crosses Swift@10 at the steal site (before this fix it only recovered on
     // the next food eat).
+    // v13: the rival MOVES BEFORE the player now (the collision test must see its
+    // post-move body), so this fixture must give it an explicit direction — it used to
+    // rely on `dx`/`dy` being undefined, which produced a NaN head once the rival was
+    // stepped first. dx = -20 faces it at the player, so every AI branch (chase, straight,
+    // random) lands within the leech adjacency window.
     snake = [];
     for (let i = 0; i < 8; i++) snake.push({ x: 200 - i * 20, y: 200 });
     dx = 20; dy = 0; nextDirection = null;
     evolutionTier = -1;
     activeBrews = ['leech'];
-    rivals = [{ active: true, color: '#FF6666', snake: [
+    rivals = [{ active: true, color: '#FF6666', dx: -20, dy: 0, respawnTimer: 0, snake: [
       { x: 240, y: 200 }, { x: 260, y: 200 }, { x: 280, y: 200 }, { x: 300, y: 200 },
     ] }];
     obstacles = [];
