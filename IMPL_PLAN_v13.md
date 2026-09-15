@@ -658,3 +658,21 @@ removal clause, and base's `length <= 1` clause is unconditional. That removed a
 | **Advisory** two contradictory bullets in AGENTS.md asserted both the gated and the ungated rule. | **Folded into one** bullet that states both clauses, which one carries the gate, why, and that gating clause 1 is a regression. |
 | **Nit** the differential figure is non-deterministic (56/27, 56/27, 57/26, 55/28 measured in review). | **Fixed at the source, not by wording.** The variance was D5b and D7 — single-sample and 400-sample spawn fixtures on live randomness, which can pass by luck on a build where the predicate does not exist. All three spawn-loop fixtures (D5/D6/D7) now pin `seedPrng` with `mulberry32`. The differential is **56 fail / 30 pass with an identical pass/fail set across 8 runs**, and the current build is identical across 6 runs. |
 | **Nit** the descriptor's "steps onto your tile" covers clause 2 only. | **Fixed** — "destroys a drained rival or one stepping onto you" covers both clauses. (The brew panel is plain DOM and wraps; only canvas text has the fixed-width constraint.) |
+
+---
+
+## Reviewer round 7 (`951b88e`)
+
+Production was confirmed unfalsifiable: a 47-row sweep (every rival length 1-20 x every stride phase,
+plus freeze/hoard/swap/convergence/shielded-swap/rule-2) differs from base on **only the 2 intended
+contract changes**, the differential is deterministic at 30/56 across 8 runs, and B18 falsifies correctly
+against the over-suppressed build. The findings were all in the tests and one descriptor.
+
+| Finding | Disposition |
+|---|---|
+| **ADVISORY** D5 was vacuous: `extraFoods = []` sat under a comment promising a flooded board, so `extraFoods.some(...)` was `false` by construction on every build. | **Fixed.** Rewritten as a multi-sample loop (300 spawns) over a board scattered with 20 extra foods and 6 on-phase rifts. Mutation-verified: deleting the `extraFoods` and hazard rejections from BOTH spawn loops now yields `onExtra 48, inHazard 87` and fails; with the predicates present, 0. |
+| **ADVISORY** D5b did not discriminate: its pinned single sample placed the rival 180 tiles from the rift, so the hazard predicate could not matter. | **Fixed by the same rewrite** — the rift check now runs over 300 spawns with 6 rifts. The predicate itself was already sound (review measured 0/2000 leaks on the current build vs 121/2000 with it deleted), so this was purely an assertion-quality fix. |
+| **NIT** the descriptor over-claimed: only a drain to <= 1 segment destroys the rival, and measured over a diagonal-adjacency drain **8 of 12 (67%) leave it alive**. | **Fixed** — "destroys a rival drained to nothing, or one stepping onto you". Both halves are now stated, and AGENTS.md records the measured split so the next editor does not re-shorten it. |
+| **Lesson** — the reviewer's observation that all three rounds' blind spots were single-axis sweeps. | **Recorded in AGENTS.md's Verification Notes:** a single-sample fixture is not an assertion; the test is mutation (delete the predicate, confirm the assertion fails). Multi-sample loops with a pinned `seedPrng` are the shape that discriminates. |
+
+| **Also found by auditing the same pattern** C4b passed for the wrong reason: its fixture placed the materialising rival's head on the player's HEAD tile (si=0), which rule 1 owns and `si = 1` skips anyway — so removing the `!active` guard in `resolveRivalRams` left it green. The credit was separately suppressed by `removeRival`'s `wasActive` check, so `delta === 0` could not observe it either. | **Fixed.** C4/C4b now place the rival BOTH on the destination tile and on the player's NECK (si >= 1) and assert the telegraph's body survives intact, which is the observable that proves inertness. Verified: with the `!active` guard deleted, `onBody.len` collapses to 0 and C4b fails. |

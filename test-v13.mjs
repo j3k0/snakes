@@ -872,24 +872,44 @@ try {
           r.active && r.elapsed >= 10000 && r.elapsed < 10000 + 1600, JSON.stringify(r));
 } catch (e) { fail_('C1b: respawn timing', e.message); }
 
-// C4: the materialising rival is inert on BOTH sides — the player can share its tile
-// and its head cannot kill the player's body.
+// C4: the materialising rival is inert on BOTH sides — the player can share its tile, and
+// neither its body kills the player nor its head credits a ram. TWO placements, because they
+// are different tests: the head tile (si=0, which rule 1 owns and `si = 1` skips anyway) and
+// a BODY segment (si >= 1, which only the `!active` guard in resolveRivalRams prevents from
+// crediting). A single head-tile fixture passes even with that guard deleted.
 try {
     const r = await page.evaluate(`(() => {
         ${PRE}
-        cleanRun();
-        playerAt(100, 100, 4);
-        // Materialising rival sitting exactly on the player's next head tile.
-        rivals = [{ snake: [{x:120,y:100},{x:140,y:100},{x:160,y:100}], dx: 0, dy: 0,
-                    active: false, respawnTimer: 999, moveCounter: 0, color: '#B71C1C' }];
-        roadStraight();
-        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
-        const before = stats.rivalsDefeated;
-        updateGame();
-        return { state: gameState, delta: stats.rivalsDefeated - before, active: rivals[0].active };
+        const place = (rivalHead, rivalBody) => {
+            cleanRun();
+            playerAt(200, 200, 4);
+            const segs = [{ x: rivalHead[0], y: rivalHead[1] }];
+            for (const b of rivalBody) segs.push({ x: b[0], y: b[1] });
+            rivals = [{ snake: segs, dx: 0, dy: 0, active: false, respawnTimer: 999,
+                        moveCounter: 0, color: '#B71C1C' }];
+            roadStraight();
+            food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+            const before = stats.rivalsDefeated;
+            updateGame();
+            // active alone is not enough: removeRival only CREDITS when wasActive, so a
+            // materialising telegraph could be destroyed silently and still show delta 0.
+            // The telegraph surviving intact is the observable that proves inertness.
+            return { state: gameState, delta: stats.rivalsDefeated - before,
+                     active: rivals[0].active, len: rivals[0].snake.length };
+        };
+        return {
+            // Rival head exactly on the player's DESTINATION (its new head tile).
+            onHead: place([220, 200], [[240, 200], [260, 200]]),
+            // Rival head on the player's NECK — the player's new body[1].
+            onBody: place([200, 200], [[180, 200], [160, 200]])
+        };
     })()`);
-    check('C4: a materialising rival cannot kill the player', r.state === 'playing', JSON.stringify(r));
-    check('C4b: a materialising rival cannot be killed', r.active === false && r.delta === 0, JSON.stringify(r));
+    check('C4: a materialising rival cannot kill the player',
+          r.onHead.state === 'playing' && r.onBody.state === 'playing', JSON.stringify(r));
+    check('C4b: a materialising rival is neither killed nor credited, on its head tile OR on a body segment',
+          r.onHead.active === false && r.onHead.delta === 0 && r.onHead.len === 3 &&
+          r.onBody.active === false && r.onBody.delta === 0 && r.onBody.len === 3,
+          JSON.stringify(r));
 } catch (e) { fail_('C4: materialising inertness', e.message); }
 
 // C5: a mid-wind-up snapshot round-trips (the state is built from already-serialized fields).
@@ -995,33 +1015,49 @@ try {
 } catch (e) { fail_('D2: legacy default', e.message); }
 
 // D5: the rival never materialises on an extra food (hoard/portal) or inside a live hazard.
+// MULTI-SAMPLE, like D6. A single-spawn fixture here was vacuous and non-discriminating:
+// it asserted `extraFoods.some(...)` over an EMPTY array (the flooding the comment promised
+// was never written), and its pinned sample sat 180 tiles from the rift. Both assertions
+// still passed with the extraFoods and hazard rejections deleted from BOTH spawn loops.
 try {
     const r = await page.evaluate(`(() => {
         ${PRE}
         cleanRun();
-        // Pin the PRNG: this fixture samples ONE spawn, so with live randomness the tile
-        // varies run to run and the assertion can pass by luck (visible when the suite is
-        // run against a build where the predicate does not exist yet).
-        seedPrng = mulberry32(20240915);
-        snake = [{ x: 40, y: 40 }];
-        obstacles = []; rivals = []; food = null; food2 = null;
-        // Flood the board with extra foods except a corner, then check no spawn lands on one.
+        seedPrng = mulberry32(20240915);   // pinned: a fixed 300-spawn sample
+        snake = [{ x: 40, y: 40 }, { x: 20, y: 40 }];
+        // Scatter extra foods and on-phase rifts over ~15% of the board, leaving plenty
+        // spawnable. The sample is large enough that a missing rejection shows up.
         extraFoods = [];
-        // One live hazard covering the whole board is unusable (nothing could spawn), so
-        // place a small on-phase rift and assert the spawn avoids that tile specifically.
-        hazards = [{ cx: 200, cy: 200, radius: 40, phase: 'on', phaseTimer: 10, lifeTimer: 100, maxLife: 100 }];
-        spawnRival(0);
-        const onExtra = rivals.length && rivals[0].snake.length
-          ? rivals[0].snake.some(s => extraFoods.some(e => e.x === s.x && e.y === s.y))
-          : false;
-        const inHazard = rivals.length && rivals[0].snake.length
-          ? rivals[0].snake.some(s => Math.abs(s.x - 200) + Math.abs(s.y - 200) <= 40)
-          : false;
+        hazards = [];
+        for (let x = 0; x < 400; x += 20) {
+            for (let y = 0; y < 400; y += 20) {
+                if (((x / 20) * 7 + (y / 20) * 3) % 20 === 0) extraFoods.push({ x, y, type: 'bonus', spawnTime: 0 });
+            }
+        }
+        for (let i = 0; i < 6; i++) {
+            hazards.push({ cx: 40 + i * 60, cy: 200, radius: 40, phase: 'on',
+                           phaseTimer: 10, lifeTimer: 100, maxLife: 100 });
+        }
+        let placed = 0, onExtra = 0, inHazard = 0;
+        for (let i = 0; i < 300; i++) {
+            rivals = []; obstacles = []; food = null; food2 = null;
+            spawnRival(0);
+            if (!rivals.length || !rivals[0].snake.length) continue;
+            placed++;
+            for (const s of rivals[0].snake) {
+                if (extraFoods.some(e => e.x === s.x && e.y === s.y)) { onExtra++; break; }
+            }
+            for (const s of rivals[0].snake) {
+                if (hazards.some(h => Math.abs(h.cx - s.x) + Math.abs(h.cy - s.y) <= h.radius)) { inHazard++; break; }
+            }
+        }
         seedPrng = null;
-        return { spawned: !!(rivals.length && rivals[0].snake.length), onExtra, inHazard };
+        return { placed, onExtra, inHazard, extraCount: extraFoods.length, hazardCount: hazards.length };
     })()`);
-    check('D5: a rival never materialises on an extra food', r.onExtra === false, JSON.stringify(r));
-    check('D5b: a rival never materialises inside a live hazard', r.inHazard === false, JSON.stringify(r));
+    check('D5: a rival never materialises on an extra food',
+          r.placed > 50 && r.onExtra === 0, JSON.stringify(r));
+    check('D5b: a rival never materialises inside a live hazard',
+          r.placed > 50 && r.inHazard === 0, JSON.stringify(r));
 } catch (e) { fail_('D5: extras avoidance', e.message); }
 
 // D6: the telegraph's BODY gets the same occupancy set as its head tile — including the
