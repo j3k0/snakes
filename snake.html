@@ -207,6 +207,13 @@
         // v11 A: Hazard Chain Bonus — stacking multiplier for eating adjacent to on-phase hazards
         let hazardChainStreak = 0;
         let hazardAdjacentThisTick = false;
+        // v13: index of the rival whose segments the player's HEAD contacted this tick, or -1.
+        // Rule 1 (checkPlayerDeath) owns that contact: if a save absorbed it, rule 2 must not
+        // re-adjudicate the same collision in the player's favour. In a head-on swap the
+        // rival's new head lands on the tile the player just left — which after the unshift
+        // is snake[1], the neck — so the si=1 skip alone does not cover it, and a shielded
+        // charge paid a credited kill the base build never gave.
+        let rivalHeadContactIdx = -1;
         let dx = 0;
         let dy = 0;
         let score = 0;
@@ -742,6 +749,7 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
         let hasSeenRival = saveManager.get('snake_has_seen_rival', '') === '1'; // v13: rival onboarding toast
+        let hasSeenRivalHeadOn = saveManager.get('snake_has_seen_rival_head_on', '') === '1'; // v13: rule teaching
         // v12 A: one-shot onboarding the first time any resonance becomes active.
         let hasSeenResonance = saveManager.get('snake_has_seen_resonance', '') === '1';
         let lastDeathCause = '';
@@ -1105,7 +1113,7 @@ var BREWS_CONFIG = [
     { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
     { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
     { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
-    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival: steal 3 segments; destroys a drained rival', cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival: steal 3 segments; destroys a rival left on you', cost: 3 },
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
@@ -3415,7 +3423,12 @@ const TRAIL_RENDER_CONFIG = {
                 // avoidExtras), or the rival could materialise with its tail over the hoard
                 // food, a portal twin or inside an on-phase rift — and the telegraph ghost
                 // would then be drawn on top of the very thing the player is running for.
+                if (food && food.x === seg.x && food.y === seg.y) break;
                 if (extraFoods.some(function (ef) { return ef.x === seg.x && ef.y === seg.y; })) break;
+                // v13: sibling rivals previously unchecked — under double_rival the head tile
+                // respected rivalCombinedSnake() but the body could be laid over the other
+                // rival's telegraph.
+                if (rivalCombinedSnake().some(function (rs) { return rs.x === seg.x && rs.y === seg.y; })) break;
                 if (food2 && food2.x === seg.x && food2.y === seg.y) break;
                 if (powerUpPickup && powerUpPickup.x === seg.x && powerUpPickup.y === seg.y) break;
                 if (hazards.some(function (h) { return h.phase === 'on' && Math.abs(h.cx - seg.x) + Math.abs(h.cy - seg.y) <= h.radius; })) break;
@@ -3684,6 +3697,9 @@ const TRAIL_RENDER_CONFIG = {
         function resolveRivalRams() {
             for (var ri = 0; ri < rivals.length; ri++) {
                 if (!rivals[ri].active || rivals[ri].snake.length === 0) continue;
+                // v13: rule 1 already adjudicated this rival's contact this tick (and a save
+                // may have absorbed it) — never resolve it again in the player's favour.
+                if (ri === rivalHeadContactIdx) continue;
                 var rHead = rivals[ri].snake[0];
                 for (var si = 1; si < snake.length; si++) {
                     if (snake[si].x === rHead.x && snake[si].y === rHead.y) {
@@ -6410,9 +6426,13 @@ const TRAIL_RENDER_CONFIG = {
                 else if (r.snake.length > 0) windupLeft = Math.max(windupLeft, r.respawnTimer || 0);
                 else if (r.respawnTimer > 0 && (deadLeft < 0 || r.respawnTimer < deadLeft)) deadLeft = r.respawnTimer;
             }
+            // v13: the telegraph OUTRANKS the live length. There is one line, and under
+            // double_rival a live rival's ambient "Rival: N" used to mask a materialising
+            // rival's countdown for its entire window — hiding the feature's core cue. The
+            // live rival is visible on the board; its length can wait 1.6s.
             var text, color;
-            if (liveLen > 0) { text = 'Rival: ' + liveLen; color = '#FF8888'; }
-            else if (windupLeft >= 0) { text = '\u26A0 Rival in ' + Math.max(0, windupLeft / 1000).toFixed(1) + 's'; color = '#FFB0B0'; }
+            if (windupLeft >= 0) { text = '\u26A0 Rival in ' + Math.max(0, windupLeft / 1000).toFixed(1) + 's'; color = '#FFB0B0'; }
+            else if (liveLen > 0) { text = 'Rival: ' + liveLen; color = '#FF8888'; }
             else if (deadLeft >= 0) { text = 'Rival \u29D7 ' + (deadLeft / 1000).toFixed(1) + 's'; color = '#FF8888'; }
             else return;
             ctx.save();
@@ -7099,6 +7119,7 @@ const TRAIL_RENDER_CONFIG = {
         function updateGame() {
             if (gameState !== 'playing') return;
             hazardAdjacentThisTick = false; // v11 A: reset each tick, set true in tickHazards
+            rivalHeadContactIdx = -1;       // v13: reset each tick, set by checkPlayerDeath
             // v8 F: Bounty Rush — tick/resolve contracts (game-logic only).
             tickBounty();
             // v10 C: Hazard Zones — tick/expand/contract pulsing danger tiles
@@ -7167,6 +7188,10 @@ const TRAIL_RENDER_CONFIG = {
                         // spawn radius. A telegraph that activates inside the player is not
                         // a warning, it is an ambush.
                         if (playerInsideRivalSpawnRadius(rr)) {
+                            // v13: deferCount is deliberately NOT snapshotted. It is undefined-safe
+                            // ((x || 0) + 1), and a mid-deferral save/restore hands the player a fresh
+                            // budget at worst — the relocation cap still fires, and the rival can never
+                            // activate on top of the player either way.
                             rr.deferCount = (rr.deferCount || 0) + 1;
                             if (rr.deferCount < RIVAL_MAX_DEFERRALS) {
                                 rr.respawnTimer += tickInterval;
@@ -7568,13 +7593,22 @@ const TRAIL_RENDER_CONFIG = {
                                 spawnParticles(wrappedHead.x, wrappedHead.y, 10, '#44FF88');
                                 triggerEvolutionIfReady();
                                 // v13: the drain RESOLVES the contact. Drained to <=1 the
-                                // rival is gone; drained to >=2 it survives — but if the
-                                // player's head is on its head tile the segment test below
-                                // would still kill them, so the advertised head-to-head
-                                // counter backfired above length 4. Remove the rival in
-                                // that case too, and skip the segment test for it.
-                                if (rivals[rci].snake.length <= 1 ||
-                                    (wrappedHead.x === rHead.x && wrappedHead.y === rHead.y)) {
+                                // rival is gone; drained to >=2 it survives — unless the
+                                // player's head still ends the tick on one of its segments,
+                                // in which case the segment test below would kill them and
+                                // the advertised head-to-head counter would have backfired.
+                                // NOTE the test is against the rival's WHOLE post-drain body,
+                                // not just its head: in a head-on SWAP the two snakes trade
+                                // tiles, so the player's head lands on the tile the rival
+                                // vacated — rival snake[1], its neck — and a head-only test
+                                // missed exactly the geometry a real player meets when
+                                // charging a moving rival.
+                                var headOnRival = false;
+                                for (var lri = 0; lri < rivals[rci].snake.length; lri++) {
+                                    if (rivals[rci].snake[lri].x === wrappedHead.x &&
+                                        rivals[rci].snake[lri].y === wrappedHead.y) { headOnRival = true; break; }
+                                }
+                                if (rivals[rci].snake.length <= 1 || headOnRival) {
                                     removeRival(rci, true);
                                     continue;
                                 }
@@ -7582,6 +7616,11 @@ const TRAIL_RENDER_CONFIG = {
                         }
                         for (var rcj = 0; rcj < rivals[rci].snake.length; rcj++) {
                             if (rivals[rci].snake[rcj].x === wrappedHead.x && rivals[rci].snake[rcj].y === wrappedHead.y) {
+                                // v13: this contact belongs to rule 1 from here on. resolveRivalRams
+                                // must not also score it — a save that absorbs the hit (the shield
+                                // especially) leaves the head/neck on the contact tile, and scoring
+                                // that as a body ram paid a credited, rewarded kill for being saved.
+                                rivalHeadContactIdx = rci;
                                 if (shieldActive) {
                                     shieldActive = false; powerUpTimer = 0; powerUpType = null;
                                     stats.shieldBlocks++;
@@ -7604,7 +7643,35 @@ const TRAIL_RENDER_CONFIG = {
                                 }
                                 // v11 E: Streak charge save (after phoenix, before death)
                                 if (!tryStreakChargeSave(wrappedHead)) return false;
-                                lastDeathCause = 'You were caught by the rival!';
+                                // v13: the cause must TEACH the rule, because v13 made it
+                                // lethal where it used to be a free kill. A head-on (the two
+                                // heads converge on the same tile, or the rival's head ends on
+                                // the tile the player just vacated) is the death that a charging
+                                // player suffers; running into the rival's flank is the other.
+                                var rivalHeadOn = false;
+                                var rvHead = rivals[rci].snake.length > 0 ? rivals[rci].snake[0] : null;
+                                if (rvHead) {
+                                    if (rvHead.x === wrappedHead.x && rvHead.y === wrappedHead.y) {
+                                        rivalHeadOn = true;
+                                    } else {
+                                        for (var rhi = 0; rhi < snake.length; rhi++) {
+                                            if (snake[rhi].x === rvHead.x && snake[rhi].y === rvHead.y) { rivalHeadOn = true; break; }
+                                        }
+                                    }
+                                }
+                                lastDeathCause = rivalHeadOn
+                                    ? 'You charged the rival head-on!'
+                                    : 'You ran into the rival!';
+                                // v13: the rule itself needs teaching — charging used to be a
+                                // free kill and v13 made it lethal, so a player who learned the
+                                // old behaviour dies to the new one. One-shot, because the cause
+                                // string alone cannot carry the counterplay (and must stay short:
+                                // the recap card is 320px and the descriptive form measures 323).
+                                if (rivalHeadOn && !hasSeenRivalHeadOn) {
+                                    hasSeenRivalHeadOn = true;
+                                    saveManager.set('snake_has_seen_rival_head_on', '1');
+                                    queueToast('\u26A0 Charging a rival head-on is lethal — ram its SIDE instead!', 4000, 'high');
+                                }
                                 return true;
                             }
                         }
@@ -7628,6 +7695,11 @@ const TRAIL_RENDER_CONFIG = {
                 while (snake.length < 3) {
                     var saveTailSeg = wrapPosition({ x: snake[snake.length - 1].x - dx, y: snake[snake.length - 1].y - dy });
                     if (snake.some(function (s) { return s.x === saveTailSeg.x && s.y === saveTailSeg.y; })) break;
+                    // v13: the rebuilt tail tiles are unfiltered by findFreeTile (which only
+                    // vets the head), so stop the body before it lands on a rival segment —
+                    // otherwise a later tick could credit that rival as a ram the player never
+                    // earned. Mirrors the existing self-overlap break above.
+                    if (rivalCombinedSnake().some(function (rs) { return rs.x === saveTailSeg.x && rs.y === saveTailSeg.y; })) break;
                     snake.push(saveTailSeg);
                 }
                 wrappedHead = snake[0]; // post-move processing sees the real head

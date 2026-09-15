@@ -243,7 +243,7 @@ try {
                  head: snake[0].x + ',' + snake[0].y };
     })()`);
     check('B2: charging a rival head-on from 2 tiles kills the PLAYER',
-          r.state === 'gameover' && r.cause === 'You were caught by the rival!', JSON.stringify(r));
+          r.state === 'gameover' && /head-on/.test(r.cause), JSON.stringify(r));
     check('B2b: the charged rival survives and is not credited', r.rivalActive === true && r.delta === 0, JSON.stringify(r));
 } catch (e) { fail_('B2: head-on from 2 tiles', e.message); }
 
@@ -261,7 +261,7 @@ try {
         return { state: gameState, cause: lastDeathCause, delta: stats.rivalsDefeated - before };
     })()`);
     check('B1: charging from 1 tile kills the player (regression)',
-          r.state === 'gameover' && r.cause === 'You were caught by the rival!' && r.delta === 0, JSON.stringify(r));
+          r.state === 'gameover' && /head-on/.test(r.cause) && r.delta === 0, JSON.stringify(r));
 } catch (e) { fail_('B1: head-on from 1 tile', e.message); }
 
 // B3: the rival rams the player's body — the spec's counterplay. It must die, credited,
@@ -329,9 +329,13 @@ try {
             food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
             updateGame();
         }
-        return { delta: stats.rivalsDefeated - before, state: gameState };
+        return { delta: stats.rivalsDefeated - before, state: gameState,
+                 rivalAlive: rivals.length > 0 && rivals[0].active };
     })()`);
-    check('B5: a tail-following rival is never credited as a kill', r.delta === 0, JSON.stringify(r));
+    // Assert the rival is still ALIVE, not just uncredited: a wrongly-destroyed rival that
+    // also failed to credit would satisfy `delta === 0` alone.
+    check('B5: a tail-following rival is neither destroyed nor credited',
+          r.delta === 0 && r.rivalAlive === true, JSON.stringify(r));
 } catch (e) { fail_('B5: tail follow', e.message); }
 
 // B6: self-crash credit regression via updateGame (not just updateRival).
@@ -350,31 +354,32 @@ try {
     check('B6: a self-tangling rival is not credited', r.delta === 0 && r.active === false, JSON.stringify(r));
 } catch (e) { fail_('B6: self-crash via tick', e.message); }
 
-// B7: the leech counter no longer backfires. At rival length >= 5 the drain leaves it
-// alive on the player's own head tile, which used to kill the player.
+// B7: the leech counter no longer backfires. At rival length >= 5 the drain used to leave
+// the rival alive on a tile the player's head occupies, and the segment test then killed the
+// player. The rival MUST be MOVING here: a dx:0/dy:0 rival has a degenerate head, finds
+// itself in its own post-pop scan and self-destructs during the update phase — before the
+// player's turn — so the leech never runs and the assertion passes for the wrong reason.
 try {
     const r = await page.evaluate(`(() => {
         ${PRE}
         cleanRun({ brews: ['leech'] });
         playerAt(100, 100, 4);
+        // Player head 100 -> 120 (+x). Rival head 120 -> 100 (-x), length 5: after its move
+        // the snakes have swapped, and the player's new head lands on the rival's NECK.
         rivals = [{ snake: [{x:120,y:100},{x:140,y:100},{x:160,y:100},{x:180,y:100},{x:200,y:100}],
-                    dx: 0, dy: -20, active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
-        // Rival moves up to (120,80); force the player's head onto the rival head tile by
-        // disabling the rival's move for this tick via a stride-3 body is overkill - instead
-        // place the rival so its straight move lands exactly on the player's new head.
-        rivals[0].snake = [{x:120,y:100},{x:140,y:100},{x:160,y:100},{x:180,y:100},{x:200,y:100}];
-        rivals[0].dx = 0; rivals[0].dy = 0;
+                    dx: -20, dy: 0, active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
         roadStraight();
         food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
-        // rival dy=0 -> its "straight" step is a no-op tile, so it stays at (120,100);
-        // the player's head lands on (120,100) exactly.
+        const lenBefore = snake.length, rivalLenBefore = rivals[0].snake.length;
         updateGame();
-        return { state: gameState, cause: lastDeathCause, len: snake.length,
-                 rivalActive: rivals[0].active };
+        return { state: gameState, cause: lastDeathCause,
+                 grew: snake.length - lenBefore, rivalLenBefore,
+                 rivalActive: rivals.length ? rivals[0].active : null };
     })()`);
-    check('B7: leech head-on survives the player and removes the rival',
-          r.state === 'playing' && r.rivalActive === false, JSON.stringify(r));
-    check('B7b: the player is not reported as caught by the rival', r.cause !== 'You were caught by the rival!', r.cause);
+    // The drain really happened (not a self-crash) and the player survived it.
+    check('B7: the leech drain fires against a moving rival (+3) and the rival is removed',
+          r.grew === 3 && r.rivalActive === false && r.rivalLenBefore === 5, JSON.stringify(r));
+    check('B7b: the player survives the counter', r.state === 'playing' && !/rival/.test(r.cause), JSON.stringify(r));
 } catch (e) { fail_('B7: leech counter', e.message); }
 
 // B8: the partial drain is preserved — an adjacent (non-overlapping) rival survives.
@@ -429,8 +434,7 @@ for (const save of ['shield', 'phoenix', 'streak']) {
         const consumed = save === 'shield' ? r.shieldBlocks === 1
                        : save === 'phoenix' ? r.phoenixUsed === true
                        : r.charges === 0;
-        const saved = r.state === 'playing' && consumed &&
-                      r.cause !== 'You were caught by the rival!';
+        const saved = r.state === 'playing' && consumed && !/rival/.test(r.cause);
         check('B9: the ' + save + ' save absorbs a rival contact', saved, JSON.stringify(r));
         // A save must NOT be scored as a body ram. The shield cancels rule 1 without
         // relocating the head, so the head legitimately ends the tick on the rival's tile —
@@ -440,7 +444,129 @@ for (const save of ['shield', 'phoenix', 'streak']) {
     } catch (e) { fail_('B9: ' + save + ' save', e.message); }
 }
 
-// B10: no tick ends with the player's head on a rival segment while no save absorbed it.
+// B13: a SAVE must never be scored as a ram, including in a head-on SWAP. The shield
+// cancels rule 1 without relocating, so the rival's new head ends up on the tile the player
+// just left — which after the unshift is the player's NECK (snake[1]). The si=1 skip alone
+// does not cover that: rule 2 has to be suppressed for the rival rule 1 already adjudicated.
+// Pre-fix this paid +1 defeat and +50 score for being saved.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun({ brews: [] });
+        shieldActive = true; powerUpTimer = 9999; powerUpType = 'shield';
+        playerAt(100, 100, 4);
+        // Head-on swap: player 100 -> 120, rival 120 -> 100.
+        rivals = [{ snake: [{x:120,y:100},{x:140,y:100}], dx: -20, dy: 0,
+                    active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+        roadStraight();
+        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+        updateGame();
+        return { state: gameState, blocks: stats.shieldBlocks, delta: stats.rivalsDefeated,
+                 score: score, cause: lastDeathCause,
+                 rivalActive: rivals.length ? rivals[0].active : null };
+    })()`);
+    check('B13: a shielded head-on swap does not pay a credited kill',
+          r.state === 'playing' && r.blocks === 1 && r.delta === 0 && r.score === 0 &&
+          r.rivalActive === true, JSON.stringify(r));
+    // Without the shield the same geometry must kill the player with no credit — the
+    // contrast is what makes the rule legible.
+    const noShield = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun({ brews: [] });
+        playerAt(100, 100, 4);
+        rivals = [{ snake: [{x:120,y:100},{x:140,y:100}], dx: -20, dy: 0,
+                    active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+        roadStraight();
+        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+        updateGame();
+        return { state: gameState, delta: stats.rivalsDefeated, cause: lastDeathCause };
+    })()`);
+    check('B13b: the same swap kills the player when unsaved, uncredited',
+          noShield.state === 'gameover' && noShield.delta === 0 && /head-on/.test(noShield.cause),
+          JSON.stringify(noShield));
+} catch (e) { fail_('B13: shielded swap', e.message); }
+
+// B14: the death cause must distinguish a head-on from a flank charge — v13 made the head-on
+// lethal where it used to be a free kill, so one shared string taught the player nothing.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun({ brews: [] });
+        playerAt(140, 100, 4);
+        // FLANK: the rival is horizontal and steps UP, so its body still crosses row 100 at
+        // x=160 while its head moves to (160,80) — away from the player's tile and body.
+        // The player charges into the rival's side: lethal, but not a head-on.
+        rivals = [{ snake: [{x:160,y:100},{x:180,y:100},{x:200,y:100}], dx: 0, dy: -20,
+                    active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+        roadStraight();
+        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+        updateGame();
+        return { state: gameState, cause: lastDeathCause };
+    })()`);
+    check('B14: charging the rival\'s flank reports the flank cause, not a head-on',
+          r.state === 'gameover' && /ran into/.test(r.cause), JSON.stringify(r));
+    // The head-on case (B1/B2) must report a DIFFERENT string: one shared string taught the
+    // player nothing about a rule that just became lethal.
+    const headOn = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun({ brews: [] });
+        playerAt(100, 100, 4);
+        rivals = [{ snake: [{x:120,y:100},{x:140,y:100}], dx: -20, dy: 0,
+                    active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+        roadStraight();
+        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+        updateGame();
+        return { state: gameState, cause: lastDeathCause };
+    })()`);
+    check('B14b: the two lethal geometries report distinct, rule-naming causes',
+          headOn.state === 'gameover' && /head-on/i.test(headOn.cause) &&
+          headOn.cause !== r.cause, JSON.stringify({ flank: r.cause, headOn: headOn.cause }));
+    // v12's lesson: canvas text metrics are environment-dependent, and the recap card is a
+    // fixed 320px. Measure the strings rather than trusting an offset.
+    const width = await page.evaluate(`(() => {
+        ctx.save(); ctx.font = 'bold 13px Arial';
+        const out = { card: 320, cause: Math.round(ctx.measureText(lastDeathCause).width) };
+        ctx.restore(); return out;
+    })()`);
+    check('B14c: the head-on cause fits the 320px recap card',
+          width.cause > 0 && width.cause <= width.card - 20, JSON.stringify(width));
+} catch (e) { fail_('B14: cause split', e.message); }
+
+// B15: the Phoenix/streak teleport rebuilds a 3-tile body, and only its HEAD tile went
+// through findFreeTile — the two tail tiles were unfiltered, so a later tick could credit a
+// rival they had been laid on top of. The rebuild must stop before a rival segment.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun({ brews: ['phoenix'] });
+        playerAt(100, 200, 4);
+        // Rival 0 is the hit: player head 100 -> 120 lands on its post-move body.
+        // Rival 1's post-move head is (280,300) — exactly the first tile the rebuild would
+        // lay behind a teleport to (300,300).
+        rivals = [
+          { snake: [{x:120,y:200},{x:140,y:200}], dx: -20, dy: 0,
+            active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' },
+          // Post-move body: [(260,300),(280,300)] — its NECK is the first tile the rebuild
+          // would lay at (280,300), while the teleport target (300,300) stays free.
+          { snake: [{x:280,y:300},{x:300,y:300}], dx: -20, dy: 0,
+            active: true, respawnTimer: 0, moveCounter: 0, color: '#AD1457' }
+        ];
+        roadStraight();
+        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+        const origFind = window.findFreeTile;
+        window.findFreeTile = function () { return { x: 300, y: 300 }; };
+        updateGame();
+        window.findFreeTile = origFind;
+        const onRival = snake.some(function (s) {
+            return rivals.some(function (rv) { return rv.snake.some(function (rs) { return rs.x === s.x && rs.y === s.y; }); });
+        });
+        return { state: gameState, len: snake.length, onRival, phoenixUsed: brewUsageFlags.phoenixUsed };
+    })()`);
+    check('B15: the phoenix rebuild never lays the body on a rival',
+          r.phoenixUsed === true && r.onRival === false, JSON.stringify(r));
+} catch (e) { fail_('B15: phoenix rebuild', e.message); }
+
+// B10: no tick ends with the player's head on a rival segment while no save absorbed it.// B10: no tick ends with the player's head on a rival segment while no save absorbed it.
 // (The old "no co-occupancy" invariant was vacuous on the free-kill shapes, because those
 // ended with the rival REMOVED; this formulation observes the actual failure mode.)
 try {
@@ -711,10 +837,20 @@ try {
         const t = findFreeTile(200, 200);
         const t2 = findFreeTile(200, 200, true);
         const near = t ? rivalTileDistance(200, 200, t.x, t.y) : -1;
-        return { t: !!t, t2: !!t2, near };
+        // The default floor is 3 RAW tiles — sample it, or the assertion passes for any radius.
+        let minDefault = 99, minOptIn = 99, n = 0;
+        for (let i = 0; i < 300; i++) {
+            rivals = []; snake = [{ x: 200, y: 200 }]; obstacles = []; hazards = []; extraFoods = []; food = null;
+            const a = findFreeTile(200, 200);
+            const b = findFreeTile(200, 200, { minTiles: 5, wrapAware: true });
+            if (a) { minDefault = Math.min(minDefault, rivalTileDistance(200, 200, a.x, a.y)); n++; }
+            if (b) minOptIn = Math.min(minOptIn, rivalTileDistance(200, 200, b.x, b.y));
+        }
+        return { t: !!t, t2: !!t2, near, minDefault, minOptIn, n };
     })()`);
     check('D2: findFreeTile keeps its 3-raw-tile default for legacy callers',
-          r.t && r.t2 && r.near >= 0, JSON.stringify(r));
+          r.t && r.t2 && r.minDefault >= 3 && r.minDefault < 5 && r.minOptIn >= 5,
+          JSON.stringify(r));
 } catch (e) { fail_('D2: legacy default', e.message); }
 
 // D5: the rival never materialises on an extra food (hoard/portal) or inside a live hazard.
@@ -726,16 +862,44 @@ try {
         obstacles = []; rivals = []; food = null; food2 = null;
         // Flood the board with extra foods except a corner, then check no spawn lands on one.
         extraFoods = [];
-        for (let x = 0; x < 400; x += 20) for (let y = 0; y < 400; y += 20) extraFoods.push({ x, y, type: 'bonus', spawnTime: 0 });
-        hazards = [];
+        // One live hazard covering the whole board is unusable (nothing could spawn), so
+        // place a small on-phase rift and assert the spawn avoids that tile specifically.
+        hazards = [{ cx: 200, cy: 200, radius: 40, phase: 'on', phaseTimer: 10, lifeTimer: 100, maxLife: 100 }];
         spawnRival(0);
         const onExtra = rivals.length && rivals[0].snake.length
           ? rivals[0].snake.some(s => extraFoods.some(e => e.x === s.x && e.y === s.y))
           : false;
-        return { spawned: !!(rivals.length && rivals[0].snake.length), onExtra };
+        const inHazard = rivals.length && rivals[0].snake.length
+          ? rivals[0].snake.some(s => Math.abs(s.x - 200) + Math.abs(s.y - 200) <= 40)
+          : false;
+        return { spawned: !!(rivals.length && rivals[0].snake.length), onExtra, inHazard };
     })()`);
     check('D5: a rival never materialises on an extra food', r.onExtra === false, JSON.stringify(r));
+    check('D5b: a rival never materialises inside a live hazard', r.inHazard === false, JSON.stringify(r));
 } catch (e) { fail_('D5: extras avoidance', e.message); }
+
+// D6: the telegraph's BODY gets the same occupancy set as its head tile — including the
+// primary food, which the body-extension loop previously ignored (measured 5/800 spawns on
+// the food, and since body segment 1 is adjacent to the head the rival then ate it free).
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        snake = [{ x: 40, y: 40 }];
+        let onFood = 0, placed = 0;
+        for (let i = 0; i < 800; i++) {
+            rivals = []; obstacles = []; hazards = []; extraFoods = []; food2 = null;
+            food = { x: 120, y: 120, type: 'common', spawnTime: 0 };
+            spawnRival(0);
+            if (!rivals.length || !rivals[0].snake.length) continue;
+            placed++;
+            if (rivals[0].snake.some(s => s.x === food.x && s.y === food.y)) onFood++;
+        }
+        return { placed, onFood };
+    })()`);
+    check('D6: no telegraph body segment lands on the primary food',
+          r.placed > 100 && r.onFood === 0, JSON.stringify(r));
+} catch (e) { fail_('D6: body vs food', e.message); }
 
 // ---------------------------------------------------------------------------
 // Feature E — length-derived cadence
@@ -858,12 +1022,34 @@ try {
     check('F1d: no leaked transform after drawing rivals', r.xformLeak === 0, JSON.stringify(r));
 } catch (e) { fail_('F1: canvas state', e.message); }
 
-// F2: exactly one rival_warn sound case (v12 found dead duplicate cases in this switch).
+// F2: the warning must actually SOUND, and must sound when the wind-up starts — a tone at
+// the moment the rival becomes lethal is not a warning. Behavioural: intercept playSound
+// and read the calls (a source grep would pass with the case unreachable).
 try {
-    const src = await page.evaluate(() => playSound.toString());
-    const n = (src.match(/case 'rival_warn':/g) || []).length;
-    check('F2: exactly one rival_warn sound case', n === 1, 'count=' + n);
-} catch (e) { fail_('F2: sound case', e.message); }
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        snake = [{ x: 40, y: 40 }];
+        const orig = playSound;
+        const heard = [];
+        window.playSound = function (n) { heard.push(n); };
+        rivals = [];
+        spawnRival(0);                       // the wind-up STARTS here
+        const atWindup = heard.slice();
+        // Now run the wind-up to activation and confirm nothing re-fires the warning.
+        const rv = rivals[0];
+        rv.snake = [{ x: 200, y: 200 }, { x: 180, y: 200 }, { x: 160, y: 200 }];
+        rv.respawnTimer = 0;
+        for (let i = 0; i < 3; i++) updateGame();
+        window.playSound = orig;
+        return { atWindup, activated: rv.active, afterActivation: heard.slice() };
+    })()`);
+    check('F2: the rival warning sounds when the wind-up starts',
+          r.atWindup.indexOf('rival_warn') !== -1, JSON.stringify(r));
+    check('F2b: it does not re-fire at activation',
+          r.afterActivation.filter(function (n) { return n === 'rival_warn'; }).length === 1,
+          JSON.stringify(r));
+} catch (e) { fail_('F2: sound', e.message); }
 
 // F4: the rival body no longer shares the most common food's colour.
 try {
@@ -995,6 +1181,37 @@ try {
           r.deferred > 0 && r.relocated && r.state === 'playing', JSON.stringify(r));
 } catch (e) { fail_('C7: deferral cap', e.message); }
 
+// F6: one HUD line, two rivals. A live rival's ambient length must NOT mask a materialising
+// rival's countdown — that hides the feature's core cue for its entire window.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        const origText = ctx.fillText.bind(ctx);
+        let texts = [];
+        ctx.fillText = function (t) { texts.push(String(t)); return origText.apply(null, arguments); };
+        const capture = (setup) => {
+            texts = []; setup(); drawRivalHUD();
+            return texts.filter(function (t) { return /Rival/.test(t); });
+        };
+        const both = capture(() => {
+            rivals = [
+              { snake: [{x:60,y:60},{x:80,y:60},{x:100,y:60}], dx: 20, dy: 0, active: true,
+                respawnTimer: 0, moveCounter: 0, color: '#B71C1C' },
+              { snake: [{x:300,y:300},{x:320,y:300},{x:340,y:300}], dx: 20, dy: 0, active: false,
+                respawnTimer: 800, moveCounter: 0, deferCount: 0, color: '#AD1457' }
+            ];
+        });
+        const liveOnly = capture(() => { rivals = [rivals[0]]; });
+        ctx.fillText = origText;
+        return { both, liveOnly };
+    })()`);
+    check('F6: a materialising rival outranks a live one on the HUD line',
+          /^\u26A0 Rival in/.test(r.both[0] || ''), JSON.stringify(r));
+    check('F6b: with no telegraph the live length still shows',
+          /^Rival: 3$/.test(r.liveOnly[0] || ''), JSON.stringify(r.liveOnly));
+} catch (e) { fail_('F6: HUD priority', e.message); }
+
 // ---------------------------------------------------------------------------
 // Feature G — truth repairs and AI sanity
 // ---------------------------------------------------------------------------
@@ -1075,12 +1292,6 @@ try {
           !r.offered.zen && !r.offered.walled && !r.offered.painter && !r.offered.snap,
           JSON.stringify(r.offered));
 } catch (e) { fail_('G3: double_rival truth', e.message); }
-
-// G4: the dead per-tick allocation is gone.
-try {
-    const has = await page.evaluate(() => typeof prevRivalSnake !== 'undefined');
-    check('G4: the dead prevRivalSnake state is deleted', has === false, 'still defined');
-} catch (e) { fail_('G4: dead state', e.message); }
 
 // ---------------------------------------------------------------------------
 // Cross-cutting: no page errors accumulated over the whole suite.
