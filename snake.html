@@ -1113,7 +1113,7 @@ var BREWS_CONFIG = [
     { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
     { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
     { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
-    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival: steal 3 segments; destroys a rival left on you', cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Steal 3 segments on head-to-head; destroys a rival sharing your tile', cost: 3 },
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
@@ -7592,23 +7592,24 @@ const TRAIL_RENDER_CONFIG = {
                                 // would silently skip the evolution check.
                                 spawnParticles(wrappedHead.x, wrappedHead.y, 10, '#44FF88');
                                 triggerEvolutionIfReady();
-                                // v13: the drain RESOLVES the contact. Drained to <=1 the
-                                // rival is gone; drained to >=2 it survives — unless the
-                                // player's head still ends the tick on one of its segments,
-                                // in which case the segment test below would kill them and
-                                // the advertised head-to-head counter would have backfired.
-                                // NOTE the test is against the rival's WHOLE post-drain body,
-                                // not just its head: in a head-on SWAP the two snakes trade
-                                // tiles, so the player's head lands on the tile the rival
-                                // vacated — rival snake[1], its neck — and a head-only test
-                                // missed exactly the geometry a real player meets when
-                                // charging a moving rival.
-                                var headOnRival = false;
-                                for (var lri = 0; lri < rivals[rci].snake.length; lri++) {
-                                    if (rivals[rci].snake[lri].x === wrappedHead.x &&
-                                        rivals[rci].snake[lri].y === wrappedHead.y) { headOnRival = true; break; }
-                                }
-                                if (rivals[rci].snake.length <= 1 || headOnRival) {
+                                // v13: the drain RESOLVES the contact only when it left the
+                                // rival standing on the PLAYER'S OWN HEAD TILE. Drained to
+                                // <=1 the rival is gone either way; drained to >=2 it survives
+                                // — and if its head still occupies the player's tile, the
+                                // segment test below would kill the player, so the brew would
+                                // have backfired on the head-to-head it advertises.
+                                //
+                                // The test is the rival's HEAD TILE, not its whole body, and
+                                // that distinction is load-bearing. The leech window is the 3x3
+                                // box around the rival's head, so its neck is ALWAYS inside it:
+                                // testing the whole body made a plain charge (the snakes swap
+                                // tiles, landing the player on the rival's neck) survive a
+                                // contact that kills you without the brew, destroy the rival,
+                                // and pay +50 score / +100 XP. That is a free kill for the
+                                // brew's owner, and a regression against the pre-v13 build,
+                                // which killed the player in exactly that geometry.
+                                if (rivals[rci].snake.length <= 1 ||
+                                    (wrappedHead.x === rHead.x && wrappedHead.y === rHead.y)) {
                                     removeRival(rci, true);
                                     continue;
                                 }
@@ -7648,15 +7649,21 @@ const TRAIL_RENDER_CONFIG = {
                                 // heads converge on the same tile, or the rival's head ends on
                                 // the tile the player just vacated) is the death that a charging
                                 // player suffers; running into the rival's flank is the other.
+                                // v13: a head-on is the rival's HEAD on the player's head, or
+                                // on the tile the player just vacated (the swap — the two snakes
+                                // trade tiles). A rival head merely resting somewhere else on the
+                                // player's body is NOT a head-on: using that as the test labelled
+                                // ~7% of rival deaths "head-on" and fired the "ram its SIDE"
+                                // teaching toast on deaths that were already a side ram, which is
+                                // a worse lesson than the generic string it replaced.
                                 var rivalHeadOn = false;
                                 var rvHead = rivals[rci].snake.length > 0 ? rivals[rci].snake[0] : null;
                                 if (rvHead) {
                                     if (rvHead.x === wrappedHead.x && rvHead.y === wrappedHead.y) {
                                         rivalHeadOn = true;
-                                    } else {
-                                        for (var rhi = 0; rhi < snake.length; rhi++) {
-                                            if (snake[rhi].x === rvHead.x && snake[rhi].y === rvHead.y) { rivalHeadOn = true; break; }
-                                        }
+                                    } else if (prevSnake.length > 0 &&
+                                               rvHead.x === prevSnake[0].x && rvHead.y === prevSnake[0].y) {
+                                        rivalHeadOn = true;   // the player charged the tile the rival moved into
                                     }
                                 }
                                 lastDeathCause = rivalHeadOn

@@ -354,33 +354,54 @@ try {
     check('B6: a self-tangling rival is not credited', r.delta === 0 && r.active === false, JSON.stringify(r));
 } catch (e) { fail_('B6: self-crash via tick', e.message); }
 
-// B7: the leech counter no longer backfires. At rival length >= 5 the drain used to leave
-// the rival alive on a tile the player's head occupies, and the segment test then killed the
-// player. The rival MUST be MOVING here: a dx:0/dy:0 rival has a degenerate head, finds
-// itself in its own post-pop scan and self-destructs during the update phase — before the
-// player's turn — so the leech never runs and the assertion passes for the wrong reason.
+// B7: the leech contract, pinned against base. Three geometries, because the drain and the
+// removal are different things and conflating them is a free kill:
+//   swap      — the snakes trade tiles; the player's head lands on the rival's NECK. The
+//               leech window is the 3x3 box around the rival's head, so the neck is ALWAYS
+//               inside it; the drain fires, and the player DIES (base does too). Removing the
+//               rival here would hand a brew owner a kill they did not earn.
+//   same tile — the rival's head ends on the player's head tile: the drain resolves it.
+//   adjacent  — in the 3x3 window but not overlapping: drain only, nobody dies.
 try {
     const r = await page.evaluate(`(() => {
         ${PRE}
-        cleanRun({ brews: ['leech'] });
-        playerAt(100, 100, 4);
-        // Player head 100 -> 120 (+x). Rival head 120 -> 100 (-x), length 5: after its move
-        // the snakes have swapped, and the player's new head lands on the rival's NECK.
-        rivals = [{ snake: [{x:120,y:100},{x:140,y:100},{x:160,y:100},{x:180,y:100},{x:200,y:100}],
-                    dx: -20, dy: 0, active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
-        roadStraight();
-        food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
-        const lenBefore = snake.length, rivalLenBefore = rivals[0].snake.length;
-        updateGame();
-        return { state: gameState, cause: lastDeathCause,
-                 grew: snake.length - lenBefore, rivalLenBefore,
-                 rivalActive: rivals.length ? rivals[0].active : null };
+        const run = (segs, rdx, rdy, head) => {
+            cleanRun({ brews: ['leech'] });
+            playerAt(head[0], head[1], 4);
+            rivals = [{ snake: segs.map(s => ({ x: s[0], y: s[1] })), dx: rdx, dy: rdy,
+                        active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+            roadStraight();
+            food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+            const len0 = snake.length, d0 = stats.rivalsDefeated;
+            updateGame();
+            return { state: gameState, cause: lastDeathCause, grew: snake.length - len0,
+                     delta: stats.rivalsDefeated - d0,
+                     rivalActive: rivals.length ? rivals[0].active : null };
+        };
+        return {
+            // head-on SWAP, length 5 so the drain leaves 2 and the removal must be a
+            // deliberate decision rather than the drain emptying the rival.
+            swap: run([[120,100],[140,100],[160,100],[180,100],[200,100]], -20, 0, [100,100]),
+            // Both heads land on the same tile. Length 5 again, so the length<=1 clause cannot be
+            // what removes it — this exercises the head-tile clause specifically.
+            same: run([[140,100],[160,100],[180,100],[200,100],[220,100]], -20, 0, [100,100]),
+            // Diagonal neighbour: inside the 3x3 leech window, no overlap. Length 8 so the
+            // drain leaves 5 and the rival is simply not destroyed.
+            adj:  run([[140,80],[160,80],[180,80],[200,80],[220,80],[240,80],[260,80],[280,80]], -20, 0, [100,100])
+        };
     })()`);
-    // The drain really happened (not a self-crash) and the player survived it.
-    check('B7: the leech drain fires against a moving rival (+3) and the rival is removed',
-          r.grew === 3 && r.rivalActive === false && r.rivalLenBefore === 5, JSON.stringify(r));
-    check('B7b: the player survives the counter', r.state === 'playing' && !/rival/.test(r.cause), JSON.stringify(r));
-} catch (e) { fail_('B7: leech counter', e.message); }
+    check('B7: the drain still fires on a head-on swap (+3) but does NOT save the player',
+          r.swap.grew === 3 && r.swap.state === 'gameover' && r.swap.delta === 0,
+          JSON.stringify(r.swap));
+    check('B7b: the swap is reported as a head-on charge, and costs a life not a kill',
+          /head-on/.test(r.swap.cause), JSON.stringify(r.swap));
+    check('B7c: a rival head left on the player\'s tile is drained AND destroyed, credited',
+          r.same.state === 'playing' && r.same.rivalActive === false && r.same.delta === 1 &&
+          r.same.grew === 3, JSON.stringify(r.same));
+    check('B7d: an adjacent rival is drained without a kill and without dying',
+          r.adj.state === 'playing' && r.adj.rivalActive === true && r.adj.delta === 0 &&
+          r.adj.grew === 3, JSON.stringify(r.adj));
+} catch (e) { fail_('B7: leech contract', e.message); }
 
 // B8: the partial drain is preserved — an adjacent (non-overlapping) rival survives.
 try {
@@ -566,7 +587,44 @@ try {
           r.phoenixUsed === true && r.onRival === false, JSON.stringify(r));
 } catch (e) { fail_('B15: phoenix rebuild', e.message); }
 
-// B10: no tick ends with the player's head on a rival segment while no save absorbed it.// B10: no tick ends with the player's head on a rival segment while no save absorbed it.
+// B16: the head-on rule is taught exactly once, and only on a genuine head-on. The cause
+// string cannot carry the counterplay (it must stay short for the 320px recap card), so the
+// one-shot toast IS the teaching mechanism — nothing pinned it, its string, or its flag.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        const headOn = () => {
+            cleanRun({ brews: [] });
+            playerAt(100, 100, 4);
+            rivals = [{ snake: [{x:120,y:100},{x:140,y:100}], dx: -20, dy: 0,
+                        active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+            roadStraight();
+            food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+            updateGame();
+        };
+        const heard = [];
+        const orig = window.queueToast;
+        window.queueToast = function (msg) { heard.push(String(msg)); };
+        hasSeenRivalHeadOn = false;
+        headOn();
+        const first = heard.slice();
+        heard.length = 0;          // clear, or the second slice still carries the first toast
+        headOn();
+        const second = heard.slice();
+        window.queueToast = orig;
+        return { first, second, flag: hasSeenRivalHeadOn,
+                 stored: saveManager.get('snake_has_seen_rival_head_on', '') };
+    })()`);
+    const taught = r.first.filter(function (m) { return /head-on/.test(m); });
+    check('B16: the head-on death teaches the counterplay once',
+          taught.length === 1 && /SIDE/i.test(taught[0]), JSON.stringify(r));
+    check('B16b: it does not fire again on a later head-on death',
+          r.second.filter(function (m) { return /head-on/.test(m); }).length === 0, JSON.stringify(r.second));
+    check('B16c: the one-shot flag persists', r.flag === true && r.stored === '1',
+          JSON.stringify({ flag: r.flag, stored: r.stored }));
+} catch (e) { fail_('B16: teach toast', e.message); }
+
+// B10: no tick ends with the player's head on a rival segment while no save absorbed it.
 // (The old "no co-occupancy" invariant was vacuous on the free-kill shapes, because those
 // ended with the rival REMOVED; this formulation observes the actual failure mode.)
 try {
@@ -900,6 +958,33 @@ try {
     check('D6: no telegraph body segment lands on the primary food',
           r.placed > 100 && r.onFood === 0, JSON.stringify(r));
 } catch (e) { fail_('D6: body vs food', e.message); }
+
+// D7: under double_rival, one telegraph's BODY must not be laid over another's. The head
+// tile went through rivalCombinedSnake() (which now includes materialising rivals); the
+// body-extension loop checked no sibling at all, so two telegraphs could stack.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        snake = [{ x: 40, y: 40 }, { x: 20, y: 40 }];
+        let overlaps = 0, placed = 0;
+        for (let i = 0; i < 400; i++) {
+            obstacles = []; hazards = []; extraFoods = []; food2 = null; food = null;
+            // Rival 0 is a fixed materialising telegraph; rival 1 spawns around it.
+            rivals = [{ snake: [{x:200,y:200},{x:220,y:200},{x:240,y:200}], dx: 20, dy: 0,
+                        active: false, respawnTimer: 900, moveCounter: 0, deferCount: 0,
+                        color: '#B71C1C' }];
+            spawnRival(1);
+            if (rivals.length < 2 || !rivals[1].snake.length) continue;
+            placed++;
+            const a = rivals[0].snake, b = rivals[1].snake;
+            if (a.some(function (x) { return b.some(function (y) { return x.x === y.x && x.y === y.y; }); })) overlaps++;
+        }
+        return { placed, overlaps };
+    })()`);
+    check('D7: a second telegraph never overlaps the first',
+          r.placed > 100 && r.overlaps === 0, JSON.stringify(r));
+} catch (e) { fail_('D7: sibling telegraphs', e.message); }
 
 // ---------------------------------------------------------------------------
 // Feature E — length-derived cadence
