@@ -818,10 +818,15 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
             }
             return false;
         }
+        // v13: a MATERIALISING rival (body present, not yet active) occupies its tiles just
+        // as much as a live one — the telegraph is a warning, not a ghost the board should
+        // ignore. Including it here keeps telephones from stacking (findFreeTile rejects
+        // these tiles), keeps food from spawning underneath, and counts its segments toward
+        // the board-full guard.
         function rivalCombinedSnake() {
             var combined = [];
             for (var ri = 0; ri < rivals.length; ri++) {
-                if (rivals[ri].active) {
+                if (rivals[ri].snake.length > 0) {
                     for (var rj = 0; rj < rivals[ri].snake.length; rj++) {
                         combined.push(rivals[ri].snake[rj]);
                     }
@@ -1100,7 +1105,7 @@ var BREWS_CONFIG = [
     { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
     { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
     { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
-    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival: steal 3 segments, destroy it',     cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Head-to-head vs rival: steal 3 segments; destroys a drained rival', cost: 3 },
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
@@ -3380,9 +3385,11 @@ const TRAIL_RENDER_CONFIG = {
                 avoidExtras: true
             });
             if (!spawnPos) {
-                // No free tile right now — re-arm the respawn timer so it retries,
-                // instead of stacking onto an occupied tile (or never spawning
-                // again once the timer hit 0).
+                // No free tile right now — re-arm the respawn timer so it retries, instead
+                // of stacking onto an occupied tile (or never spawning again once the timer
+                // hit 0). Note this is reached AFTER the timer crossed RIVAL_WINDUP_MS, so
+                // the pre-empt branch re-enters here roughly every RIVAL_WINDUP_MS — a
+                // visibly retrying telegraph on a full board, not a 2s reprieve.
                 r.respawnTimer = Math.max(r.respawnTimer, 2000);
                 return;
             }
@@ -3483,6 +3490,12 @@ const TRAIL_RENDER_CONFIG = {
                     // (the AI suicided whenever the food ended up behind it). The
                     // random-turn branch below already guards this.
                     var reverseOfHead = function(d) { return d.dx === -r.dx && d.dy === -r.dy; };
+                    var perpCandidates = function() {
+                        return [
+                            { dx: 0, dy: TILE_SIZE }, { dx: 0, dy: -TILE_SIZE },
+                            { dx: TILE_SIZE, dy: 0 }, { dx: -TILE_SIZE, dy: 0 }
+                        ].filter(function(d) { return !reverseOfHead(d); });
+                    };
                     possible = possible.filter(function(d) { return !reverseOfHead(d); });
                     // v13: stern deadlock. When the food sits directly astern, the axis
                     // filter above leaves `possible` EMPTY, there was no `else`, and
@@ -3491,12 +3504,7 @@ const TRAIL_RENDER_CONFIG = {
                     // facing +x moved to x=120). Fall back to the perpendicular axis; one
                     // such step makes the food diagonal and the normal chase resumes, so
                     // this cannot oscillate.
-                    if (possible.length === 0) {
-                        possible = [
-                            { dx: 0, dy: TILE_SIZE }, { dx: 0, dy: -TILE_SIZE },
-                            { dx: TILE_SIZE, dy: 0 }, { dx: -TILE_SIZE, dy: 0 }
-                        ].filter(function(d) { return !reverseOfHead(d); });
-                    }
+                    if (possible.length === 0) possible = perpCandidates();
                     // v13: 1-ply self-rejection — the rule the arena spec promised and
                     // never got. Without it the rival's every turn is a coin-flip on its own
                     // body, which (with the old per-tick growth) made it suicide constantly.
@@ -3514,6 +3522,13 @@ const TRAIL_RENDER_CONFIG = {
                         return false;
                     };
                     var safe = possible.filter(function(d) { return !bodyHit(d); });
+                    if (safe.length === 0) {
+                        // Every axis candidate is blocked. Try the perpendiculars before
+                        // accepting a self-hit — without this the guard was best-effort and
+                        // the rival still drove into its own body whenever the food axis and
+                        // the body axis were the same.
+                        safe = perpCandidates().filter(function(d) { return !bodyHit(d); });
+                    }
                     if (safe.length > 0) possible = safe;
                     if (possible.length > 0) {
                         var chosen = possible[Math.floor(seededRandom() * possible.length)];
@@ -6760,6 +6775,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (k !== 'double_rival') return true;
                 return rivalEnabledInMode(gameMode);
             });
+            // Never hand the draft screen an empty pool — a degenerate unlock set must not
+            // produce a NaN selection or an `activeMutators = [undefined]`.
+            if (!pool.length) pool = unlockedMutators.slice();
             if (pool.length <= count) return pool;
             var options = [];
             var safety = 0;
@@ -7174,7 +7192,10 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            // Update rival
+            // Update rival. Note the loop condition re-reads `rivals.length` every
+            // iteration and gameOver() empties `rivals`: that is what stops this loop when a
+            // rival eat ends the run through the Pressure Cooker, and it is why two rivals
+            // eating in the same tick call gameOver() exactly once.
             if (anyRivalActive() && !hoardActive && rivalFreezeMs <= 0 && !gauntletIntermission) {
                 for (var rii = 0; rii < rivals.length; rii++) {
                     if (rivals[rii].active) updateRival(rii);
@@ -7611,12 +7632,15 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 wrappedHead = snake[0]; // post-move processing sees the real head
                 teleportSavePos = null;
+                // v13: NOT a ram. The teleport relocated the player INTO the board; it was
+                // not rammed. The rebuilt body is laid down without an occupancy check, so
+                // resolving rams here could credit a kill the player never earned.
             } else {
                 snake.unshift(wrappedHead);
+                // v13: the player's move is committed — `snake` is now its real post-move
+                // occupancy, so rival-vs-body contacts can be resolved exactly (rule 2).
+                resolveRivalRams();
             }
-            // v13: the player's move is committed — `snake` is now its real post-move
-            // occupancy, so rival-vs-body contacts can be resolved exactly (rule 2).
-            resolveRivalRams();
             // Painter mode: paint the head position too
             if (gameMode === 'painter' && paintGrid) {
                 var hcol = Math.floor(wrappedHead.x / TILE_SIZE);

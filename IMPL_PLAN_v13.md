@@ -565,3 +565,23 @@ behaviour.
 | Missing assertion 2 — the reward fires exactly once per removal | **Applied** (B12: two rivals removed in one tick; `delta × 50 === score`). |
 | Missing assertion 3 — the telegraph actually draws | **Applied** (F3/F3b/F3c/F3d). |
 | NIT 12, 14 — gate wording (`A1`'s "stays 1", D3's "five" vs six, G2's statistical phrasing) | **Noted**; the shipped assertions in `test-v13.mjs` were written against the final behaviour rather than this plan's draft wording. |
+
+---
+
+## Code-review dispositions (round 2 — `v13-code-review.md` on commit `32f9c68`)
+
+The code review returned **SHIP WITH FIXES** (no blocking findings; 41 of 62 assertions falsified
+against the pre-v13 build by differential run). All items were applied:
+
+| Finding | Disposition |
+|---|---|
+| **1 (MAJOR)** B12 was vacuous (`delta 0 && score 0` satisfies `delta × 50 === score`; the fixture's rival had `dx: 0, dy: 0` and self-destructed before the leech) | **Fixed.** Rival 0 now moves onto the player's head and rival 1 is one tile from the player's body. B12 asserts `delta === 2 && score === 100`. Differential: pre-v13 gives `delta 1, score 0`. |
+| **2 (MAJOR)** B11 was a tautology (`typeof r.ate === 'boolean'`) | **Fixed.** Now asserts the flip's outcome — the rival takes the contested tile and grows by exactly one while the player's score stays 0. Differential: pre-v13 gives `score 10` (the player ate it). |
+| **3 (MAJOR)** the gauntlet wave-*completing* tick gains an extra rival move, undocumented | **Documented** in AGENTS.md's accepted-changes list with the reasoning for not gating it (gating moves the objective check above the rival block and completes waves a tick earlier). |
+| **4 (MINOR)** a Phoenix/streak relocation could credit a ram through the rebuilt, unfiltered tail body | **Fixed.** `resolveRivalRams()` now runs only on the plain-move branch; a teleport tick is a save, not a ram. |
+| **5 (MINOR)** the 1-ply self-rejection was partial and over-claimed | **Fixed, both halves.** The code now retries the perpendiculars when every axis candidate is blocked (the previous fallback accepted a self-hit); AGENTS.md scopes the claim to the chase branch and to the alternatives-exist case; **G2** now pins it. |
+| **6 (MINOR)** the `leech` descriptor over-claimed "destroy it" | **Fixed** — "steal 3 segments; destroys a drained rival". |
+| **7 (MINOR)** `pickDraftOptions` could return an empty pool | **Fixed** — falls back to the unfiltered list when the filter empties it. |
+| **8 (MINOR)** the three-state HUD had no assertion | **Fixed** — F5/F5b/F5c/F5d/F5e capture the rendered strings for all three states and assert they are distinct. The deferred `0.0s` display is documented in AGENTS.md rather than special-cased (a "held" string would flicker for one-tick deferrals). |
+| **9, 10, 11, 13, 14 (NIT)** re-arm interval, unenforced argument, stale plan sentence, telegraph occupancy, loop-termination dependency | **Applied.** `rivalCombinedSnake()` now includes materialising rivals (so telegraphs cannot stack and food cannot spawn under one); a comment records why the update loop is single-`gameOver`; AGENTS.md notes the ~wind-up re-arm and that the second argument is mandatory by contract. |
+| **12 (NIT)** the defeat toast can sit behind level-up/unlock toasts | **Noted** — existing `queueToast` semantics, consistent across the game; recorded for the running-game pass. |

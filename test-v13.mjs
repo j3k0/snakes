@@ -477,23 +477,35 @@ try {
 } catch (e) { fail_('B10: co-occupancy soak', e.message); }
 
 // B11: the hoist's intended order flip — the rival now wins a food race it used to lose.
+// The food sits one tile in front of BOTH heads: the rival reaches it on its move, the
+// player would have reached it on theirs. Pre-v13 the player ate it and the rival grew by
+// nothing; now the rival eats it and the player leaves empty-handed.
 try {
     const r = await page.evaluate(`(() => {
         ${PRE}
         cleanRun();
-        playerAt(200, 200, 4);
-        // Food two tiles ahead of the player and two behind the rival's head.
+        playerAt(200, 200, 3);
         food = { x: 220, y: 200, type: 'common', spawnTime: 0 };
-        rivals = [{ snake: [{x:260,y:200},{x:280,y:200},{x:300,y:200}], dx: -20, dy: 0,
+        // length 3 -> stride 1, so the rival moves on the first call.
+        rivals = [{ snake: [{x:240,y:200},{x:260,y:200},{x:280,y:200}], dx: -20, dy: 0,
                     active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
         roadStraight();
-        const scoreBefore = score;
+        const lenBefore = rivals[0].snake.length;
+        let atEnd = null;
+        const realOver = window.gameOver;
+        window.gameOver = function () {
+            atEnd = { len: rivals.length ? rivals[0].snake.length : -1, score: score };
+            return realOver.apply(this, arguments);
+        };
         updateGame();
-        // The rival stepped 260 -> 240 (not the food); the player then ate at 220.
-        return { ate: score > scoreBefore, rivalLen: rivals[0].snake.length };
+        window.gameOver = realOver;
+        return { lenBefore, atEnd, state: gameState, score: score, cause: lastDeathCause };
     })()`);
-    check('B11: food competition still resolves deterministically (documented flip)',
-          typeof r.ate === 'boolean', JSON.stringify(r));
+    // The rival ends the tick standing on the contested tile having eaten it; the player,
+    // arriving second, finds nothing (and dies on the rival). Pre-v13 the order was
+    // reversed — the player ate and the rival grew by nothing.
+    check('B11: the rival wins the contested food (it moves first)',
+          r.atEnd && r.atEnd.len === r.lenBefore + 1 && r.atEnd.score === 0, JSON.stringify(r));
 } catch (e) { fail_('B11: food race', e.message); }
 
 // B12: the reward path fires EXACTLY ONCE per removal. With double_rival, one rival drains
@@ -506,12 +518,15 @@ try {
         playerAt(180, 200, 4);
         snake = [{x:180,y:200},{x:160,y:200},{x:140,y:200},{x:120,y:200},{x:100,y:200}];
         dx = 20; dy = 0;
+        // Rival 0 moves LEFT onto the player's head tile (200,200) and dies by leech.
+        // Its direction must be non-zero: a dx:0/dy:0 rival has a degenerate head and
+        // self-destructs before the leech can fire.
         rivals = [
-          // Rival 0: head adjacent to the player's new head -> leech drains it to death.
-          { snake: [{x:200,y:200},{x:220,y:200}], dx: 0, dy: 0,
+          { snake: [{x:220,y:200},{x:240,y:200}], dx: -20, dy: 0,
             active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' },
-          // Rival 1: steps straight down into the player's body segment at (120,200).
-          { snake: [{x:120,y:160},{x:120,y:140},{x:120,y:120}], dx: 0, dy: 20,
+          // Rival 1 is one tile above the player's body segment at (120,200) and steps
+          // straight down onto it.
+          { snake: [{x:120,y:180},{x:120,y:160},{x:120,y:140}], dx: 0, dy: 20,
             active: true, respawnTimer: 0, moveCounter: 0, color: '#AD1457' }
         ];
         roadStraight();
@@ -521,9 +536,10 @@ try {
         return { delta: stats.rivalsDefeated - before, score: score, state: gameState,
                  active: rivals.map(function (rv) { return rv.active; }) };
     })()`);
-    // One credited removal must be worth exactly +50 score; two would be +100.
-    check('B12: the defeat reward fires once per removal (not doubled)',
-          r.delta * 50 === r.score, JSON.stringify(r));
+    // Two credited removals in one tick must pay exactly twice — never once (a lost credit)
+    // and never three times (a doubled reward).
+    check('B12: two removals in one tick credit exactly twice and pay exactly once each',
+          r.delta === 2 && r.score === 100, JSON.stringify(r));
 } catch (e) { fail_('B12: reward once', e.message); }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +880,45 @@ try {
           r.body !== r.common, JSON.stringify(r));
 } catch (e) { fail_('F4: rival colour', e.message); }
 
+// F5: the three-state HUD. It is the only textual channel for the telegraph, so capture
+// the strings drawRivalHUD actually renders (by intercepting fillText).
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        const origText = ctx.fillText.bind(ctx);
+        let texts = [];
+        ctx.fillText = function (t) { texts.push(String(t)); return origText.apply(null, arguments); };
+        const capture = (setup) => {
+            texts = []; setup(); drawRivalHUD();
+            return texts.filter(function (t) { return t.indexOf('Rival') === 0 || t.indexOf('\u26A0') === 0; });
+        };
+        const none = capture(() => { rivals = []; });
+        const live = capture(() => {
+            rivals = [{ snake: [{x:20,y:20},{x:40,y:20},{x:60,y:20}], dx: 20, dy: 0,
+                        active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+        });
+        const windup = capture(() => {
+            rivals[0].active = false; rivals[0].respawnTimer = 1200;
+        });
+        const dead = capture(() => {
+            rivals[0].snake = []; rivals[0].respawnTimer = 6400;
+        });
+        ctx.fillText = origText;
+        return { none, live, windup, dead };
+    })()`);
+    check('F5: the HUD is silent with no rival', r.none.length === 0, JSON.stringify(r));
+    check('F5b: the HUD shows the live length', /^Rival: 3$/.test(r.live[0] || ''), JSON.stringify(r.live));
+    check('F5c: the HUD shows the telegraph countdown',
+          /^\u26A0 Rival in 1\.[12]s$/.test(r.windup[0] || ''), JSON.stringify(r.windup));
+    check('F5d: the HUD shows the respawn countdown',
+          /^Rival \u29D7 6\.4s$/.test(r.dead[0] || ''), JSON.stringify(r.dead));
+    // All three states must be DISTINCT strings, or the HUD is not telling the player which
+    // state the rival is in.
+    check('F5e: the three states render three distinct strings',
+          new Set([r.live[0], r.windup[0], r.dead[0]]).size === 3, JSON.stringify(r));
+} catch (e) { fail_('F5: HUD states', e.message); }
+
 // F3: the telegraph actually DRAWS. A save-depth assertion cannot see an invisible cue —
 // a branch that never executes leaves the canvas perfectly clean. So count the calls.
 try {
@@ -970,6 +1025,30 @@ try {
     check('G1: a rival with food astern recovers instead of driving away',
           r.dAfter <= r.dBefore, JSON.stringify(r));
 } catch (e) { fail_('G1: stern deadlock', e.message); }
+
+// G2: the chase branch rejects a move onto the rival's own body WHEN an alternative
+// exists (the arena spec's promised rule). A no-alternative coil still dies — documented.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        // Head at (40,40) with its forward tile (60,40) occupied by its own body index 3,
+        // and (40,60) free. The chase branch must pick the free perpendicular.
+        rivals = [{ snake: [{x:40,y:40},{x:20,y:40},{x:60,y:40},{x:60,y:20},{x:60,y:0}],
+                    dx: 20, dy: 0, active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+        // Food directly ahead on the x axis with a positive delta -> chase branch, and the
+        // candidate is the blocked tile.
+        food = { x: 200, y: 40, type: 'common', spawnTime: 0 };
+        window.seededRandom = () => 0;   // always take the chase branch and index 0
+        updateRival(0);
+        const alive = rivals[0].active;
+        const head = alive ? rivals[0].snake[0].x + ',' + rivals[0].snake[0].y : 'dead';
+        window.seededRandom = window.__origSeededRandom;
+        return { alive, head, len: rivals[0].snake.length };
+    })()`);
+    check('G2: the AI avoids a 1-ply self-collision when an alternative exists',
+          r.alive === true && r.head !== '60,40', JSON.stringify(r));
+} catch (e) { fail_('G2: self-rejection', e.message); }
 
 // G3: double_rival is offered exactly where it works.
 try {
