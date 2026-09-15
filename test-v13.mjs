@@ -443,6 +443,49 @@ try {
           r.moves.state !== r.skip.state, JSON.stringify(r));
 } catch (e) { fail_('B17: stationary leech', e.message); }
 
+// B18: the drain-to-nothing rescue is UNCONDITIONAL, and must stay that way. A short rival
+// (<= 4) drained to <= 1 segment is REMOVED even when it never moved, exactly as the base
+// build does — otherwise the player dies with the drain already applied, which is the
+// "the counter backfires" defect this cycle exists to delete. B17 cannot catch this: every
+// B17 fixture uses a length-7 rival, where the drain leaves 4 and clause 1 is unreachable.
+// Gating clause 1 on `movedThisTick` (shipped once, caught in review) fails exactly here.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        const seg = (x, y, n, ddx, ddy) => {
+            const out = [];
+            for (let i = 0; i < n; i++) out.push({ x: x + i * ddx, y: y + i * ddy });
+            return out;
+        };
+        // A frozen (or stride-skipping) rival of the given length, head on the player's
+        // destination, body running away along +y so the drain has segments to eat.
+        const short = (len, freeze) => {
+            cleanRun({ brews: ['leech'] });
+            if (freeze) { hoardActive = true; hoardTimer = 500; }
+            playerAt(100, 100, 4);
+            rivals = [{ snake: seg(120, 100, len, 0, 20), dx: 0, dy: 20, active: true,
+                        respawnTimer: 0, moveCounter: 0, color: '#B71C1C' }];
+            roadStraight();
+            food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+            const d0 = stats.rivalsDefeated, l0 = snake.length;
+            updateGame();
+            return { state: gameState, delta: stats.rivalsDefeated - d0,
+                     grew: snake.length - l0, cause: lastDeathCause };
+        };
+        return { frozen2: short(2, true), frozen3: short(3, true), frozen4: short(4, true),
+                 frozen6: short(6, true) };
+    })()`);
+    const removed = (o) => o.state === 'playing' && o.delta === 1;
+    check('B18: a frozen length-2 rival drained to nothing is removed, not a death',
+          removed(r.frozen2), JSON.stringify(r.frozen2));
+    check('B18b: the same for length 3 and 4 (drain leaves 1 segment)',
+          removed(r.frozen3) && removed(r.frozen4), JSON.stringify(r));
+    // The contrast that makes it a real boundary: at length 6 the drain leaves 3, clause 1
+    // cannot apply, and a stationary rival must NOT be credited — the player dies instead.
+    check('B18c: at length 6 the drain leaves 3, so the stationary rival is not credited',
+          r.frozen6.state === 'gameover' && r.frozen6.delta === 0, JSON.stringify(r.frozen6));
+} catch (e) { fail_('B18: short-rival rescue', e.message); }
+
 // B8: the partial drain is preserved — an adjacent (non-overlapping) rival survives.
 try {
     const r = await page.evaluate(`(() => {
@@ -956,6 +999,10 @@ try {
     const r = await page.evaluate(`(() => {
         ${PRE}
         cleanRun();
+        // Pin the PRNG: this fixture samples ONE spawn, so with live randomness the tile
+        // varies run to run and the assertion can pass by luck (visible when the suite is
+        // run against a build where the predicate does not exist yet).
+        seedPrng = mulberry32(20240915);
         snake = [{ x: 40, y: 40 }];
         obstacles = []; rivals = []; food = null; food2 = null;
         // Flood the board with extra foods except a corner, then check no spawn lands on one.
@@ -970,6 +1017,7 @@ try {
         const inHazard = rivals.length && rivals[0].snake.length
           ? rivals[0].snake.some(s => Math.abs(s.x - 200) + Math.abs(s.y - 200) <= 40)
           : false;
+        seedPrng = null;
         return { spawned: !!(rivals.length && rivals[0].snake.length), onExtra, inHazard };
     })()`);
     check('D5: a rival never materialises on an extra food', r.onExtra === false, JSON.stringify(r));
@@ -983,6 +1031,7 @@ try {
     const r = await page.evaluate(`(() => {
         ${PRE}
         cleanRun();
+        seedPrng = mulberry32(20240916);   // pinned: a fixed 800-spawn sample
         snake = [{ x: 40, y: 40 }];
         let onFood = 0, placed = 0;
         for (let i = 0; i < 800; i++) {
@@ -993,6 +1042,7 @@ try {
             placed++;
             if (rivals[0].snake.some(s => s.x === food.x && s.y === food.y)) onFood++;
         }
+        seedPrng = null;
         return { placed, onFood };
     })()`);
     check('D6: no telegraph body segment lands on the primary food',
@@ -1006,6 +1056,7 @@ try {
     const r = await page.evaluate(`(() => {
         ${PRE}
         cleanRun();
+        seedPrng = mulberry32(20240917);   // pinned: a fixed 400-spawn sample
         snake = [{ x: 40, y: 40 }, { x: 20, y: 40 }];
         let overlaps = 0, placed = 0;
         for (let i = 0; i < 400; i++) {
@@ -1020,6 +1071,7 @@ try {
             const a = rivals[0].snake, b = rivals[1].snake;
             if (a.some(function (x) { return b.some(function (y) { return x.x === y.x && x.y === y.y; }); })) overlaps++;
         }
+        seedPrng = null;
         return { placed, overlaps };
     })()`);
     check('D7: a second telegraph never overlaps the first',

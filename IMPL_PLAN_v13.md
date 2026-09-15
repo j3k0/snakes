@@ -643,3 +643,18 @@ than documented.
 | **Nit** the classifier cannot distinguish "I charged it" from "it charged me" in a mutual perpendicular convergence. | **Documented as a deliberate non-fix** in AGENTS.md: both actors moved into the same previously-empty tile, neither string would be right, and the actionable advice is identical. |
 | **Nit** the leech descriptor's "sharing your tile" did not cover the convergence. | **Reworded** to "destroys a rival that steps onto your tile", which is now literally accurate given the `movedThisTick` gate. |
 | **Confirmed** the reviewer retracted their round-4 suggestion (pre-move-head comparison) as carrying the same hole. | Noted — the post-move `rHead` comparison is the correct one and is what the code uses. |
+
+---
+
+## Reviewer round 6 (`543f3db`)
+
+The `movedThisTick` gate was sound but **over-reached**: it wrapped BOTH disjuncts of the leech's
+removal clause, and base's `length <= 1` clause is unconditional. That removed a base rescue.
+
+| Finding | Disposition |
+|---|---|
+| **BLOCKING** the gate suppressed clause 1, so a frozen (or stride-skipping) rival of length <= 4 drained to nothing now killed the player with the drain already applied — base removes the rival and the player lives. Measured across the lengths: base `playing def 1` at len 2/3/4, `gameover` at len 5+, while the shipped build gave `gameover` on all five. Reachability in review: 6 of 13 hoards had an active rival of length <= 4, 46% of hoard ticks. | **Fixed** — the gate moved to the head-equality disjunct only. Verified against base across five lengths and every stride phase: `playing def 1` (clause 1, = base) at len 2/3/4, `gameover def 0` (= base) at len 5/6, all skip-tick rows `gameover` (= base), moving convergence `def 1 +50` (the intended reward), swap `gameover`. |
+| **Advisory** B17 could not catch it: every fixture used a length-7 rival, where the drain leaves 4 and clause 1 is unreachable by construction. | **Fixed** — new **B18/B18b/B18c**: a frozen length-2/3/4 rival drained to nothing is removed (not a death), and the length-6 contrast asserts the boundary. Falsified by re-introducing the over-suppression: B18/B18b fail, B18c still passes. |
+| **Advisory** two contradictory bullets in AGENTS.md asserted both the gated and the ungated rule. | **Folded into one** bullet that states both clauses, which one carries the gate, why, and that gating clause 1 is a regression. |
+| **Nit** the differential figure is non-deterministic (56/27, 56/27, 57/26, 55/28 measured in review). | **Fixed at the source, not by wording.** The variance was D5b and D7 — single-sample and 400-sample spawn fixtures on live randomness, which can pass by luck on a build where the predicate does not exist. All three spawn-loop fixtures (D5/D6/D7) now pin `seedPrng` with `mulberry32`. The differential is **56 fail / 30 pass with an identical pass/fail set across 8 runs**, and the current build is identical across 6 runs. |
+| **Nit** the descriptor's "steps onto your tile" covers clause 2 only. | **Fixed** — "destroys a drained rival or one stepping onto you" covers both clauses. (The brew panel is plain DOM and wraps; only canvas text has the fixed-width constraint.) |

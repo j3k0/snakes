@@ -1113,7 +1113,7 @@ var BREWS_CONFIG = [
     { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
     { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
     { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
-    { id: 'leech',      name: 'Leech Brew',    desc: 'Steal 3 segments on head-to-head; destroys a rival that steps onto your tile', cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Steal 3 segments on head-to-head; destroys a drained rival or one stepping onto you', cost: 3 },
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
@@ -7615,19 +7615,33 @@ const TRAIL_RENDER_CONFIG = {
                                 // and pay +50 score / +100 XP. That is a free kill for the
                                 // brew's owner, and a regression against the pre-v13 build,
                                 // which killed the player in exactly that geometry.
-                                // v13: and ONLY when the rival actually moved this tick. A
-                                // stationary rival (cadence skip, or the hoard/Pigment Rush
-                                // freeze) leaves its head on the tile the player charged into;
-                                // without this gate the clause turned that into a credited,
-                                // rewarded kill where the base build kills the player — and it
-                                // flipped on the rival's invisible moveCounter, which is exactly
-                                // the "sometimes I run through it" texture this cycle removed.
-                                // When the rival DID move, its pre-move body cannot hold the
-                                // tile it now occupies (that would be a self-hit), so base
-                                // survived the charge and removed the rival too: the removal is
-                                // base-consistent and only the reward is new.
-                                if (rivals[rci].movedThisTick &&
-                                    (rivals[rci].snake.length <= 1 ||
+                                // v13: the two disjuncts are NOT the same rule and must not
+                                // share a guard.
+                                //
+                                //  · `length <= 1` — the drain emptied the rival. This is
+                                //    UNCONDITIONAL, exactly as in the base build
+                                //    (`if (rivals[rci].snake.length <= 1) removeRival(rci)`):
+                                //    you drained it to nothing, so it is gone and the segment
+                                //    test can no longer kill you. Gating this on movement
+                                //    removed a base rescue — a frozen rival of length <= 4
+                                //    drained to nothing left the player dying with the drain
+                                //    already applied, which is the "the counter backfires"
+                                //    defect this cycle exists to delete.
+                                //  · `head on the player's tile` — the rival is still standing
+                                //    (>= 2 segments) and its head occupies the player's tile,
+                                //    so the segment test below would kill them. THIS is the
+                                //    disjunct that needs `movedThisTick`: a stationary rival
+                                //    (cadence skip, or the hoard/Pigment Rush freeze) keeps
+                                //    its head on the tile the player charged into, and
+                                //    resolving that as a kill survived a contact the base
+                                //    build punishes with death — flipping on the rival's
+                                //    invisible moveCounter, the same unlearnable texture as
+                                //    "sometimes I run through it". When the rival DID move,
+                                //    its pre-move body cannot hold its new tile (that would
+                                //    be a self-hit), so base survived the charge and removed
+                                //    the rival too: base-consistent, and only the reward new.
+                                if (rivals[rci].snake.length <= 1 ||
+                                    (rivals[rci].movedThisTick &&
                                      (wrappedHead.x === rHead.x && wrappedHead.y === rHead.y))) {
                                     removeRival(rci, true);
                                     continue;
