@@ -1,5 +1,31 @@
 # Snakes v12 — Code Review
 
+> **RESOLUTION ADDENDUM (added after the fixes landed).** This review was written against
+> `9dabb25` as first pushed and its verdict line below reads "Fix before commit". All six
+> findings were then fixed, plus the four advisory items that were cheap. The findings are
+> kept verbatim below as the record of what was found; the fix status is here.
+>
+> | Finding | Status | Fix |
+> |---|---|---|
+> | 1 HIGH — Ethereal hunger pause re-fires the pop | **Fixed** | The pause now gates the pop as well as the increment (`hungerPaused`); caught by a 500-tick probe driving the real `updateGame()`. |
+> | 2 MED — `food2` multiplier dead behind `||` | **Fixed** | Multiplier wraps the whole expression. Now covered by a behavioural assertion (30 vs 15). |
+> | 3 MED — help overlay column 2 clipped | **Fixed (differently)** | The hardcoded offset was replaced by `fillTextClipped()`, which measures at draw time. Hardcoding another offset would have re-broken in any other font build — this one is 132.7px wide, the reviewer's 149.1px. Verified zero overflow at 1.0x/1.15x/1.35x font widths. |
+> | 4 MED — rescue reported as a cause of death | **Fixed** | Causes are written after the saves; Time Attack sets `Time's up!`. |
+> | 5 LOW — `activeResonance` derived pre-restore | **Fixed** | Moved below the mutator restore. |
+> | 6 LOW — Ethereal misses the last ghost tick | **Fixed** | The window decays at the start of each later tick, so it reads 3/2/1. |
+> | advisory — `rivalShrink`/`rapidDoom` untested | **Fixed** | Both now have behavioural tests (drive the real `updateRival`/`updateGame`, with no-resonance control runs). |
+> | advisory — `toastCurrentMessage` missing | **Fixed** | Implemented via `scheduleToastHide`. |
+> | advisory — no chaosCycle HUD marker | **Fixed** | `[GRAVITY]`/`[MIRROR]`/`[PHASE_SHIFT]` suffix. |
+> | advisory — help geometry contradicts the plan | **Fixed** | Two columns at 14px pitch is what ships; AGENTS.md and the plan corrected to match. |
+> | advisory — `blurb` dead | **Fixed** | Removed. |
+>
+> **Corrections to this document's own body:** it says "42 assertions" — the suite was 43
+> at `9dabb25` and is 45 after the fixes above. Its claim that `toastCurrentMessage` was
+> unimplemented was wrong at the time of writing (it shipped at `snake.html:7965`).
+>
+> **Everything else below was re-verified as correct and needs no change.**
+
+
 **Scope reviewed:** `git diff` of `snake.html` (818 changed lines) and `AGENTS.md` (67), read hunk by hunk and re-verified against the file; `test-v12.mjs` (791 lines, 42 assertions, `node test-v12.mjs` → 42 passed / 0 failed).
 
 **Method.** Besides reading, three runtime probes against the real page were used, and every claim below is reproduced by one of them:

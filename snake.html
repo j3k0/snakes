@@ -895,7 +895,7 @@ const MUTATOR_DEFS = {
 // and invertControls only flashed a white overlay without inverting anything). A synergy
 // the HUD names must be a mechanic that runs.
 var RESONANCES = {
-    'gravity~mirror': { name: 'Quantum', desc: 'Left/Right and Up/Down controls swap for 5 ticks, every 10-15', effect: 'invertControls' },
+    'gravity~mirror': { name: 'Quantum', desc: 'Left/Right and Up/Down swap for 5 ticks, then 10-15 off', effect: 'invertControls' },
     'phase_shift~hunger_clock': { name: 'Ethereal', desc: 'Phase-shift ticks pause hunger; self-collision is ignored on 3 of every 5 ticks', effect: 'intangiblePhase' },
     'golden_food~chaos_seed': { name: 'Chaos Gold', desc: 'Food gives 2x points and 2x XP, and types reshuffle twice as often', effect: 'doubleGold' },
     'shrink_zone~double_rival': { name: 'Pressure Cooker', desc: 'Rivals also trigger board shrinking', effect: 'rivalShrink' },
@@ -3711,7 +3711,12 @@ const TRAIL_RENDER_CONFIG = {
                     ? '＋' + (recapData.score - recapData.prevBest) + ' vs best'
                     : (recapData.prevBest > 0 ? '−' + (recapData.prevBest - recapData.score) + ' vs best' : '');
             }
-            var hasCascade = !recapData.isZen && recapData.cascadeMult < 1;
+            // v12 C: gate on the FACTOR, not on the mode. gameOver() applies the cascade
+            // on a Zen death too (Zen is draftable), so keying this on !isZen hid the row
+            // in exactly the case that needed it: a Zen starvation death with 2+ mutators
+            // halved the length score and the card showed no explanation. endZenSession()
+            // forces the factor to 1, so a manual Zen quit still shows no row.
+            var hasCascade = recapData.cascadeMult < 1;
             var hasCause = !!recapData.deathCause;
             var hasSave = !!recapData.saveEvent;
             var questRows = recapData.questDeltas.length;
@@ -4507,6 +4512,29 @@ const TRAIL_RENDER_CONFIG = {
             { keys: 'L',           desc: 'Food Legend' },
         ];
 
+        // v12 D: draw text, truncating with an ellipsis so it can never run past maxX.
+        //
+        // The help overlay used to rely on hardcoded column offsets, and canvas text
+        // metrics are environment-dependent: 'Cycle combo-bank mode' measures 132.7px in
+        // one Chromium build and 149.1px in another, so the same offset fits in one and
+        // clips mid-glyph in the other. Measuring at draw time is the only layout that
+        // holds everywhere. A visible ellipsis is honest; a glyph chopped at the canvas
+        // edge reads as a rendering bug.
+        function fillTextClipped(text, x, y, maxX) {
+            var avail = maxX - x;
+            if (avail <= 0) return;
+            if (ctx.measureText(text).width <= avail) { ctx.fillText(text, x, y); return; }
+            var ell = '\u2026';
+            // Longest prefix (plus the ellipsis) that fits — bisection, ~log2(len) measures.
+            var lo = 0, hi = text.length;
+            while (lo < hi) {
+                var mid = (lo + hi + 1) >> 1;
+                if (ctx.measureText(text.slice(0, mid) + ell).width <= avail) lo = mid;
+                else hi = mid - 1;
+            }
+            ctx.fillText(lo > 0 ? text.slice(0, lo) + ell : ell, x, y);
+        }
+
         function drawHelpOverlay() {
             ctx.save();
             ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
@@ -4534,13 +4562,13 @@ const TRAIL_RENDER_CONFIG = {
                 const x = col === 0 ? 20 : 235;
                 const y = controlY + 20 + row * 14;
                 ctx.fillStyle = '#FFD700';
-                ctx.fillText(b.keys, x, y);
+                fillTextClipped(b.keys, x, y, x + 90);
                 ctx.fillStyle = '#AAA';
-                // Column 2 is pulled in: at x+92 the two longest descriptions
-                // ('Cycle combo-bank mode', 'Spend combo charge') ended at 460/441 px
-                // on a 440 px canvas and were clipped. Two columns keep the mode list
-                // clear of the footer; a single 25-row column would push it off-screen.
-                ctx.fillText(b.desc, x + (col === 0 ? 92 : 67), y);
+                // Column 1 stops before column 2 starts; column 2 stops before the edge.
+                // Both are measured at draw time (see fillTextClipped) so no offset
+                // hardcodes a fit that a different font environment would break.
+                fillTextClipped(b.desc, x + (col === 0 ? 92 : 67), y,
+                                col === 0 ? 232 : CANVAS_WIDTH - 6);
             });
 
             // --- Food Tiers: derived from FOOD_TIERS, two columns of 4 ---
@@ -4576,7 +4604,11 @@ const TRAIL_RENDER_CONFIG = {
                 const y = modeY + 20 + i * 16;
                 ctx.fillStyle = gameMode === mode ? '#FFD700' : '#CCC';
                 ctx.font = gameMode === mode ? 'bold 11px Arial' : '11px Arial';
-                ctx.fillText(MODE_CONFIG[mode].name + ': ' + getModeDesc(mode), 20, y);
+                // The two longest descriptions ('painter', 'gauntlet') are full sentences
+                // that overflow a 440px line at this size. Ellipsised rather than clipped
+                // mid-glyph; the full text stays in getModeDesc() for the screen reader
+                // and the mode-select screen.
+                fillTextClipped(MODE_CONFIG[mode].name + ': ' + getModeDesc(mode), 20, y, CANVAS_WIDTH - 6);
             });
 
             // Footer

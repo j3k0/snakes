@@ -244,9 +244,13 @@ try {
         for (let i = 0; i <= 499; i++) {
           gameTick = i;
           // Keep food out of the head's lane so growth can't extend the trail past the
-          // board width and cause a self-collision.
+          // board width and cause a self-collision, and clear the obstacle/hazard layers
+          // every tick — Classic spawns progressive obstacles every 200 ticks, which
+          // otherwise kill the probe partway through and make this assertion flaky.
           food = { x: (snake[0].x + 200) % 400, y: (snake[0].y + 200) % 400, type: 'common', spawnTime: 0 };
+          obstacles = []; hazards = []; activeBounty = null;
           updateGame();
+          obstacles = []; hazards = [];
           if (gameState !== 'playing') return { died: true, at: i, cause: lastDeathCause };
           if (intangibleWindowTicks > 0) ghostTicks++;
           if (snake.length < prevLen) lossTicks.push(i);
@@ -379,16 +383,81 @@ try {
     else fail_('A: Schrodinger mirror suspension', JSON.stringify(r));
 } catch (e) { fail_('A: Schrodinger mirror suspension', e.message); }
 
-// A14: Pressure Cooker — a rival eat advances the shrink zone (the call site the
-// file's own comment admitted was never wired).
+// A14: Pressure Cooker — a rival eat advances the shrink zone. BEHAVIOURAL: drive
+// updateRival with a rival standing on the food and assert the board actually shrinks,
+// with a no-resonance control run that must not move. The previous version of this
+// assertion was a source substring check — precisely the call-site-only acceptance the
+// implementation plan prohibited, and it would have stayed green if the call were
+// unreachable.
 try {
-    const r = await page.evaluate(() => {
-        const src = updateRival.toString();
-        return { wired: src.includes('advanceShrinkZone') && src.includes('resonanceActive') };
-    });
-    if (r.wired) ok('A (source): updateRival wires the Pressure Cooker rival-shrink call');
-    else fail_('A: Pressure Cooker wiring', 'advanceShrinkZone not called from updateRival');
-} catch (e) { fail_('A: Pressure Cooker wiring', e.message); }
+    const r = await page.evaluate(`(() => {
+        ${RESET}
+        // Park a rival on the food and let it eat. The rival only eats the single global
+        // food, so the food is placed directly on its next tile.
+        const rivalEats = (mutators) => {
+          cleanRun(mutators);
+          shrinkCols = 0; shrinkRows = 0;
+          rivals = [{ snake: [{ x: 100, y: 100 }, { x: 80, y: 100 }], dx: 20, dy: 0,
+                      active: true, respawnTimer: 0, color: '#FF4444' }];
+          // Food one step ahead of the rival head so the move lands on it.
+          food = { x: 120, y: 100, type: 'common', spawnTime: 0 };
+          // Force the "move toward food" branch deterministically.
+          seedPrng = mulberry32(hashString('rivalshrink'));
+          const before = shrinkCols + shrinkRows;
+          for (let i = 0; i < 6 && (shrinkCols + shrinkRows) === before; i++) updateRival(0);
+          return { before, after: shrinkCols + shrinkRows };
+        };
+        const withRes = rivalEats(['shrink_zone','double_rival']);
+        const without = rivalEats(['shrink_zone']);
+        return { withRes, without };
+    })()`);
+    const fires = r.withRes.after > r.withRes.before;
+    const control = r.without.after === r.without.before;
+    if (fires && control) {
+        ok('A: Pressure Cooker — a rival eat shrinks the board (control run does not)');
+    } else fail_('A: Pressure Cooker behaviour',
+                 JSON.stringify(r) + ' (expected the resonance run to shrink and the control not to)');
+} catch (e) { fail_('A: Pressure Cooker behaviour', e.message); }
+
+// A14b: Apocalypse (rapidDoom) — every hunger pop also shrinks the board, and the
+// shrink's death contract still propagates. Driven through the real updateGame().
+try {
+    const r = await page.evaluate(`(() => {
+        ${RESET}
+        const runHungerPops = (mutators, parkOnBoundary) => {
+          cleanRun(mutators);
+          shrinkCols = 0; shrinkRows = 0;
+          hungerStarted = true; hungerTickCounter = 0;
+          // 40 segments = 800px of trail, so the run self-collides on the first move
+          // and would mask the hunger path. Keep it short and park far from the wall.
+          snake = [{ x: 40, y: 40 }, { x: 20, y: 40 }];
+          dx = 20; dy = 0;
+          let shrunkAt = [];
+          const before = shrinkCols + shrinkRows;
+          for (let i = 1; i <= 60; i++) {
+            gameTick = i;
+            // Keep food out of the head's lane so growth cannot extend the trail.
+            food = { x: (snake[0].x + 240) % 400, y: (snake[0].y + 200) % 400, type: 'common', spawnTime: 0 };
+            obstacles = []; hazards = []; activeBounty = null;
+            updateGame();
+            obstacles = []; hazards = [];
+            if (gameState !== 'playing') return { died: true, at: i, cause: lastDeathCause };
+            if ((shrinkCols + shrinkRows) > before) shrunkAt.push(i);
+          }
+          return { died: false, before, after: shrinkCols + shrinkRows, shrunkAt };
+        };
+        // hunger interval is 50 ('hunger_clock' alone), so one pop lands in 60 ticks.
+        const plain = runHungerPops(['hunger_clock'], false);
+        const apoc = runHungerPops(['golden_food','hunger_clock','shrink_zone'], false);
+        return { plain, apoc };
+    })()`);
+    // rapidDoom shrinks on the hunger pop; a plain hunger_clock run does not.
+    const apocShrinks = !r.apoc.died && r.apoc.after > r.apoc.before;
+    const plainControl = !r.plain.died && r.plain.after === r.plain.before;
+    if (apocShrinks && plainControl) {
+        ok('A: Apocalypse — each hunger pop shrinks the board (control run does not)');
+    } else fail_('A: Apocalypse behaviour', JSON.stringify(r));
+} catch (e) { fail_('A: Apocalypse behaviour', e.message); }
 
 // A15: a pre-v12 snapshot still restores (additive fields only, no version bump).
 try {
@@ -584,6 +653,47 @@ try {
     if (cascadeOk && zenOk) ok('C: cascade shows raw->final; Zen reports no cascade and an explicit cause');
     else fail_('C: cascade disclosure', JSON.stringify(r));
 } catch (e) { fail_('C: cascade disclosure', e.message); }
+
+// C4b: a Zen DEATH with 2+ drafted mutators halves the length score and must disclose
+// it. gameOver() applies the cascade on the Zen death path too, so gating the row on
+// !isZen hid the explanation in exactly the case that needed it. This captures the
+// strings the card actually draws.
+try {
+    const r = await page.evaluate(`(() => {
+        ${RESET}
+        const drawn = [];
+        const orig = ctx.fillText.bind(ctx);
+        ctx.fillText = function (t, x, y) { drawn.push(String(t)); return orig(t, x, y); };
+        // (a) Zen starvation death with two mutators
+        gameMode = 'zen'; resetGame(); startGame(); stopGameLoop();
+        activeMutators = ['hunger_clock','gravity'];
+        snake = [{ x: 100, y: 100 }];
+        score = 7;                       // a length score that the cascade will halve
+        lastDeathCause = 'Starvation!';
+        gameOver();
+        const deathData = { raw: recapData.rawScore, mult: recapData.cascadeMult };
+        drawn.length = 0;
+        drawRecapCard();
+        const deathCard = drawn.slice();
+        // (b) Zen manual quit — endZenSession forces the factor to 1, so no row
+        gameMode = 'zen'; resetGame(); startGame(); stopGameLoop();
+        activeMutators = ['hunger_clock','gravity'];
+        snake = [{ x: 20, y: 20 }, { x: 40, y: 20 }];
+        endZenSession();
+        drawn.length = 0;
+        drawRecapCard();
+        const quitCard = drawn.slice();
+        ctx.fillText = orig;
+        return { deathData, deathCard, quitCard,
+                 quitMult: recapData.cascadeMult };
+    })()`);
+    const deathShows = r.deathCard.some(t => /Cascade/i.test(t));
+    const quitHides = !r.quitCard.some(t => /Cascade/i.test(t)) && r.quitMult === 1;
+    const halved = r.deathData.mult < 1;
+    if (deathShows && quitHides && halved) {
+        ok('C: a Zen death discloses the cascade it applied; a Zen quit shows no row');
+    } else fail_('C: Zen cascade disclosure', JSON.stringify(r));
+} catch (e) { fail_('C: Zen cascade disclosure', e.message); }
 
 // C5: the recap card fits its content at every combination (no overprint).
 try {
