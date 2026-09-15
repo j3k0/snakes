@@ -742,7 +742,14 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
+        // v12 A: one-shot onboarding the first time any resonance becomes active.
+        let hasSeenResonance = saveManager.get('snake_has_seen_resonance', '') === '1';
         let lastDeathCause = '';
+        // v12 C: a save (shield/vampire/phoenix/serpentine/streak charge/melt) does NOT
+        // end the run, but the save messages used to be written into lastDeathCause —
+        // so whenever a rescue was the last thing written before the run ended, the
+        // recap card reported the rescue as the cause of death. Split into two fields.
+        let lastSaveEvent = '';
         let lastComboMilestone = 0;
         // v7: Evolution System per-run state (reset in resetGame / resetWaveState)
         let evolutionTier = -1;          // -1 = none; 0..3 = index into EVOLUTION_TIERS
@@ -781,6 +788,11 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let sessionStartTime = 0;
         let sessionFoodEaten = 0;
         let sessionModeHighStart = 0;
+        // v12 C: recap disclosure state. sessionRawScore is the score BEFORE the cascade
+        // multiply; sessionCascadeMult is the factor applied (1 = no cascade). Both are
+        // reset in resetGame/resetWaveState and set at the two session ends.
+        let sessionRawScore = 0;
+        let sessionCascadeMult = 1;
         let sessionFoodTypes = new Set();
         let sessionSpeedFood = 0; // will be used in future achievements
         let sessionBonusFood = 0; // will be used in future achievements
@@ -878,25 +890,152 @@ const MUTATOR_DEFS = {
 };
 
 // v6: Resonance combinations
+// v12 A: every descriptor below describes behaviour that is ACTUALLY IMPLEMENTED.
+// The v6 originals advertised mechanics that did not exist (5 of 8 effects were inert,
+// and invertControls only flashed a white overlay without inverting anything). A synergy
+// the HUD names must be a mechanic that runs.
 var RESONANCES = {
-    'gravity~mirror': { name: 'Quantum', desc: 'Direction inverts randomly every 10-15 ticks', effect: 'invertControls' },
-    'phase_shift~hunger_clock': { name: 'Ethereal', desc: 'Phase-shift ticks pause hunger; snake becomes intangible', effect: 'intangiblePhase' },
-    'golden_food~chaos_seed': { name: 'Chaos Gold', desc: 'All food 2x points and 2x XP, types shuffle', effect: 'doubleGold' },
+    'gravity~mirror': { name: 'Quantum', desc: 'Left/Right and Up/Down controls swap for 5 ticks, every 10-15', effect: 'invertControls' },
+    'phase_shift~hunger_clock': { name: 'Ethereal', desc: 'Phase-shift ticks pause hunger; self-collision is ignored on 3 of every 5 ticks', effect: 'intangiblePhase' },
+    'golden_food~chaos_seed': { name: 'Chaos Gold', desc: 'Food gives 2x points and 2x XP, and types reshuffle twice as often', effect: 'doubleGold' },
     'shrink_zone~double_rival': { name: 'Pressure Cooker', desc: 'Rivals also trigger board shrinking', effect: 'rivalShrink' },
-    'hunger_clock~golden_food': { name: 'Famine Feast', desc: '4x food points but hunger ticks every 30', effect: 'feastFamine' },
-    'mirror~chaos_seed': { name: 'Schrodinger', desc: 'Every 15 ticks: mirror toggles or food reshuffles', effect: 'quantumToggle' },
-    'gravity~mirror~phase_shift': { name: 'Chaos Theory', desc: 'Three effects cycle every 5 ticks', effect: 'chaosCycle' },
-    'golden_food~hunger_clock~shrink_zone': { name: 'Apocalypse', desc: 'Shrink accelerates on each hunger tick', effect: 'rapidDoom' },
+    'hunger_clock~golden_food': { name: 'Famine Feast', desc: 'Food scores 4x (on top of Golden Age) but hunger bites every 30 ticks', effect: 'feastFamine' },
+    'mirror~chaos_seed': { name: 'Schrodinger', desc: 'Every 15 ticks: mirror controls stop working, or food types reshuffle', effect: 'quantumToggle' },
+    'gravity~mirror~phase_shift': { name: 'Chaos Theory', desc: 'Gravity, Mirror and Phase Shift take turns, one live per 5 ticks', effect: 'chaosCycle' },
+    'golden_food~hunger_clock~shrink_zone': { name: 'Apocalypse', desc: 'Every hunger tick also shrinks the board', effect: 'rapidDoom' },
 };
 var activeResonance = null;
 var cascadeMode = false;
 var cascadeUnlocked = saveManager.get('snake_cascade_unlocked', '') === 'true';
 
 // v6: Resonance detection and cascade multiplier
+// v12 A CRITICAL FIX: RESONANCES is authored in hand-written order, but detection
+// sorts the drafted mutators before joining them. 5 of the 8 keys were therefore
+// UNREACHABLE — e.g. the table holds 'golden_food~chaos_seed' while a lookup of those
+// two mutators builds 'chaos_seed~golden_food'. Only the 3 keys that happened to be
+// written in sorted order (gravity~mirror, gravity~mirror~phase_shift,
+// golden_food~hunger_clock~shrink_zone) could ever match, and none of those three had a
+// working effect either — so NO resonance ever did anything. Canonicalising the table
+// once at load makes the authored order irrelevant.
+var RESONANCE_BY_KEY = (function () {
+    var map = {};
+    for (var k in RESONANCES) {
+        if (!Object.prototype.hasOwnProperty.call(RESONANCES, k)) continue;
+        var canonical = k.split('~').sort().join('~');
+        map[canonical] = RESONANCES[k];
+    }
+    return map;
+})();
+
 function detectResonance(mutators) {
     var sorted = mutators.slice().sort();
     var key = sorted.join('~');
-    return RESONANCES[key] || null;
+    return RESONANCE_BY_KEY[key] || null;
+}
+
+// v12 A: Resonance implementation. Before v12 only `invertControls` (a white
+// flash) and `feastFamine` (an empty if) had ANY code; the other six effects were
+// detected, named in the HUD, and did nothing.
+//
+// CRITICAL: `resonanceActive()` exists because the mutator blocks that consume
+// resonance state (hunger at ~L6650) execute ABOVE the tick's resonance
+// recomputation. Using the `activeResonance` global there would read the PREVIOUS
+// tick's value; any cadence state stored on the resonance object itself would be
+// reset on every recomputation (~8x/second). All cadence state lives in the
+// module counters below, and readers derive from `activeMutators` via the same
+// sorted-key match `detectResonance` uses.
+function resonanceActive(effect) {
+    var r = detectResonance(activeMutators);
+    return !!r && r.effect === effect;
+}
+
+// Cadence counters. Because a resonance's effect is exact-key matched, at most one
+// resonance is ever active, but these are kept independent anyway.
+let intangibleWindowTicks = 0;  // intangiblePhase: self-exemption window
+let resonanceInvertTicks = 0;   // invertControls: remaining inverted ticks
+let resonanceInvertCooldown = 0; // invertControls: ticks until the next window
+let resonanceToggleTick = 0;    // quantumToggle: 15-tick alternator
+let resonanceMirrorSuspended = 0; // quantumToggle: mirror off for N ticks
+let chaosCycleIndex = 0;        // chaosCycle: which sub-effect is live
+
+// v12 A: food-award multiplier for the two score resonances. Applied at the FOOD
+// AWARD SITES, never inside addScore — addScore also serves bounties, quests,
+// achievements, the survival drip and the session-end bonus, and the descriptors
+// promise "food" points/XP specifically. Note golden_food's own x3 is applied to
+// `amount` inside addScore BEFORE the Math.min(totalMult,4) cap, so the cap does
+// not bound this multiplier — the food site is the correct seam.
+function foodResonanceMult() {
+    if (resonanceActive('doubleGold')) return 2;
+    if (resonanceActive('feastFamine')) return 4;
+    return 1;
+}
+
+// v12 A: feastFamine shortens the hunger pop interval from 50 to 30 ticks.
+function hungerInterval() {
+    return resonanceActive('feastFamine') ? 30 : 50;
+}
+
+// v12 A: chaosCycle rotates gravity / mirror / phase_shift through 5-tick windows.
+// Written as an ADDITIVE gate — `mutator is on AND the cycle allows it` — never as
+// a replacement of the mutator checks, so a player who drafted a SUBSET of those
+// three can never be affected (and cannot enter this branch at all: the resonance
+// keys on the sorted full set).
+var CHAOS_CYCLE_EFFECTS = ['gravity', 'mirror', 'phase_shift'];
+function chaosCycleAllows(name) {
+    if (!resonanceActive('chaosCycle')) return true;
+    return CHAOS_CYCLE_EFFECTS[chaosCycleIndex % CHAOS_CYCLE_EFFECTS.length] === name;
+}
+
+// v12 A: per-tick resonance cadence. Called from the tick loop where the old
+// inline resonance block used to be.
+function tickResonance() {
+    activeResonance = detectResonance(activeMutators);
+    if (!activeResonance) {
+        resonanceInvertTicks = 0;
+        resonanceInvertCooldown = 0;
+        resonanceMirrorSuspended = 0;
+        return;
+    }
+    // v12 A: one-shot onboarding the first time a resonance goes live (mirrors the
+    // hasSeenPortal / hasSeenBomb / hasSeenComboBank pattern).
+    if (!hasSeenResonance) {
+        hasSeenResonance = true;
+        saveManager.set('snake_has_seen_resonance', '1');
+        queueToast('✦ ' + activeResonance.name + ': ' + activeResonance.desc, 5000, 'normal');
+    }
+    var eff = activeResonance.effect;
+    if (eff === 'invertControls') {
+        if (resonanceInvertTicks > 0) {
+            resonanceInvertTicks--;
+        } else if (resonanceInvertCooldown > 0) {
+            resonanceInvertCooldown--;
+        } else {
+            // Deterministic cadence (was Math.random, which broke seeded runs).
+            resonanceInvertTicks = 5;
+            resonanceInvertCooldown = 10 + Math.floor(seededRandom() * 6);
+            flashOverlay = { color: '#FFFFFF', alpha: 0.2, priority: 'normal' };
+            queueGameEffect('flash', { color: '#FFFFFF', alpha: 0.2, priority: 'normal' });
+            spawnFloater(PLAY_WIDTH / 2, PLAY_HEIGHT / 2, 'AXES SWAPPED!', '#FFFFFF', 20, 1.0);
+        }
+    }
+    if (eff === 'chaosCycle' && gameTick > 0 && gameTick % 5 === 0) {
+        chaosCycleIndex = (chaosCycleIndex + 1) % CHAOS_CYCLE_EFFECTS.length;
+    }
+    if (eff === 'quantumToggle' && gameTick > 0 && gameTick % 15 === 0) {
+        resonanceToggleTick = (resonanceToggleTick + 1) % 2;
+        if (resonanceToggleTick === 0) {
+            // Suspend the mirror flip for 5 ticks — reads as "controls un-reverse".
+            resonanceMirrorSuspended = 5;
+            spawnFloater(PLAY_WIDTH / 2, PLAY_HEIGHT / 2, 'MIRROR OFF', '#CC88FF', 20, 1.0);
+        } else {
+            // Real reassignment. A bare shuffleFoodWeights() call mutates nothing
+            // (it RETURNS a fresh map) and would be silently inert.
+            chaosCurrentWeights = shuffleFoodWeights();
+            chaosShuffleTick = gameTick;
+            spawnFloater(PLAY_WIDTH / 2, PLAY_HEIGHT / 2, 'TYPES SHUFFLED', '#CC88FF', 20, 1.0);
+        }
+    }
+    if (resonanceMirrorSuspended > 0) resonanceMirrorSuspended--;
 }
 
 function getCascadeMultiplier(count) {
@@ -1080,6 +1219,15 @@ let padChangeTick = 0;
 
         let toastQueue = [];
         let toastActive = false;
+        // v12 E: toast pipeline integrity — bounded, prioritised, and cleared between
+        // runs. `toastGeneration` invalidates the in-flight hide timer when the queue
+        // is cleared (the timer handle itself is not kept, so it cannot be cancelled).
+        let toastGeneration = 0;
+        let toastCurrentMessage = '';
+        let toastCurrentDuration = 0;
+        let toastTimerHandle = null;
+        const TOAST_QUEUE_CAP = 20;
+        const TOAST_PRIORITY = { low: 0, normal: 1, high: 2 };
 
         let cachedLevel = -1;
         let cachedXpForThisLevel = 0;
@@ -1288,18 +1436,20 @@ let padChangeTick = 0;
         const FOOD_TIERS = {
             // v8 E: weights rebalanced to sum 0.95 so hunter (0.05) reaches [0.95,1.00).
             // common 0.40→0.37, bonus 0.15→0.13. pickRandomFoodType has no normalization.
-            common:   { pts: 10, xp: 25, weight: 0.33, color: '#FF4444', pCount: 8,  sound: 'eat' },
-            uncommon: { pts: 15, xp: 30, weight: 0.25, color: '#4488FF', pCount: 10, sound: 'eat' },
-            rare:     { pts: 20, xp: 40, weight: 0.12, color: '#44FF44', pCount: 14, sound: 'eat', glow: 8 },
-            epic:     { pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14, portal: true },
-            bonus:    { pts: 30, xp: 60, weight: 0.13, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
-            speed:    { pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed' },
+            // v12 D: shortName is the help-overlay label; weight/colour/points are the
+            // single source both the help overlay and the L legend render from.
+            common:   { shortName: 'Common',   pts: 10, xp: 25, weight: 0.33, color: '#FF4444', pCount: 8,  sound: 'eat' },
+            uncommon: { shortName: 'Uncommon', pts: 15, xp: 30, weight: 0.25, color: '#4488FF', pCount: 10, sound: 'eat' },
+            rare:     { shortName: 'Rare',     pts: 20, xp: 40, weight: 0.12, color: '#44FF44', pCount: 14, sound: 'eat', glow: 8 },
+            epic:     { shortName: 'Epic',     pts: 50, xp: 70, weight: 0.03, color: '#AA44FF', pCount: 18, sound: 'bonus', glow: 14, portal: true },
+            bonus:    { shortName: 'Bonus',    pts: 30, xp: 60, weight: 0.13, color: '#FFD700', pCount: 12, sound: 'bonus', pulse: true },
+            speed:    { shortName: 'Speed',    pts: 5,  xp: 40, weight: 0.05, color: '#00FFFF', pCount: 10, sound: 'speed', legendNote: '(speed!)' },
             // v8 E: hunter — fleeing prey, moves every 3 ticks away from the head.
             // Excluded in Walled mode (non-wrapping flee bias) and from magnet pull.
-            hunter:   { pts: 50, xp: 60, weight: 0.05, color: '#FFAA00', pCount: 18, sound: 'eat', glow: 10, hunter: true },
+            hunter:   { shortName: 'Hunter',   pts: 50, xp: 60, weight: 0.05, color: '#FFAA00', pCount: 18, sound: 'eat', glow: 10, hunter: true, legendNote: '(fleeing!)' },
             // v10 B: bomb — tactical food, 0 score/XP. Blasts obstacles + trims rival.
             // Excluded in Walled mode (obstacles disabled), skipped by magnet + echo-brew.
-            bomb:     { pts: 0,  xp: 0,  weight: 0.04, color: '#FF6600', pCount: 16, sound: 'bonus', glow: 12 },
+            bomb:     { shortName: 'Bomb',     pts: 0,  xp: 0,  weight: 0.04, color: '#FF6600', pCount: 16, sound: 'bonus', glow: 12, legendNote: '(clears obstacles!)' },
         };
 
 const COMBO_MILESTONES = [3, 5, 7, 10, 15, 20, 30, 50];
@@ -2006,7 +2156,7 @@ const TRAIL_RENDER_CONFIG = {
                     if (!hasSeenPortal) {
                         hasSeenPortal = true;
                         saveManager.set('snake_has_seen_portal', '1');
-                        queueToast('🌀 Portal food! Eat to teleport to its twin.', 3000);
+                        queueToast('🌀 Portal food! Eat to teleport to its twin.', 3000, 'low');
                     }
                 }
             }
@@ -2109,12 +2259,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (!calmModeEffective()) spawnParticles(snake[0].x, snake[0].y, 12, config.color || '#FFFFFF');
             }
             
-            const el = toastEl;
-            if (el) {
-                el.textContent = '⚡ ' + config.name + ' Activated!';
-                el.style.display = 'block';
-                setTimeout(function() { el.style.display = 'none'; }, 2000);
-            }
+            // v12 E: was a direct toastEl write with its own timer — it corrupted any
+            // in-flight queued toast. Route through the queue like everything else.
+            queueToast('⚡ ' + config.name + ' Activated!', 2000, 'high');
         }
 
         function deactivatePowerUp(silent) {
@@ -2135,9 +2282,23 @@ const TRAIL_RENDER_CONFIG = {
         function resetGame() {
             helpOverlayVisible = false;
             lastDeathCause = '';
+            lastSaveEvent = '';
+            // v12 C: pre-cascade score + factor. gameOver() overwrites `score` with the
+            // cascaded value, so the raw score must be captured there — score/0.5 cannot
+            // recover it (the Math.floor loss is unrecoverable and wrong for odd scores).
+            sessionRawScore = 0;
+            sessionCascadeMult = 1;
             lastComboMilestone = 0;
             comboCount = 0;
             comboCharges = 0;
+            // v12 A: resonance cadence counters — per-run state.
+            intangibleWindowTicks = 0;
+            resonanceInvertTicks = 0;
+            resonanceInvertCooldown = 0;
+            resonanceToggleTick = 0;
+            resonanceMirrorSuspended = 0;
+            chaosCycleIndex = 0;
+            activeResonance = null;
             comboBankSpendMode = 0;
             hazardChainStreak = 0; // v11 A
             evolutionTier = -1;
@@ -2145,6 +2306,10 @@ const TRAIL_RENDER_CONFIG = {
             // v8 D: clear recap state so the idle screen never shows a stale recap.
             recapData = null;
             recapQuestBaseline = null;
+            // v12 E: a single gameOver() can queue ~22s of toasts from six systems
+            // (achievement, level-up, quest, cosmetic, meta-achievement, daily). Without
+            // this, they bleed into the next run and draw over a live board.
+            clearToasts();
             sessionFoodEaten = 0;
             sessionFoodTypes = new Set();
             // v8 F: clear bounty state for a fresh run.
@@ -2364,12 +2529,7 @@ const TRAIL_RENDER_CONFIG = {
             srSpeak('Game started. Mode: ' + gameMode);
             if (gameMode === 'daily') {
                 if (dailyAttempts <= 0) {
-                    const el = toastEl;
-                    if (el) {
-                        el.textContent = 'No attempts remaining! Come back tomorrow.';
-                        el.style.display = 'block';
-                        setTimeout(function() { el.style.display = 'none'; }, 3000);
-                    }
+                    queueToast('No attempts remaining! Come back tomorrow.', 3000, 'high');
                     return;
                 }
                 dailyAttempts--;
@@ -2530,10 +2690,27 @@ const TRAIL_RENDER_CONFIG = {
         // length by 1 so at most one tier boundary crosses per call, but the loop
         // is robust to multi-tier jumps (e.g. Echo brew food2 stacking).
         function triggerEvolutionIfReady() {
+            // v12 F: a multi-tier jump (e.g. an Echo-brew food2 stack) must bank at most
+            // ONE charge, so the tier is sampled before the loop, not inside it.
+            var tierBefore = evolutionTier;
             while (evolutionTier < EVOLUTION_TIERS.length - 1 &&
                    snake.length >= EVOLUTION_TIERS[evolutionTier + 1].length) {
                 evolveSnake(evolutionTier + 1);
             }
+            if (evolutionTier >= 2 && tierBefore < 2) bankComboCharge('Titan');
+        }
+
+        // v12 F: Risk Income — the single charge-banking site, capped at 5. `source` is
+        // recorded for the first-time onboarding toast only (the HUD shows a count).
+        function bankComboCharge(source) {
+            if (comboCharges >= 5) return false;
+            comboCharges++;
+            if (!hasSeenComboBank) {
+                hasSeenComboBank = true;
+                saveManager.set('snake_has_seen_combo_bank', '1');
+                queueToast('⚡ Combo Charge banked! Press X to cycle, Z to spend.', 3000, 'low');
+            }
+            return true;
         }
 
         function wrapPosition(pos) {
@@ -2681,6 +2858,13 @@ const TRAIL_RENDER_CONFIG = {
                 comboCharges: comboCharges,
                 comboBankSpendMode: comboBankSpendMode,
                 hazardChainStreak: hazardChainStreak, // v11 A
+                // v12 A: resonance cadence counters (additive; no SNAPSHOT_VERSION bump)
+                intangibleWindowTicks: intangibleWindowTicks,
+                resonanceInvertTicks: resonanceInvertTicks,
+                resonanceInvertCooldown: resonanceInvertCooldown,
+                resonanceToggleTick: resonanceToggleTick,
+                resonanceMirrorSuspended: resonanceMirrorSuspended,
+                chaosCycleIndex: chaosCycleIndex,
                 lastEatTime: lastEatTime,
                 // Speed
                 speedBoostCounter: speedBoostCounter,
@@ -2847,6 +3031,14 @@ const TRAIL_RENDER_CONFIG = {
                 comboCharges = data.comboCharges || 0;
                 comboBankSpendMode = data.comboBankSpendMode || 0;
                 hazardChainStreak = data.hazardChainStreak || 0; // v11 A
+                // v12 A: resonance cadence counters — additive, default safely so a
+                // pre-v12 snapshot still restores.
+                intangibleWindowTicks = data.intangibleWindowTicks || 0;
+                resonanceInvertTicks = data.resonanceInvertTicks || 0;
+                resonanceInvertCooldown = data.resonanceInvertCooldown || 0;
+                resonanceToggleTick = data.resonanceToggleTick || 0;
+                resonanceMirrorSuspended = data.resonanceMirrorSuspended || 0;
+                chaosCycleIndex = data.chaosCycleIndex || 0;
                 streakCharges = saveManager.getInt('snake_streak_charges', 0); // v11 E: re-read from saveManager, not snapshot
                 // Rebase the combo window by the offline gap so a save/resume (or
                 // long pause) doesn't silently kill an active combo.
@@ -2867,6 +3059,10 @@ const TRAIL_RENDER_CONFIG = {
                 slowMoActive = !!data.slowMoActive;
                 rivals = (data.rivals || []).map(function (r) { return { snake: (r.snake || []).map(function (s) { return { x: s.x, y: s.y }; }), dx: r.dx, dy: r.dy, active: !!r.active, respawnTimer: r.respawnTimer || 0, color: r.color || '#FF4444' }; });
                 activeMutators = (data.activeMutators || []).slice();
+                // v12 A: derived AFTER the mutator restore — computing it in the
+                // counter block above read the PRE-restore mutators, so the HUD
+                // resonance label was missing until the first tick repaired it.
+                activeResonance = detectResonance(activeMutators);
                 activeBrews = (data.activeBrews || []).slice();
                 brewUsageFlags = Object.assign({}, data.brewUsageFlags || {});
                 evolutionTier = (data.evolutionTier == null) ? -1 : data.evolutionTier;
@@ -3227,6 +3423,18 @@ const TRAIL_RENDER_CONFIG = {
                 } else {
                     food = null;
                 }
+                // v12 A: Pressure Cooker resonance (rivalShrink) — a rival eating also
+                // shrinks the board. advanceShrinkZone() tests the PLAYER's head, so a
+                // rival's meal can kill the player; that is what the descriptor promises.
+                // Must honour its death return: the caller's tick-tail guard
+                // (`if (gameState !== 'playing') return;`) handles the propagation, and
+                // it is only reached between rivals, not inside this loop.
+                if (resonanceActive('rivalShrink')) {
+                    if (advanceShrinkZone()) {
+                        gameOver();
+                        return;
+                    }
+                }
             }
 
             if (snake.length > 0) {
@@ -3316,9 +3524,14 @@ const TRAIL_RENDER_CONFIG = {
             // "Resume Run" button doesn't offer a dead run.
             clearSnapshot();
             if (shieldActive) sessionUsedShield = true;
+            // v12 C: capture the RAW score before the cascade multiply below destroys it,
+            // so the recap card can show the arithmetic instead of silently halving.
+            sessionRawScore = score;
+            sessionCascadeMult = 1;
             // v6: Cascade score multiplier
             if (activeMutators.length > 1) {
                 var cascMult = getCascadeMultiplier(activeMutators.length);
+                sessionCascadeMult = cascMult;
                 score = Math.floor(score * cascMult);
             }
             saveReplay(score, snake.length);
@@ -3394,7 +3607,16 @@ const TRAIL_RENDER_CONFIG = {
             stopGameLoop();
             gameState = 'gameover';
             clearSnapshot();
+            // v12 C: Zen never applies the cascade multiplier — it funnels through
+            // finalizeSession(true) after score = snake.length. Without an explicit
+            // factor here, buildRecapData would derive one from the drafted mutator
+            // count and render a false "Cascade ×0.5" row on a score never halved.
+            // The cause is set explicitly too: endZenSession writes nothing, so the card
+            // would otherwise report whatever rescue event last touched the run.
+            sessionCascadeMult = 1;
+            lastDeathCause = 'Zen session ended.';
             score = snake.length;
+            sessionRawScore = score;
             finalizeSession(true);
             saveReplay(score, snake.length);
             updateMenuFooter();
@@ -3461,14 +3683,49 @@ const TRAIL_RENDER_CONFIG = {
                 isNewBest: isNewBest,
                 xpEarned: sessionXP || 0,
                 evolutionTier: tierName,
-                questDeltas: questDeltas.slice(0, 3)
+                questDeltas: questDeltas.slice(0, 3),
+                // v12 C: what killed you, the last save (if any), and the cascade
+                // arithmetic. lastDeathCause was ALWAYS tracked but only ever rendered on
+                // the gauntlet and legacy-overlay paths — every non-gauntlet death since
+                // v8 D takes this card, so the single most-asked question after a death
+                // went unanswered on the screen where it matters.
+                deathCause: lastDeathCause || '',
+                saveEvent: lastSaveEvent || '',
+                rawScore: sessionRawScore,
+                cascadeMult: sessionCascadeMult
             };
         }
         function drawRecapCard() {
             if (!recapData) return;
             ctx.save();
-            // Card panel
-            var cardW = 320, cardH = 168;
+
+            // v12 C: the card is laid out with a running cursor and a card height derived
+            // from the row count, instead of the previous hard-coded offsets (XP at +80,
+            // quests at +100, prompt at cardH-22). Adding the death-cause, save and
+            // cascade rows to a fixed 168px box would have overprinted the retry prompt.
+            var cardW = 320;
+            var cx = CANVAS_WIDTH / 2;
+            var dashStr = '';
+            if (!recapData.isZen) {
+                dashStr = recapData.isNewBest
+                    ? '＋' + (recapData.score - recapData.prevBest) + ' vs best'
+                    : (recapData.prevBest > 0 ? '−' + (recapData.prevBest - recapData.score) + ' vs best' : '');
+            }
+            var hasCascade = !recapData.isZen && recapData.cascadeMult < 1;
+            var hasCause = !!recapData.deathCause;
+            var hasSave = !!recapData.saveEvent;
+            var questRows = recapData.questDeltas.length;
+
+            // Content height computed from the same row arithmetic used to draw, so the
+            // card can never be sized differently from its contents.
+            var contentH = 10 + 26 + 26                       // top pad, title, score
+                         + (dashStr ? 15 : 0)
+                         + (hasCascade ? 15 : 0)
+                         + (hasCause ? 16 : 0)
+                         + (hasSave ? 15 : 0)
+                         + 17                                 // XP / tier line
+                         + questRows * 14;
+            var cardH = contentH + 26;                        // + retry-prompt row
             var cardX = (CANVAS_WIDTH - cardW) / 2;
             var cardY = CANVAS_HEIGHT / 2 - cardH / 2 + 6;
             ctx.fillStyle = 'rgba(0,0,0,0.88)';
@@ -3478,41 +3735,64 @@ const TRAIL_RENDER_CONFIG = {
             ctx.strokeRect(cardX, cardY, cardW, cardH);
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
+
+            var y = cardY + 10;
             // Title
             ctx.fillStyle = recapData.isNewBest ? '#FFD700' : '#CCC';
             ctx.font = 'bold 18px Arial';
-            ctx.fillText(recapData.isZen ? 'ZEN SESSION ENDED' : (recapData.isNewBest ? '★ NEW BEST! ★' : 'RUN OVER'), CANVAS_WIDTH / 2, cardY + 10);
+            ctx.fillText(recapData.isZen ? 'ZEN SESSION ENDED' : (recapData.isNewBest ? '★ NEW BEST! ★' : 'RUN OVER'), cx, y);
+            y += 26;
             // Score line
             ctx.font = 'bold 22px Arial';
             ctx.fillStyle = '#FFF';
-            var scoreLabel = recapData.isZen ? 'Length: ' + recapData.score : 'Score: ' + recapData.score;
-            ctx.fillText(scoreLabel, CANVAS_WIDTH / 2, cardY + 36);
-            if (!recapData.isZen) {
+            ctx.fillText(recapData.isZen ? 'Length: ' + recapData.score : 'Score: ' + recapData.score, cx, y);
+            y += 26;
+            if (dashStr) {
                 ctx.font = '12px Arial';
                 ctx.fillStyle = recapData.isNewBest ? '#FFD700' : '#888';
-                var deltaStr = recapData.isNewBest ? '＋' + (recapData.score - recapData.prevBest) + ' vs best' : (recapData.prevBest > 0 ? '−' + (recapData.prevBest - recapData.score) + ' vs best' : '');
-                if (deltaStr) ctx.fillText(deltaStr, CANVAS_WIDTH / 2, cardY + 62);
+                ctx.fillText(dashStr, cx, y);
+                y += 15;
+            }
+            // Cascade disclosure — shows the arithmetic the game used to apply silently.
+            if (hasCascade) {
+                ctx.font = '12px Arial';
+                ctx.fillStyle = '#FF8888';
+                ctx.fillText('⚠ Cascade ×' + recapData.cascadeMult + '   ' + recapData.rawScore + ' → ' + recapData.score, cx, y);
+                y += 15;
+            }
+            // Death cause — the question every player asks first.
+            if (hasCause) {
+                ctx.font = 'bold 13px Arial';
+                ctx.fillStyle = '#FF9999';
+                ctx.fillText(recapData.deathCause, cx, y);
+                y += 16;
+            }
+            // Last save — a rescue is not a death; report it separately.
+            if (hasSave) {
+                ctx.font = '12px Arial';
+                ctx.fillStyle = '#88CCFF';
+                ctx.fillText(recapData.saveEvent + ' (survived)', cx, y);
+                y += 15;
             }
             // XP + evolution line
             ctx.font = '13px Arial';
             ctx.fillStyle = '#9B59B6';
             var xpLine = '＋' + recapData.xpEarned + ' XP';
             if (recapData.evolutionTier) xpLine += '  |  Tier: ' + recapData.evolutionTier;
-            ctx.fillText(xpLine, CANVAS_WIDTH / 2, cardY + (recapData.isZen ? 62 : 80));
+            ctx.fillText(xpLine, cx, y);
+            y += 17;
             // Quest progress lines (up to 3)
             ctx.font = '11px Arial';
             ctx.fillStyle = '#44FF88';
-            var qy = cardY + (recapData.isZen ? 82 : 100);
             for (var qi = 0; qi < recapData.questDeltas.length; qi++) {
                 var qd = recapData.questDeltas[qi];
-                var qStr = '▸ ' + qd.desc + ' (+' + qd.delta + (qd.completed ? ' ✓' : '') + ')';
-                ctx.fillText(qStr, CANVAS_WIDTH / 2, qy);
-                qy += 14;
+                ctx.fillText('▸ ' + qd.desc + ' (+' + qd.delta + (qd.completed ? ' ✓' : '') + ')', cx, y);
+                y += 14;
             }
-            // Retry prompt
+            // Retry prompt — anchored to the card bottom, so it follows any card growth.
             ctx.font = '12px Arial';
             ctx.fillStyle = '#888';
-            ctx.fillText('Press ENTER to retry', CANVAS_WIDTH / 2, cardY + cardH - 22);
+            ctx.fillText('Press ENTER to retry', cx, cardY + cardH - 22);
             ctx.restore();
         }
         // v8 F: Bounty Rush — templates and logic.
@@ -3551,7 +3831,7 @@ const TRAIL_RENDER_CONFIG = {
                 ticksLeft: tpl.windowTicks,
                 baseline: { score: score, sessionFoodEaten: sessionFoodEaten, comboCount: comboCount, snakeLen: snake.length, sessionSpeedFood: sessionSpeedFood }
             };
-            queueToast('📋 Bounty: ' + activeBounty.desc, 2500);
+            queueToast('📋 Bounty: ' + activeBounty.desc, 2500, 'high');
         }
         function checkBounty() {
             if (!activeBounty) return;
@@ -3566,7 +3846,9 @@ const TRAIL_RENDER_CONFIG = {
                 if (b.reward.pts) addScore(b.reward.pts);
                 if (b.reward.xp) awardXP(b.reward.xp);
                 queueGameEffect('flash', { color: '#FFD700', alpha: 0.4, priority: 'high' });
-                queueToast('✅ Bounty complete! +' + (b.reward.pts || b.reward.xp) + (b.reward.pts ? ' pts' : ' XP'), 2500);
+                queueToast('✅ Bounty complete! +' + (b.reward.pts || b.reward.xp) + (b.reward.pts ? ' pts' : ' XP'), 2500, 'high');
+                // v12 F: contracts are a danger-priced income source for the combo bank.
+                bankComboCharge('bounty');
                 // v9 F2: cash-in burst at the head
                 if (snake.length > 0) {
                     pushTransientRing(snake[0].x + TILE_SIZE / 2, snake[0].y + TILE_SIZE / 2, 20, '#FFD700', 400, 'ring', 3);
@@ -3646,7 +3928,7 @@ const TRAIL_RENDER_CONFIG = {
                         if (!hasSeenHazard) {
                             hasSeenHazard = true;
                             saveManager.set('snake_has_seen_hazard', '1');
-                            queueToast('⚠ Hazard! Don\'t linger on glowing rifts!', 3000);
+                            queueToast('⚠ Hazard! Don\'t linger on glowing rifts!', 3000, 'high');
                         }
                         break;
                     }
@@ -3689,7 +3971,7 @@ const TRAIL_RENDER_CONFIG = {
                 var hf = generateHoardFood(combined);
                 if (hf) { hf.pigment = true; extraFoods.push(hf); }
             }
-            queueToast('\u26A1 Golden Hoard! 2x score!', 3000);
+            queueToast('\u26A1 Golden Hoard! 2x score!', 3000, 'high');
             queueGameEffect('flash', { color: '#FFD700', alpha: 0.3, priority: 'normal' });
         }
         function endHoard() {
@@ -4050,6 +4332,37 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function setNextDirection(newDx, newDy) {
+            // v12 A: Quantum (invertControls) — while the window is open, swap the axes of
+            // the pressed direction.
+            //
+            // SAFETY is an INPUT-DOMAIN invariant, not an algebraic one: both callers emit
+            // AXIS-ALIGNED unit vectors — the keydown switch builds exactly one non-zero
+            // component, and the swipe handler does the same. The swap of an axis-aligned
+            // vector is its perpendicular, never its reverse, so this can never produce a
+            // 180-degree turn into the snake's own body. The guard below makes that
+            // independent of the input domain: if a future input surface (joystick,
+            // diagonal gesture) ever yields a non-axis-aligned direction, the swap is
+            // skipped rather than made lethal.
+            //
+            // Ordering: the swap happens BEFORE the mirror flip. Mirror negates dx alone
+            // while the swap changes which axis dx is, so the two compose instead of
+            // cancelling — unlike a 180-degree rotation, which would cancel exactly.
+            if (resonanceInvertTicks > 0 && (newDx === 0 || newDy === 0)) {
+                var swapTmp = newDx;
+                newDx = newDy;
+                newDy = swapTmp;
+            }
+            // v12: the mirror mutator flip moved here from the keydown handler. It
+            // previously lived only there, so the D-pad (which dispatches a synthetic
+            // keydown) inherited it while the SWIPE handler — which calls this function
+            // directly — silently ignored the mutator. This is the single choke point
+            // shared by all three input paths.
+            // v12 A: chaosCycle turns mirror off in 2 of every 3 five-tick windows;
+            // quantumToggle suspends it for 5 ticks. Both are ADDITIVE gates — the mutator
+            // check itself is unchanged, so subset drafters are never affected.
+            if (activeMutators.indexOf('mirror') !== -1 &&
+                chaosCycleAllows('mirror') &&
+                resonanceMirrorSuspended === 0) { newDx = -newDx; }
             // v10 G: 2-deep input buffer. Reverse-check against the effective tail
             // (last queued direction, or last consumed if queue is empty).
             const tail = dirQueue.length > 0 ? dirQueue[dirQueue.length - 1] : lastConsumedDir;
@@ -4143,6 +4456,57 @@ const TRAIL_RENDER_CONFIG = {
             transientRings.push({ x: x, y: y, maxRadius: maxRadius, alpha: 0.8, color: color, life: maxLife, maxLife: maxLife, type: type || 'ring', lineWidth: lineWidth || 2 });
         }
 
+        // v12 D: Help & Legend truth pass. Both surfaces below derive from FOOD_TIERS,
+        // which AGENTS.md designates the global authority for food distribution. Before
+        // v12 the help overlay hand-copied the weights ("40%"/"15%") and had drifted from
+        // the real values (0.33/0.13) after the v8 E hunter and v10 B bomb rebalances; it
+        // also omitted hunter and bomb entirely, and its colours were looked up by index
+        // into Object.keys(FOOD_TIERS) while the names were hard-coded — so inserting a
+        // tier silently miscoloured the whole table.
+        function buildFoodTableRows() {
+            return Object.keys(FOOD_TIERS).map(function(key) {
+                var t = FOOD_TIERS[key];
+                return {
+                    key: key,
+                    // Colour is derived from the SAME key being rendered, never an index.
+                    color: foodColor(key),
+                    label: t.shortName || key,
+                    stats: t.pts + 'pts/' + t.xp + 'XP/' + Math.round(t.weight * 100) + '%'
+                };
+            });
+        }
+
+        // v12 D: `V` (high contrast) and the context-scoped overloads were undocumented.
+        // Contexts: '' = global, otherwise the gameState the binding applies in.
+        // NOTE: this array is hand-maintained — add an entry here when adding a binding.
+        const HELP_BINDINGS = [
+            { keys: 'Arrows/WASD', desc: 'Move' },
+            { keys: 'P / Space',   desc: 'Pause / Resume' },
+            { keys: 'Enter',       desc: 'Start / Restart' },
+            { keys: 'Escape',      desc: 'Back to menu' },
+            { keys: 'M',           desc: 'Mute / Unmute' },
+            { keys: 'Y',           desc: 'Synesthesia audio' },
+            { keys: 'V',           desc: 'High contrast' },
+            { keys: 'Tab',         desc: 'Stats' },
+            { keys: 'F',           desc: 'Achievements' },
+            { keys: 'C (idle)',    desc: 'Cosmetics' },
+            { keys: 'C (draft)',   desc: 'Cascade toggle' },
+            { keys: 'B',           desc: 'Brews' },
+            { keys: 'J',           desc: 'Diary' },
+            { keys: 'Q',           desc: 'Quests' },
+            { keys: 'S (idle)',    desc: 'Settings' },
+            { keys: 'X (playing)', desc: 'Cycle combo-bank mode' },
+            { keys: 'X (idle L20)',desc: 'Prestige' },
+            { keys: 'Z (playing)', desc: 'Spend combo charge' },
+            { keys: 'D (idle)',    desc: 'Draft mode toggle' },
+            { keys: 'R (idle)',    desc: 'Resume saved run' },
+            { keys: 'R (draft)',   desc: 'Re-roll mutator' },
+            { keys: 'G / Shift+G', desc: 'Ghost / Ghost Arena' },
+            { keys: 'K',           desc: 'Copy challenge link' },
+            { keys: 'H',           desc: 'Close this help' },
+            { keys: 'L',           desc: 'Food Legend' },
+        ];
+
         function drawHelpOverlay() {
             ctx.save();
             ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
@@ -4154,62 +4518,54 @@ const TRAIL_RENDER_CONFIG = {
             ctx.textBaseline = 'top';
             ctx.fillText('HELP', CANVAS_WIDTH / 2, 8);
 
-            // Left column: Controls
             const controlY = 34;
+
+            // --- Controls: two columns, 13 rows each (25 bindings as of v12) ---
             ctx.fillStyle = '#AAA';
             ctx.font = 'bold 13px Arial';
             ctx.textAlign = 'left';
             ctx.fillText('Controls', 15, controlY);
-            
-            const controls = [
-                ['Arrows/WASD', 'Move'],
-                ['P / Space', 'Pause / Resume'],
-                ['Enter', 'Start / Restart'],
-                ['M', 'Mute / Unmute'],
-                ['H', 'Close this help'],
-                ['Tab', 'Stats'],
-                ['F', 'Achievements'],
-                ['C', 'Cosmetics'],
-                ['L', 'Food Legend'],
-                ['Escape', 'Back to menu'],
-            ];
-            
+
             ctx.font = '12px Arial';
-            ctx.fillStyle = '#CCC';
-            controls.forEach(([key, desc], i) => {
-                const y = controlY + 20 + i * 18;
+            const CONTROL_PER_COL = 13;
+            HELP_BINDINGS.forEach((b, i) => {
+                const col = Math.floor(i / CONTROL_PER_COL);
+                const row = i % CONTROL_PER_COL;
+                const x = col === 0 ? 20 : 235;
+                const y = controlY + 20 + row * 14;
                 ctx.fillStyle = '#FFD700';
-                ctx.fillText(key, 20, y);
+                ctx.fillText(b.keys, x, y);
                 ctx.fillStyle = '#AAA';
-                ctx.fillText(desc, 140, y);
+                // Column 2 is pulled in: at x+92 the two longest descriptions
+                // ('Cycle combo-bank mode', 'Spend combo charge') ended at 460/441 px
+                // on a 440 px canvas and were clipped. Two columns keep the mode list
+                // clear of the footer; a single 25-row column would push it off-screen.
+                ctx.fillText(b.desc, x + (col === 0 ? 92 : 67), y);
             });
 
-            // Right column: Food Tiers
-            const foodX = CANVAS_WIDTH - 155;
+            // --- Food Tiers: derived from FOOD_TIERS, two columns of 4 ---
+            const foodY = controlY + 20 + CONTROL_PER_COL * 14 + 10;
             ctx.fillStyle = '#AAA';
             ctx.font = 'bold 13px Arial';
-            ctx.fillText('Food Tiers', foodX, controlY);
-            
-            const foodInfo = [
-                ['♦ Common', '10pts / 25XP / 40%'],
-                ['♦ Uncommon', '15pts / 30XP / 25%'],
-                ['▲ Rare', '20pts / 40XP / 12%'],
-                ['⬡ Epic', '50pts / 70XP / 3%'],
-                ['◉ Bonus', '30pts / 60XP / 15%'],
-                ['» Speed', '5pts / 40XP / 5%'],
-            ];
-            
+            ctx.fillText('Food Tiers  (pts / XP / spawn chance)', 15, foodY);
+
             ctx.font = '11px Arial';
-            foodInfo.forEach(([name, info], i) => {
-                const y = controlY + 22 + i * 18;
-                ctx.fillStyle = foodColor(Object.keys(FOOD_TIERS)[i]) || '#FFF';
-                ctx.fillText(name, foodX, y);
+            const rows = buildFoodTableRows();
+            const FOOD_ROWS_PER_COL = 4;
+            rows.forEach((r, i) => {
+                const col = Math.floor(i / FOOD_ROWS_PER_COL);
+                const row = i % FOOD_ROWS_PER_COL;
+                const x = col === 0 ? 20 : 235;
+                const y = foodY + 20 + row * 16;
+                ctx.fillStyle = r.color || '#FFF';
+                ctx.fillText(r.label, x, y);
                 ctx.fillStyle = '#888';
-                ctx.fillText(info, foodX + (name.length > 6 ? 80 : 75), y);
+                ctx.fillText(r.stats, x + 68, y);
             });
 
-            // Game modes
-            const modeY = controlY + 20 + controls.length * 18 + 10;
+            // --- Game modes ---
+            // Bottom of the food block: its last row plus a line of leading, plus a gap.
+            const modeY = foodY + 20 + (FOOD_ROWS_PER_COL - 1) * 16 + 24;
             ctx.fillStyle = '#AAA';
             ctx.font = 'bold 13px Arial';
             ctx.fillText('Game Modes', 15, modeY);
@@ -4804,7 +5160,11 @@ const TRAIL_RENDER_CONFIG = {
             for (var i = 0; i < hazards.length; i++) {
                 var h = hazards[i];
                 ctx.save();
-                var alpha = h.phase === 'on' ? (calm ? 0.35 : 0.25 + 0.15 * Math.sin(renderTime / 150)) : 0.08;
+                // v12 B: pulse floor raised from 0.25±0.15 (trough 0.10) to 0.28±0.12
+                // (trough 0.16). The old trough sat barely above the off-phase 0.08, so at
+                // the bottom of the pulse a LETHAL rift looked nearly identical to a safe
+                // one. The solid lethal border below is the other half of the cue.
+                var alpha = h.phase === 'on' ? (calm ? 0.35 : 0.28 + 0.12 * Math.sin(renderTime / 150)) : 0.08;
                 var grad = ctx.createRadialGradient(h.cx + TILE_SIZE / 2, h.cy + TILE_SIZE / 2, 0, h.cx + TILE_SIZE / 2, h.cy + TILE_SIZE / 2, h.radius);
                 grad.addColorStop(0, 'rgba(107,63,160,' + alpha + ')');
                 grad.addColorStop(0.7, 'rgba(107,63,160,' + (alpha * 0.5) + ')');
@@ -4821,6 +5181,35 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.arc(h.cx + TILE_SIZE / 2, h.cy + TILE_SIZE / 2, h.radius, 0, 2 * Math.PI);
                     ctx.stroke();
                 }
+                // v12 B: pre-ignition keyframe. phaseTimer counts DOWN to the flip and is
+                // reset to a full duration on it, so while off the live values are
+                // OFF-1 … 1 — `<= 2` is exactly the two ticks before the rift becomes
+                // lethal. Without this the player got zero advance warning: the rift went
+                // from safe to deadly in a single tick. A distinct warm hue (not the
+                // rift's own violet) so it reads as "about to fire", not as part of the
+                // rift's idle look.
+                if (h.phase === 'off' && h.phaseTimer <= 2) {
+                    var warnA = h.phaseTimer === 2 ? 0.5 : 0.9; // brightens into ignition
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(255,170,60,' + warnA + ')';
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    ctx.arc(h.cx + TILE_SIZE / 2, h.cy + TILE_SIZE / 2, h.radius + 3, 0, 2 * Math.PI);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+                // v12 B: countdown arc — how far through the current phase the rift is.
+                // Informational, so it renders in Calm Mode too (matching the v9 F2
+                // bounty-ring precedent: calm gates oscillation, never information).
+                var phaseFrac = Math.max(0, Math.min(1,
+                    h.phaseTimer / (h.phase === 'on' ? HAZARD_ON_TICKS : HAZARD_OFF_TICKS)));
+                ctx.strokeStyle = h.phase === 'on' ? 'rgba(255,120,120,0.7)' : 'rgba(180,180,255,0.6)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(h.cx + TILE_SIZE / 2, h.cy + TILE_SIZE / 2, h.radius,
+                    -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * phaseFrac);
+                ctx.stroke();
                 ctx.restore();
             }
             // v11 A: Gold ring around adjacent hazard when hazard chain is active
@@ -5226,6 +5615,13 @@ const TRAIL_RENDER_CONFIG = {
             var evoGlowColor = evo ? (evo.color === 'rainbow' ? '#FF44FF' : evo.color) : null;
             var evoWavy = (evoTier === 1);                  // Serpentine: sine-wave body
             let headDrawX = 0, headDrawY = 0;
+            // v12 A: Ethereal (intangiblePhase) — render the body translucent while the
+            // self-collision exemption window is live, so the player can see that they are
+            // currently ghosting through their own tail. Reads module state written by the
+            // tick loop; never writes.
+            var etherealAlpha = (intangibleWindowTicks > 0) ? 0.55 : 1;
+            var etherealSaved = (etherealAlpha < 1);
+            if (etherealSaved) { ctx.save(); ctx.globalAlpha = etherealAlpha; }
             // v9 C: Combo Heat halo — drawn before the body so the body covers the center.
             // Z-order: halo (bottom) → body+evolution glow → shield aura (top). Alpha capped
             // so it never occludes the evolution glow; dimmed 50% when shield is active.
@@ -5333,7 +5729,9 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 if (evoGlow > 0) ctx.shadowBlur = 0;
                 if (skin.head === 'ghost') {
-                    ctx.globalAlpha = 1;
+                    // v12 A: reset to the Ethereal body alpha, not to 1 — otherwise the
+                    // ghost skin silently cancels the intangible translucency.
+                    ctx.globalAlpha = etherealAlpha;
                 }
 
                 // High-contrast snake outline
@@ -5410,6 +5808,8 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 ctx.restore();
             }
+            // v12 A: close the Ethereal translucency wrapper (see the save at the top).
+            if (etherealSaved) ctx.restore();
         }
 
         function drawRival(t) {
@@ -5504,8 +5904,14 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
         // v10 A: Combo Bank HUD badge
+        // v12 C: also the cascade disclosure slot. There is no free HUD position — the
+        // bottom-left rows are the combo badge (CANVAS_HEIGHT-28) and the XP bar
+        // (CANVAS_HEIGHT-22), and the top-right carries the mutator/resonance lists — so
+        // the cascade factor is appended here rather than added as a second badge.
         function drawComboBankHUD() {
-            if (gameState !== 'playing' || comboCharges === 0) return;
+            if (gameState !== 'playing') return;
+            var cascadeOn = activeMutators.length > 1;
+            if (comboCharges === 0 && !cascadeOn) return;
             var modeNames = ['Clear', 'Magnet', 'Teleport'];
             var modeColors = ['#00FFFF', '#FF00FF', '#FFFF00'];
             ctx.save();
@@ -5514,10 +5920,18 @@ const TRAIL_RENDER_CONFIG = {
             ctx.textBaseline = 'bottom';
             var badgeX = 5;
             var badgeY = CANVAS_HEIGHT - 28;
-            var txt = '⚡[' + modeNames[comboBankSpendMode] + '] x' + comboCharges;
-            if (comboCharges >= 5) txt = '⚡[FULL] x5';
-            ctx.fillStyle = comboCharges > 0 ? modeColors[comboBankSpendMode] : '#555';
-            ctx.fillText(txt, badgeX, badgeY);
+            if (comboCharges > 0) {
+                var txt = '⚡[' + modeNames[comboBankSpendMode] + '] x' + comboCharges;
+                if (comboCharges >= 5) txt = '⚡[FULL] x5';
+                ctx.fillStyle = modeColors[comboBankSpendMode];
+                ctx.fillText(txt, badgeX, badgeY);
+                badgeX += ctx.measureText(txt).width + 8;
+            }
+            if (cascadeOn) {
+                // Explicitly labelled, because a bare ×0.5 next to a score reads as a bonus.
+                ctx.fillStyle = '#FF8888';
+                ctx.fillText('⚠ ×' + getCascadeMultiplier(activeMutators.length) + ' score', badgeX, badgeY);
+            }
             ctx.restore();
         }
 
@@ -5791,6 +6205,20 @@ const TRAIL_RENDER_CONFIG = {
             sessionBonusFood = 0;
             comboCount = 0;
             hazardChainStreak = 0; // v11 A
+            // v12 A: resonance cadence counters reset per gauntlet wave too.
+            intangibleWindowTicks = 0;
+            resonanceInvertTicks = 0;
+            resonanceInvertCooldown = 0;
+            resonanceToggleTick = 0;
+            resonanceMirrorSuspended = 0;
+            chaosCycleIndex = 0;
+            activeResonance = null;
+            // v12 C: gauntlet never cascades (activeMutators is truncated to 1), so the
+            // factor is 1 — but the raw-score field must still be cleared per wave.
+            sessionRawScore = 0;
+            sessionCascadeMult = 1;
+            lastDeathCause = '';
+            lastSaveEvent = '';
             lastEatTime = 0;
             lastComboMilestone = 0;
             evolutionTier = -1;
@@ -6027,7 +6455,10 @@ const TRAIL_RENDER_CONFIG = {
             // into rotation there. Self-normalizing (divides by total) so dropping a
             // key is safe.
             var keys = Object.keys(FOOD_TIERS).filter(function(k) { return !(MODE_CONFIG[gameMode].wrap === false && (k === 'hunter' || k === 'bomb')); });
-            var weights = keys.map(function() { return Math.random(); });
+            // v12 A: draw from the seeded PRNG. This was Math.random(), which made
+            // every seeded run that reshuffles (chaos_seed, plus the Chaos Gold and
+            // Schrodinger resonances that call this) non-deterministic.
+            var weights = keys.map(function() { return seededRandom(); });
             var total = weights.reduce(function(a,b) { return a+b; }, 0);
             var result = {};
             for (var i = 0; i < keys.length; i++) {
@@ -6082,7 +6513,8 @@ const TRAIL_RENDER_CONFIG = {
             // v6: Cascade mode indicator
             if (cascadeUnlocked) {
                 ctx.fillStyle = cascadeMode ? '#AAFF88' : '#666';
-                ctx.fillText('C: Cascade ' + (cascadeMode ? 'ON (pick 3)' : 'OFF (pick 1)'), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+                // v12 C: disclose the score penalty BEFORE the run starts, not only after.
+                ctx.fillText('C: Cascade ' + (cascadeMode ? 'ON (pick 3, ×' + getCascadeMultiplier(3) + ' score)' : 'OFF (pick 1)'), CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
             }
             if (mutatorTokens > 0) {
                 ctx.fillStyle = '#FFD700';
@@ -6252,7 +6684,17 @@ const TRAIL_RENDER_CONFIG = {
                 ctx.font = 'bold 10px monospace';
                 ctx.fillStyle = '#AA88FF';
                 ctx.textAlign = 'right';
-                ctx.fillText('✦ ' + activeResonance.name, CANVAS_WIDTH - 5, 20 + activeMutators.length * 14);
+                // v12 A: show the LIVE state of the resonance, not just its name — the
+                // name alone was all that existed before, while the effect did nothing.
+                var resLabel = '✦ ' + activeResonance.name;
+                if (resonanceInvertTicks > 0) resLabel += ' [SWAPPED]';
+                else if (resonanceMirrorSuspended > 0) resLabel += ' [MIRROR OFF]';
+                else if (intangibleWindowTicks > 0) resLabel += ' [PHASE]';
+                else if (activeResonance.effect === 'chaosCycle') {
+                    // Which of the three mutators is live in this 5-tick window.
+                    resLabel += ' [' + CHAOS_CYCLE_EFFECTS[chaosCycleIndex % CHAOS_CYCLE_EFFECTS.length].toUpperCase() + ']';
+                }
+                ctx.fillText(resLabel, CANVAS_WIDTH - 5, 20 + activeMutators.length * 14);
                 ctx.restore();
             }
 
@@ -6369,14 +6811,12 @@ const TRAIL_RENDER_CONFIG = {
                     else if (comboCount >= 5) spawnFloater(PLAY_WIDTH / 2, PLAY_HEIGHT / 2, 'COMBO x5!', '#44FF44', 30, 1.5);
                     else spawnFloater(PLAY_WIDTH / 2, PLAY_HEIGHT / 2, 'COMBO x3!', '#44CCFF', 28, 1.5);
                     // v10 A: Combo Bank — bank a charge on every milestone
-                    if (comboCharges < 5) {
-                        comboCharges++;
-                        if (!hasSeenComboBank) {
-                            hasSeenComboBank = true;
-                            saveManager.set('snake_has_seen_combo_bank', '1');
-                            queueToast('⚡ Combo Charge banked! Press X to cycle, Z to spend.', 3000);
-                        }
-                    }
+                    // v12 F: charge banking is now a shared helper, because danger-driven
+                    // events (bounty completions, hazard-chain eats, pigment rush,
+                    // evolution milestones) bank charges too. The bank's three abilities
+                    // used to be fed exclusively by the SAFEST play pattern (continuous
+                    // eating); this makes routing toward danger pay in agency.
+                    bankComboCharge('combo milestone');
                 }
             }
             // --- end v6 extraction ---
@@ -6414,15 +6854,24 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             // === MUTATOR LOGIC ===
-            if (activeMutators.indexOf('gravity') !== -1 && dy !== -TILE_SIZE && dy !== TILE_SIZE) {
+            if (activeMutators.indexOf('gravity') !== -1 && chaosCycleAllows('gravity') && dy !== -TILE_SIZE && dy !== TILE_SIZE) {
                 dx = 0;
                 dy = TILE_SIZE;
             }
 
             var skipSelfCollision = false;
-            if (activeMutators.indexOf('phase_shift') !== -1 && gameTick % 5 === 0) {
+            if (activeMutators.indexOf('phase_shift') !== -1 && chaosCycleAllows('phase_shift') && gameTick % 5 === 0) {
                 skipSelfCollision = true;
             }
+            // v12 A: intangiblePhase (Ethereal) — widen the self-collision exemption from
+            // the phase tick to a 3-tick window (3 of every 5 ticks). The window is opened
+            // on the phase tick and decays at the START of each later tick, so the counter
+            // reads 3/2/1 exactly while the player is ghosting (drawSnake keys the
+            // translucency on it). Decrementing it in the same expression that consumes it
+            // would leave the last ghost tick rendered opaque.
+            if (resonanceActive('intangiblePhase') && gameTick % 5 === 0) intangibleWindowTicks = 3;
+            else if (intangibleWindowTicks > 0) intangibleWindowTicks--;
+            if (intangibleWindowTicks > 0) skipSelfCollision = true;
 
             if (activeMutators.indexOf('hunger_clock') !== -1) {
                 if (!hungerStarted && sessionFoodEaten > 0) {
@@ -6430,14 +6879,35 @@ const TRAIL_RENDER_CONFIG = {
                     hungerTickCounter = 0;
                 }
                 if (hungerStarted) {
-                    hungerTickCounter++;
-                    if (hungerTickCounter > 0 && hungerTickCounter % 50 === 0) {
-                        if (snake.length > 1) {
-                            snake.pop();
-                        } else {
-                            lastDeathCause = 'Starvation!';
-                            gameOver();
-                            return;
+                    // v12 A: intangiblePhase pauses hunger on phase ticks; feastFamine
+                    // shortens the interval to 30. Read via resonanceActive() because this
+                    // block runs BEFORE tickResonance() has refreshed `activeResonance`.
+                    //
+                    // The pause must gate the POP as well as the increment: skipping only
+                    // the increment leaves the counter sitting on an exact multiple of the
+                    // interval, so the very next tick re-fires the pop that just landed —
+                    // two segments lost on two consecutive ticks, and a 'Starvation!'
+                    // death at length 2 on a tick the descriptor says cannot bite.
+                    var hungerPaused = resonanceActive('intangiblePhase') && gameTick % 5 === 0;
+                    if (!hungerPaused) {
+                        hungerTickCounter++;
+                        if (hungerTickCounter > 0 && hungerTickCounter % hungerInterval() === 0) {
+                            if (snake.length > 1) {
+                                snake.pop();
+                                // v12 A: rapidDoom (Apocalypse) — each hunger pop also
+                                // shrinks the board. Must preserve advanceShrinkZone's
+                                // death contract.
+                                if (resonanceActive('rapidDoom')) {
+                                    if (advanceShrinkZone()) {
+                                        gameOver();
+                                        return;
+                                    }
+                                }
+                            } else {
+                                lastDeathCause = 'Starvation!';
+                                gameOver();
+                                return;
+                            }
                         }
                     }
                 }
@@ -6453,24 +6923,18 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            if (activeMutators.indexOf('chaos_seed') !== -1 && gameTick % 20 === 0) {
-                chaosCurrentWeights = shuffleFoodWeights();
-                chaosShuffleTick = gameTick;
+            if (activeMutators.indexOf('chaos_seed') !== -1) {
+                // v12 A: doubleGold (Chaos Gold) halves the reshuffle cadence, 20 → 10.
+                var chaosCadence = resonanceActive('doubleGold') ? 10 : 20;
+                if (gameTick % chaosCadence === 0) {
+                    chaosCurrentWeights = shuffleFoodWeights();
+                    chaosShuffleTick = gameTick;
+                }
             }
 
-            // v6: Resonance effects
-            activeResonance = detectResonance(activeMutators);
-            if (activeResonance) {
-                if (activeResonance.effect === 'invertControls' && gameTick % (10 + Math.floor(Math.random() * 6)) === 0) {
-                    flashOverlay = { color: '#FFFFFF', alpha: 0.2, priority: 'normal' };
-                    queueGameEffect('flash', { color: '#FFFFFF', alpha: 0.2, priority: 'normal' });
-                }
-                if (activeResonance.effect === 'feastFamine' && hungerStarted) {
-                    if (hungerTickCounter % 30 === 0 && snake.length > 1) {
-                        // existing hunger logic will fire — this just ensures shorter interval
-                    }
-                }
-            }
+            // v12 A: per-tick resonance cadence (replaces the v6 block that only flashed
+            // a white overlay for invertControls and had an empty body for feastFamine).
+            tickResonance();
 
             prevSnake = snake.map(s => ({ x: s.x, y: s.y }));
             snakeGrew = false;
@@ -6498,7 +6962,7 @@ const TRAIL_RENDER_CONFIG = {
             // Time Attack timer
             if (gameMode === 'timeAttack' && timeAttackEnd > 0) {
                 const remaining = timeAttackEnd - Date.now();
-                if (remaining <= 0) { gameOver(); return; }
+                if (remaining <= 0) { lastDeathCause = 'Time\'s up!'; gameOver(); return; }
             }
 
             // v10 G: consume from the 2-deep direction queue
@@ -6553,7 +7017,7 @@ const TRAIL_RENDER_CONFIG = {
                         streakCharges--;
                         saveManager.set('snake_streak_charges', streakCharges);
                         teleportSavePos = freePos;
-                        lastDeathCause = '🛡 Streak charge saved you!';
+                        lastSaveEvent = '🛡 Streak charge saved you!';
                         spawnParticles(freePos.x, freePos.y, 25, '#FFEE88');
                         queueToast('🛡 Streak charge consumed!', 2000);
                         return false;
@@ -6577,7 +7041,7 @@ const TRAIL_RENDER_CONFIG = {
                     if (activeBrews.indexOf('vampire') !== -1 && !brewUsageFlags.vampireUsed) {
                         brewUsageFlags.vampireUsed = true;
                         while (snake.length > 3) snake.pop();
-                        lastDeathCause = 'Vampire Brew saved you!';
+                        lastSaveEvent = 'Vampire Brew saved you!';
                         spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FF0044');
                         return false;
                     }
@@ -6588,7 +7052,7 @@ const TRAIL_RENDER_CONFIG = {
                     // so a chosen brew save is never wasted on an automatic save.
                     if (evolutionTier >= 1 && !obstaclePassUsed && isObstacleCollision(wrappedHead)) {
                         obstaclePassUsed = true;
-                        lastDeathCause = 'Serpentine phased through an obstacle!';
+                        lastSaveEvent = 'Serpentine phased through an obstacle!';
                         spawnParticles(wrappedHead.x, wrappedHead.y, 18, EVOLUTION_TIERS[1].color);
                         playSound('bonus');
                         queueToast('\uD83D\uDEE1\uFE0F Serpentine: obstacle pass used!', 2000);
@@ -6599,7 +7063,10 @@ const TRAIL_RENDER_CONFIG = {
                 }
                 if (MODE_CONFIG[gameMode].wallDeath) {
                     if (wrappedHead.x < 0 || wrappedHead.x >= PLAY_WIDTH || wrappedHead.y < 0 || wrappedHead.y >= PLAY_HEIGHT) {
-                        lastDeathCause = 'Hit the wall!';
+                        // v12 C: the cause is written AFTER the saves below. Writing it first
+                        // left a stale "Hit the wall!" behind whenever a save rescued the
+                        // player, and any later ending that sets no cause of its own (the
+                        // Time Attack clock) then reported a death that never happened.
                         // v6: Phoenix Brew — resurrect once
                         if (activeBrews.indexOf('phoenix') !== -1 && !brewUsageFlags.phoenixUsed) {
                             var freePos = findFreeTile(wrappedHead.x, wrappedHead.y, true);
@@ -6607,13 +7074,14 @@ const TRAIL_RENDER_CONFIG = {
                                 brewUsageFlags.phoenixUsed = true;
                                 teleportSavePos = freePos;
                                 score = 0;
-                                lastDeathCause = 'Phoenix Brew resurrected!';
+                                lastSaveEvent = 'Phoenix Brew resurrected!';
                                 spawnParticles(freePos.x, freePos.y, 25, '#FF8800');
                                 return false;
                             }
                         }
                         // v11 E: Streak charge save (after phoenix, before death)
                         if (!tryStreakChargeSave(wrappedHead)) return false;
+                        lastDeathCause = 'Hit the wall!';
                         return true;
                     }
                 }
@@ -6629,7 +7097,7 @@ const TRAIL_RENDER_CONFIG = {
                         comboCount = (evolutionTier >= 3) ? EVOLUTION_TIERS[3].minCombo : 0;
                         lastComboMilestone = 0;
                         hazardChainStreak = 0;
-                        lastDeathCause = 'Melted a hazard!';
+                        lastSaveEvent = 'Melted a hazard!';
                         spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FFAA00');
                         pushTransientRing(wrappedHead.x + TILE_SIZE / 2, wrappedHead.y + TILE_SIZE / 2, 40, '#FFAA00', 400, 'ring', 3);
                         queueToast('🔥 Melted a hazard!', 1500);
@@ -6645,7 +7113,7 @@ const TRAIL_RENDER_CONFIG = {
                     if (activeBrews.indexOf('vampire') !== -1 && !brewUsageFlags.vampireUsed) {
                         brewUsageFlags.vampireUsed = true;
                         while (snake.length > 3) snake.pop();
-                        lastDeathCause = 'Vampire Brew saved you from a hazard!';
+                        lastSaveEvent = 'Vampire Brew saved you from a hazard!';
                         spawnParticles(wrappedHead.x, wrappedHead.y, 20, '#FF0044');
                         return false;
                     }
@@ -6686,7 +7154,7 @@ const TRAIL_RENDER_CONFIG = {
                                     playSound('bonus');
                                     return false;
                                 }
-                                lastDeathCause = 'You were caught by the rival!';
+                                // v12 C: cause written after the saves — see the wall branch.
                                 // v6: Phoenix Brew in rival collision
                                 if (activeBrews.indexOf('phoenix') !== -1 && !brewUsageFlags.phoenixUsed) {
                                     var freePos2 = findFreeTile(wrappedHead.x, wrappedHead.y, true);
@@ -6694,13 +7162,14 @@ const TRAIL_RENDER_CONFIG = {
                                         brewUsageFlags.phoenixUsed = true;
                                         teleportSavePos = freePos2;
                                         score = 0;
-                                        lastDeathCause = 'Phoenix Brew resurrected!';
+                                        lastSaveEvent = 'Phoenix Brew resurrected!';
                                         spawnParticles(freePos2.x, freePos2.y, 25, '#FF8800');
                                         return false;
                                     }
                                 }
                                 // v11 E: Streak charge save (after phoenix, before death)
                                 if (!tryStreakChargeSave(wrappedHead)) return false;
+                                lastDeathCause = 'You were caught by the rival!';
                                 return true;
                             }
                         }
@@ -6823,7 +7292,7 @@ const TRAIL_RENDER_CONFIG = {
                     spawnParticles(wrappedHead.x, wrappedHead.y, 16, foodColor('bomb'));
                     pushTransientRing(wrappedHead.x + TILE_SIZE / 2, wrappedHead.y + TILE_SIZE / 2, 80, '#FF6600', 500, 'ring', 4);
                     playSound('bonus');
-                    if (!hasSeenBomb) { hasSeenBomb = true; saveManager.set('snake_has_seen_bomb', '1'); queueToast('💣 Bomb! Blasted obstacles & trimmed rival!', 3000); }
+                    if (!hasSeenBomb) { hasSeenBomb = true; saveManager.set('snake_has_seen_bomb', '1'); queueToast('💣 Bomb! Blasted obstacles & trimmed rival!', 3000, 'low'); }
                     // Combo timer continues (bomb is an eat, not a miss)
                     const bombNow = Date.now();
                     if (bombNow - lastEatTime < 3000 && lastEatTime > 0) {
@@ -6891,7 +7360,12 @@ const TRAIL_RENDER_CONFIG = {
 
                 // XP award for eating
                 const tier = FOOD_TIERS[eatenType] || FOOD_TIERS.common;
-                let foodXP = tier.xp;
+                // v12 A: resonance food multiplier (Chaos Gold x2 / Famine Feast x4).
+                // Applied at the FOOD SITE, not inside addScore/awardXP — those funnels
+                // also serve bounties, quests, achievements and the survival drip, and
+                // the descriptors promise FOOD points/XP specifically.
+                const resMult = foodResonanceMult();
+                let foodXP = tier.xp * resMult;
                 if (gameMode === 'zen') {
                     foodXP = 10; // Flat XP in Zen mode
                 } else {
@@ -6922,7 +7396,7 @@ const TRAIL_RENDER_CONFIG = {
                 if (synesthesiaMode) {
                     spawnSynesthesiaRing(wrappedHead.x, wrappedHead.y, tierColor);
                 }
-                if (gameMode !== 'zen' && gameMode !== 'painter') addScore(tier.pts);
+                if (gameMode !== 'zen' && gameMode !== 'painter') addScore(tier.pts * resMult);
                 // v6: Combustion Brew bonus — each combo milestone adds +1 mult to next 3 foods
                 if (activeBrews.indexOf('combustion') !== -1 && brewUsageFlags.combRemaining > 0 && gameMode !== 'zen' && gameMode !== 'painter') {
                     addScore(tier.pts * brewUsageFlags.combustionAccum);
@@ -6997,6 +7471,12 @@ const TRAIL_RENDER_CONFIG = {
                     if (hazardChainStreak >= 1) {
                         spawnFloater(snake[0].x, snake[0].y - 10, '×' + (1 + Math.min(hazardChainStreak, 3) * 0.5) + ' Hazard!', '#FFD700');
                     }
+                    // v12 F: every third consecutive hazard-chain eat banks a charge.
+                    // hazardChainStreak is read at the eat moment (it is reset at the melt,
+                    // hazard-death, bomb-eat and non-adjacent-eat sites), never cached.
+                    // The `> 0` guard keeps 0 % 3 === 0 from banking on a broken chain,
+                    // so the rule does not depend on the increment above running first.
+                    if (hazardChainStreak > 0 && hazardChainStreak % 3 === 0) bankComboCharge('hazard chain');
                 } else {
                     hazardChainStreak = 0;
                 }
@@ -7051,7 +7531,10 @@ const TRAIL_RENDER_CONFIG = {
                 sessionFoodTypes.add(food2.type);
                 if (food2.type === 'speed') sessionSpeedFood++;
                 if (food2.type === 'bonus') sessionBonusFood++;
-                addScore(food2.pts || Math.floor(FOOD_TIERS[food2.type].pts / 2));
+                // v12 A: the multiplier must wrap the WHOLE expression. `food2.pts` is set
+                // at every construction site to floor(tier.pts/2) and is always >= 2, so
+                // putting foodResonanceMult() only on the fallback made it dead code.
+                addScore(Math.floor((food2.pts || FOOD_TIERS[food2.type].pts / 2) * foodResonanceMult()));
                 spawnParticles(food2.x, food2.y, 8, '#44FF88');
                 playSound('eat');
                 food2 = null;
@@ -7074,8 +7557,8 @@ const TRAIL_RENDER_CONFIG = {
                         stats.totalFoodEaten++;
                         stats.epicFoodEaten++;
                         sessionFoodTypes.add('epic');
-                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.epic.pts);
-                        awardXP(FOOD_TIERS.epic.xp);
+                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.epic.pts * foodResonanceMult());
+                        awardXP(FOOD_TIERS.epic.xp * foodResonanceMult());
                         spawnFloater(exitTile.x, exitTile.y, '+' + FOOD_TIERS.epic.pts + ' EPIC!', '#AA44FF', 18);
                         // Remove the portal food from extraFoods[]
                         extraFoods.splice(efi, 1);
@@ -7110,7 +7593,7 @@ const TRAIL_RENDER_CONFIG = {
                         stats.bonusFoodEaten++;
                         sessionBonusFood++;
                         sessionFoodTypes.add('bonus');
-                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.bonus.pts);
+                        if (gameMode !== 'zen' && gameMode !== 'painter') addScore(FOOD_TIERS.bonus.pts * foodResonanceMult());
                         spawnParticles(ef.x, ef.y, FOOD_TIERS.bonus.pCount, foodColor('bonus'));
                         spawnFloater(ef.x, ef.y, '+30 BONUS!', foodColor('bonus'), 18);
                         playSound('bonus');
@@ -7125,8 +7608,11 @@ const TRAIL_RENDER_CONFIG = {
                                 // (The old respawnTimer += 3000 on ACTIVE rivals was
                                 // a no-op — that timer is only consumed when dead.)
                                 rivalFreezeMs = 3000;
-                                queueToast('🎨 Pigment Rush! ×3 score!', 3000);
+                                queueToast('🎨 Pigment Rush! ×3 score!', 3000, 'high');
                                 queueGameEffect('flash', { color: '#FFD700', alpha: 0.4, priority: 'high' });
+                                // v12 F: sweeping all four hoard foods under a timer is a
+                                // danger-priced feat — it pays a charge.
+                                bankComboCharge('pigment rush');
                                 if (!hasSeenPigmentRush) { hasSeenPigmentRush = true; saveManager.set('snake_has_seen_pigment_rush', '1'); }
                             }
                         }
@@ -7455,17 +7941,53 @@ const TRAIL_RENDER_CONFIG = {
             }
         }
 
+        // v12 D: the legend keeps its single-line points format (it is a toast, not a
+        // table) but is now DERIVED from FOOD_TIERS, so it can never disagree with the
+        // help overlay or drift from a rebalance again. Before v12 it hand-listed six
+        // tiers and omitted bomb.
+        function buildFoodLegendText() {
+            return Object.keys(FOOD_TIERS).map(function(key) {
+                var t = FOOD_TIERS[key];
+                return (t.shortName || key) + '=' + t.pts + 'pts' + (t.legendNote || '');
+            }).join(' ');
+        }
+        let FOOD_LEGEND_TEXT = '\uD83C\uDF4E ' + buildFoodLegendText();
+
         function showFoodLegend() {
-            const el = toastEl;
-            if (!el) return;
-            el.textContent = '\uD83C\uDF4E Common=10pts Epic=50pts Bonus=30pts Rare=20pts Uncommon=15pts Speed=5pts(speed!) 🐾 Hunter=50pts(fleeing!)';
-            el.style.display = 'block';
-            setTimeout(function() { el.style.display = 'none'; }, 5000);
+            queueToast(FOOD_LEGEND_TEXT, 5000, 'high');
         }
 
-        function queueToast(message, duration) {
+        function queueToast(message, duration, priority) {
             duration = duration || 3000;
-            toastQueue.push({ message: message, duration: duration });
+            priority = priority || 'normal';
+            // Coalesce against the message currently on screen: extend its display
+            // rather than re-showing it after it expires.
+            if (toastActive && message === toastCurrentMessage) {
+                scheduleToastHide(message, Math.max(duration, toastCurrentDuration));
+                return;
+            }
+            // Coalesce on exact message equality: extend the queued entry rather than
+            // duplicating it. Priority is never downgraded.
+            for (var qi = 0; qi < toastQueue.length; qi++) {
+                if (toastQueue[qi].message === message) {
+                    if (duration > toastQueue[qi].duration) toastQueue[qi].duration = duration;
+                    if ((TOAST_PRIORITY[priority] || 1) > (TOAST_PRIORITY[toastQueue[qi].priority] || 1)) {
+                        toastQueue[qi].priority = priority;
+                    }
+                    return;
+                }
+            }
+            toastQueue.push({ message: message, duration: duration, priority: priority });
+            // Bound the backlog: evict lowest-priority-then-oldest. A `high` message is
+            // never evicted while a lower-priority one exists.
+            if (toastQueue.length > TOAST_QUEUE_CAP) {
+                var worstIdx = -1, worstRank = Infinity;
+                for (var wi = 0; wi < toastQueue.length; wi++) {
+                    var rank = TOAST_PRIORITY[toastQueue[wi].priority] || 1;
+                    if (rank < worstRank) { worstRank = rank; worstIdx = wi; }
+                }
+                if (worstIdx !== -1) toastQueue.splice(worstIdx, 1);
+            }
             if (!toastActive) processToastQueue();
         }
 
@@ -7475,17 +7997,53 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
             toastActive = true;
-            const toast = toastQueue.shift();
+            // Highest priority first, FIFO within a priority.
+            var pickIdx = 0, pickRank = -1;
+            for (var pi = 0; pi < toastQueue.length; pi++) {
+                var pr = TOAST_PRIORITY[toastQueue[pi].priority] || 1;
+                if (pr > pickRank) { pickRank = pr; pickIdx = pi; }
+            }
+            const toast = toastQueue.splice(pickIdx, 1)[0];
             const el = toastEl;
             if (el) {
                 el.textContent = toast.message;
                 el.style.display = 'block';
             }
-            setTimeout(function() {
+            scheduleToastHide(toast.message, toast.duration);
+        }
+
+        // v12 E: the hide timer is kept in a handle so a coalesced repeat can EXTEND the
+        // display, and clearToasts() can cancel it outright. The generation guard stays as
+        // a second defence against a stale callback re-entering the drain loop.
+        function scheduleToastHide(message, duration) {
+            toastCurrentMessage = message;
+            toastCurrentDuration = duration;
+            if (toastTimerHandle) { clearTimeout(toastTimerHandle); toastTimerHandle = null; }
+            const gen = toastGeneration;
+            toastTimerHandle = setTimeout(function() {
+                if (gen !== toastGeneration) return;
+                toastTimerHandle = null;
+                toastCurrentMessage = '';
                 const el2 = toastEl;
                 if (el2) el2.style.display = 'none';
                 processToastQueue();
-            }, toast.duration);
+            }, duration);
+        }
+
+        // v12 E: called from resetGame() ONLY. resetWaveState() must NOT call this —
+        // startNextWave() calls it immediately after completeGauntletWave() queued the
+        // 2000ms "Wave N Complete!" toast, which would be destroyed in the common case.
+        function clearToasts() {
+            toastGeneration++;
+            if (toastTimerHandle) { clearTimeout(toastTimerHandle); toastTimerHandle = null; }
+            toastCurrentMessage = '';
+            toastCurrentDuration = 0;
+            toastQueue = [];
+            toastActive = false;
+            if (toastEl) {
+                toastEl.style.display = 'none';
+                toastEl.textContent = '';
+            }
         }
 
         function showLevelUpToast(level) {
@@ -7930,12 +8488,7 @@ const TRAIL_RENDER_CONFIG = {
                         return;
                     }
                     if (gameMode === 'daily' && dailyAttempts <= 0) {
-                        const el = toastEl;
-                        if (el) {
-                            el.textContent = 'No attempts left today!';
-                            el.style.display = 'block';
-                            setTimeout(function() { el.style.display = 'none'; }, 2000);
-                        }
+                        queueToast('No attempts left today!', 2000, 'high');
                         return;
                     }
                     resetGame();
@@ -8326,11 +8879,6 @@ const TRAIL_RENDER_CONFIG = {
                 default:
                     return;
             }
-
-                // v6: Mirror mutator: flip left-right controls
-                if (activeMutators.indexOf('mirror') !== -1) {
-                    newDx = -newDx;
-                }
 
             setNextDirection(newDx, newDy);
         });
