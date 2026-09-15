@@ -2268,6 +2268,7 @@ const TRAIL_RENDER_CONFIG = {
             transientRings = []; // v9 F: clear visual rings
             hoardActive = false; hoardTimer = 0; hoardTickCounter = 0; scoreMultiplier = 1; // v9 E: clear hoard state
             hoardPigmentCount = 0; pigmentRushTimer = 0; pigmentRushActive = false; // v11 C
+            rivalFreezeMs = 0; // v11 C: rival freeze
             score = 0;
             displayedScore = 0;
             particles = [];
@@ -2551,6 +2552,30 @@ const TRAIL_RENDER_CONFIG = {
             return d;
         }
 
+        // shrink_zone advance — extracted so the Pressure Cooker resonance
+        // (rivalShrink: a rival eating ALSO shrinks the board) can share it.
+        // NOTE: that rival-eat call site is NOT wired yet — only the shrink_zone
+        // timer path below calls this. Returns true when the player is caught.
+        function advanceShrinkZone() {
+            if (shrinkCols < PLAY_WIDTH / TILE_SIZE / 2 - 1) {
+                shrinkCols++;
+            } else if (shrinkRows < PLAY_HEIGHT / TILE_SIZE / 2 - 1) {
+                shrinkRows++;
+            } else {
+                return false; // fully shrunk
+            }
+            var headNow = snake[0];
+            var minSX = shrinkCols * TILE_SIZE;
+            var maxSX = PLAY_WIDTH - shrinkCols * TILE_SIZE;
+            var minSY = shrinkRows * TILE_SIZE;
+            var maxSY = PLAY_HEIGHT - shrinkRows * TILE_SIZE;
+            if (headNow.x < minSX || headNow.x >= maxSX || headNow.y < minSY || headNow.y >= maxSY) {
+                lastDeathCause = 'Caught by the shrinking zone!';
+                return true;
+            }
+            return false;
+        }
+
         // v6: Responsive canvas sizing
         function resizeCanvas() {
             var canvasEl = document.getElementById('gameCanvas');
@@ -2733,6 +2758,7 @@ const TRAIL_RENDER_CONFIG = {
                 hoardPigmentCount: hoardPigmentCount,
                 pigmentRushTimer: pigmentRushTimer,
                 pigmentRushActive: pigmentRushActive,
+                rivalFreezeMs: rivalFreezeMs, // v11 C: rival freeze (additive)
                 // Replay
                 replayEvents: replayEvents.slice(),
                 sessionStartTime: sessionStartTime,
@@ -2894,6 +2920,7 @@ const TRAIL_RENDER_CONFIG = {
                 hoardPigmentCount = data.hoardPigmentCount || 0;
                 pigmentRushTimer = data.pigmentRushTimer || 0;
                 pigmentRushActive = data.pigmentRushActive || false;
+                rivalFreezeMs = data.rivalFreezeMs || 0; // v11 C: rival freeze
 
                 sessionPausedTime = (data.sessionPausedTime || 0) + offlineGap;
                 sessionPauseStart = 0;
@@ -3089,7 +3116,21 @@ const TRAIL_RENDER_CONFIG = {
             if (rivals[idx].active) return;
             if (gameMode === 'zen' || gameMode === 'snap' || gameMode === 'daily' || gameMode === 'walled' || gameMode === 'painter') return;
             var r = rivals[idx];
-            r.snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
+            // Spawn at a free tile AWAY from the player. The old fixed center
+            // (10*TILE_SIZE) is exactly the player's spawn tile: the rival appeared
+            // ON the player (dying on tick 1 whenever it moved the same direction),
+            // could materialize on the player's next tile (unfair death), and
+            // double_rival rivals stacked on the same tile.
+            var ph = (snake && snake.length > 0) ? snake[0] : { x: 10 * TILE_SIZE, y: 10 * TILE_SIZE };
+            var spawnPos = findFreeTile(ph.x, ph.y, true);
+            if (!spawnPos) {
+                // No free tile right now — re-arm the respawn timer so it retries,
+                // instead of stacking onto an occupied tile (or never spawning
+                // again once the timer hit 0).
+                r.respawnTimer = Math.max(r.respawnTimer, 2000);
+                return;
+            }
+            r.snake = [{ x: spawnPos.x, y: spawnPos.y }];
             r.dx = TILE_SIZE;
             r.dy = 0;
             r.active = true;
@@ -3121,6 +3162,11 @@ const TRAIL_RENDER_CONFIG = {
                     else if (dx_food < 0) possible.push({ dx: -TILE_SIZE, dy: 0 });
                     if (dy_food > 0) possible.push({ dx: 0, dy: TILE_SIZE });
                     else if (dy_food < 0) possible.push({ dx: 0, dy: -TILE_SIZE });
+                    // Never steer into a 180° reversal: the trail body always holds
+                    // the previous head tile, so a reversal is a GUARANTEED self-hit
+                    // (the AI suicided whenever the food ended up behind it). The
+                    // random-turn branch below already guards this.
+                    possible = possible.filter(function(d) { return !(d.dx === -r.dx && d.dy === -r.dy); });
                     if (possible.length > 0) {
                         var chosen = possible[Math.floor(seededRandom() * possible.length)];
                         r.dx = chosen.dx;
@@ -3196,12 +3242,17 @@ const TRAIL_RENDER_CONFIG = {
             if (idx === undefined) idx = 0;
             if (idx >= rivals.length) return;
             var r = rivals[idx];
+            var wasActive = r.active;
             if (r.active && r.snake.length > 0) {
                 spawnParticles(r.snake[0].x, r.snake[0].y, 20, r.color);
             }
             r.snake = [];
             r.active = false;
             r.respawnTimer = 10000;
+            // A removed rival is a DEFEAT: this is the only increment site for
+            // stats.rivalsDefeated — without it RIVAL_SLAYER, meta_rival_slayer and
+            // the 25/100 rival milestones were structurally unachievable.
+            if (wasActive) stats.rivalsDefeated++;
         }
 
         function resumeGame() {
@@ -3621,6 +3672,10 @@ const TRAIL_RENDER_CONFIG = {
         let hoardPigmentCount = 0;
         let pigmentRushTimer = 0;
         let pigmentRushActive = false;
+        // Rival freeze (ms) extending past the hoard window (Pigment Rush climax).
+        // The old "extend respawnTimer of active rivals" was a no-op — that timer
+        // is only consumed for DEAD rivals.
+        let rivalFreezeMs = 0;
         let hasSeenPigmentRush = saveManager.get('snake_has_seen_pigment_rush', '') === '1';
         function activateHoard() {
             hoardActive = true;
@@ -6281,6 +6336,10 @@ const TRAIL_RENDER_CONFIG = {
                 pigmentRushTimer--;
                 if (pigmentRushTimer <= 0) { pigmentRushActive = false; }
             }
+            // v11 C: rival freeze (Pigment Rush climax) — wall-clock ms, decays with
+            // the real cadence; gates rival updates AND respawns.
+            if (rivalFreezeMs > 0) rivalFreezeMs -= tickInterval;
+
 
             // v6: extracted functions (declared here for closure over updateGame's locals)
             function handleComboMilestone() {
@@ -6387,18 +6446,7 @@ const TRAIL_RENDER_CONFIG = {
             if (activeMutators.indexOf('shrink_zone') !== -1) {
                 var ticksPerShrink = Math.floor(30000 / getEffectiveSpeed());
                 if (gameTick > 0 && gameTick % ticksPerShrink === 0) {
-                    if (shrinkCols < PLAY_WIDTH / TILE_SIZE / 2 - 1) {
-                        shrinkCols++;
-                    } else if (shrinkRows < PLAY_HEIGHT / TILE_SIZE / 2 - 1) {
-                        shrinkRows++;
-                    }
-                    var headNow = snake[0];
-                    var minSX = shrinkCols * TILE_SIZE;
-                    var maxSX = PLAY_WIDTH - shrinkCols * TILE_SIZE;
-                    var minSY = shrinkRows * TILE_SIZE;
-                    var maxSY = PLAY_HEIGHT - shrinkRows * TILE_SIZE;
-                    if (headNow.x < minSX || headNow.x >= maxSX || headNow.y < minSY || headNow.y >= maxSY) {
-                        lastDeathCause = 'Caught by the shrinking zone!';
+                    if (advanceShrinkZone()) {
                         gameOver();
                         return;
                     }
@@ -6619,7 +6667,11 @@ const TRAIL_RENDER_CONFIG = {
                                     snake.push({ x: snake[snake.length - 1].x, y: snake[snake.length - 1].y });
                                     rivals[rci].snake.pop();
                                 }
-                                if (rivals[rci].snake.length <= 1) rivals[rci].active = false;
+                                // Design (IMPL_PLAN_v6 L178): a leech-drained rival is
+                                // DEFEATED and respawns later. The old direct active=false
+                                // left respawnTimer at 0 (never respawns) and didn't count
+                                // the defeat.
+                                if (rivals[rci].snake.length <= 1) removeRival(rci);
                                 spawnParticles(wrappedHead.x, wrappedHead.y, 10, '#44FF88');
                                 // v7: evolution trigger — Leech steal is a 3rd growth site
                                 triggerEvolutionIfReady();
@@ -7069,10 +7121,10 @@ const TRAIL_RENDER_CONFIG = {
                             if (hoardPigmentCount >= 4 && !pigmentRushActive) {
                                 pigmentRushActive = true;
                                 pigmentRushTimer = 42; // ~5s at 120ms tick
-                                // Extend rival freeze by 3s
-                                for (var pri = 0; pri < rivals.length; pri++) {
-                                    if (rivals[pri].active) rivals[pri].respawnTimer = (rivals[pri].respawnTimer || 0) + 3000;
-                                }
+                                // Extend rival freeze by 3s past the hoard window.
+                                // (The old respawnTimer += 3000 on ACTIVE rivals was
+                                // a no-op — that timer is only consumed when dead.)
+                                rivalFreezeMs = 3000;
                                 queueToast('🎨 Pigment Rush! ×3 score!', 3000);
                                 queueGameEffect('flash', { color: '#FFD700', alpha: 0.4, priority: 'high' });
                                 if (!hasSeenPigmentRush) { hasSeenPigmentRush = true; saveManager.set('snake_has_seen_pigment_rush', '1'); }
@@ -7208,23 +7260,30 @@ const TRAIL_RENDER_CONFIG = {
                 }
             }
 
-            // Rival respawn timer
-            var anyRivalAlive = anyRivalActive();
-            if (!anyRivalAlive && rivals.length > 0 && rivals[0].respawnTimer > 0 && !hoardActive) {
-                // respawnTimer is wall-clock ms — subtract the real cadence so a speed
-                // boost doesn't respawn rivals early.
-                rivals[0].respawnTimer -= tickInterval;
-                if (rivals[0].respawnTimer <= 0) {
-                    spawnRival(0);
+            // Rival respawn timers — EACH dead rival respawns on its own timer.
+            // The old single-slot form only ever respawned rivals[0] and froze all
+            // timers while any rival was alive: with double_rival, rival 1 stayed
+            // dead forever. respawnTimer is wall-clock ms — subtract the real
+            // cadence so a speed boost doesn't respawn rivals early. Frozen during
+            // the Golden Hoard and the Pigment Rush climax (rivalFreezeMs).
+            for (var rri = 0; rri < rivals.length; rri++) {
+                if (!rivals[rri].active && rivals[rri].respawnTimer > 0 && !hoardActive && rivalFreezeMs <= 0) {
+                    rivals[rri].respawnTimer -= tickInterval;
+                    if (rivals[rri].respawnTimer <= 0) {
+                        spawnRival(rri);
+                    }
                 }
             }
 
             // Update rival
-            if (anyRivalActive() && !hoardActive) {
+            if (anyRivalActive() && !hoardActive && rivalFreezeMs <= 0) {
                 for (var rii = 0; rii < rivals.length; rii++) {
                     if (rivals[rii].active) updateRival(rii);
                 }
             }
+            // A rival-eat can kill the player via the Pressure Cooker resonance —
+            // stop the tick tail cleanly instead of running post-death effects.
+            if (gameState !== 'playing') return;
 
             // Sparkle trail spawn
             if (cosmetics.trace === 'trace_sparkle' && gameTick % 5 === 0 && snake.length > 1) {
