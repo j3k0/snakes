@@ -403,6 +403,46 @@ try {
           r.adj.grew === 3, JSON.stringify(r.adj));
 } catch (e) { fail_('B7: leech contract', e.message); }
 
+// B17: the leech clause must NOT fire when the rival did not move this tick. A stationary
+// rival (cadence skip, or the hoard/Pigment Rush freeze) leaves its head on the tile the
+// player charges into; resolving that as a leech kill survived-and-collected a contact the
+// unbrewed player dies on — and it flipped on the rival's invisible moveCounter, which is
+// the same "sometimes I run through it" texture this cycle exists to remove. The contrast
+// with B17c is the whole point: identical positions, only the rival's stride phase differs.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        const seg = (x, y, n, ddx, ddy) => {
+            const out = [];
+            for (let i = 0; i < n; i++) out.push({ x: x + i * ddx, y: y + i * ddy });
+            return out;
+        };
+        // The rival's head is PARKED on the player's destination, body running away from the
+        // player along y. mc controls whether its next updateRival call skips or moves.
+        const park = (mc, freeze) => {
+            cleanRun({ brews: ['leech'] });
+            if (freeze) { hoardActive = true; hoardTimer = 500; }
+            playerAt(100, 100, 4);
+            rivals = [{ snake: seg(120, 100, 7, 0, 20), dx: 0, dy: 20, active: true,
+                        respawnTimer: 0, moveCounter: mc, color: '#B71C1C' }];
+            roadStraight();
+            food = { x: 380, y: 380, type: 'common', spawnTime: 0 };
+            const d0 = stats.rivalsDefeated, l0 = snake.length;
+            updateGame();
+            return { state: gameState, delta: stats.rivalsDefeated - d0,
+                     grew: snake.length - l0, cause: lastDeathCause };
+        };
+        // length 7 -> stride 2: mc 0 skips, mc 1 moves.
+        return { skip: park(0, false), freeze: park(0, true), moves: park(1, false) };
+    })()`);
+    check('B17: charging a STATIONARY rival is lethal, not a free credited kill',
+          r.skip.state === 'gameover' && r.skip.delta === 0, JSON.stringify(r.skip));
+    check('B17b: the same holds while the rival is frozen by the hoard',
+          r.freeze.state === 'gameover' && r.freeze.delta === 0, JSON.stringify(r.freeze));
+    check('B17c: the divergence was phase-only — the skip and move rows differ',
+          r.moves.state !== r.skip.state, JSON.stringify(r));
+} catch (e) { fail_('B17: stationary leech', e.message); }
+
 // B8: the partial drain is preserved — an adjacent (non-overlapping) rival survives.
 try {
     const r = await page.evaluate(`(() => {

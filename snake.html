@@ -1113,7 +1113,7 @@ var BREWS_CONFIG = [
     { id: 'vampire',    name: 'Vampire Brew',  desc: 'Survive first fatal hit at length 3',                   cost: 2, mutuallyExclusive: ['phoenix'] },
     { id: 'rampage',    name: 'Rampage Brew',  desc: 'Food spawns closer to your head (min 3 tiles)',          cost: 2 },
     { id: 'phantom',    name: 'Phantom Brew',  desc: 'Cross past-ghost trail for +1.0x combo (5s)',            cost: 3 },
-    { id: 'leech',      name: 'Leech Brew',    desc: 'Steal 3 segments on head-to-head; destroys a rival sharing your tile', cost: 3 },
+    { id: 'leech',      name: 'Leech Brew',    desc: 'Steal 3 segments on head-to-head; destroys a rival that steps onto your tile', cost: 3 },
     { id: 'combustion', name: 'Comb Brew',     desc: 'Each combo milestone adds +1 mult to next 3 foods',      cost: 3 },
     { id: 'echo',       name: 'Echo Brew',     desc: 'Every 8th food spawns an adjacent copy (half pts)',      cost: 5 },
     { id: 'phoenix',    name: 'Phoenix Brew',  desc: 'Resurrect once at length 5, score resets to 0',          cost: 5, mutuallyExclusive: ['vampire'] },
@@ -3588,6 +3588,7 @@ const TRAIL_RENDER_CONFIG = {
             }
 
             r.snake.unshift(newHead);
+            r.movedThisTick = true;   // v13: the move is committed — see the leech clause
             if (r.snake.length > RIVAL_MAX_LENGTH) r.snake.pop();
 
             if (food && newHead.x === food.x && newHead.y === food.y) {
@@ -7174,6 +7175,12 @@ const TRAIL_RENDER_CONFIG = {
             // ms — subtract the real cadence so a speed boost doesn't respawn rivals early.
             // Frozen during the Golden Hoard and the Pigment Rush climax (rivalFreezeMs),
             // which pauses the wind-up too while still drawing it.
+            // v13: per-tick record of whether each rival actually MOVED. The leech's
+            // early-removal clause below needs it: a rival that skipped its cadence stride, or
+            // is frozen by the hoard/Pigment Rush, leaves its head sitting on the tile the
+            // player charges into — and resolving that as a leech kill would survive a contact
+            // the base build punishes with death, phase-dependently (unlearnable).
+            for (var rmt = 0; rmt < rivals.length; rmt++) rivals[rmt].movedThisTick = false;
             for (var rri = 0; rri < rivals.length; rri++) {
                 var rr = rivals[rri];
                 if (rr.active || !(rr.respawnTimer > 0) || hoardActive || rivalFreezeMs > 0 || gauntletIntermission) continue;
@@ -7608,8 +7615,20 @@ const TRAIL_RENDER_CONFIG = {
                                 // and pay +50 score / +100 XP. That is a free kill for the
                                 // brew's owner, and a regression against the pre-v13 build,
                                 // which killed the player in exactly that geometry.
-                                if (rivals[rci].snake.length <= 1 ||
-                                    (wrappedHead.x === rHead.x && wrappedHead.y === rHead.y)) {
+                                // v13: and ONLY when the rival actually moved this tick. A
+                                // stationary rival (cadence skip, or the hoard/Pigment Rush
+                                // freeze) leaves its head on the tile the player charged into;
+                                // without this gate the clause turned that into a credited,
+                                // rewarded kill where the base build kills the player — and it
+                                // flipped on the rival's invisible moveCounter, which is exactly
+                                // the "sometimes I run through it" texture this cycle removed.
+                                // When the rival DID move, its pre-move body cannot hold the
+                                // tile it now occupies (that would be a self-hit), so base
+                                // survived the charge and removed the rival too: the removal is
+                                // base-consistent and only the reward is new.
+                                if (rivals[rci].movedThisTick &&
+                                    (rivals[rci].snake.length <= 1 ||
+                                     (wrappedHead.x === rHead.x && wrappedHead.y === rHead.y))) {
                                     removeRival(rci, true);
                                     continue;
                                 }

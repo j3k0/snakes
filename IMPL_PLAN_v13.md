@@ -626,3 +626,20 @@ confirmed satisfied. One new blocking finding, reproduced before any change.
 | **Advisory** the cause classifier's clause (ii) used the rule-2 body-ram predicate to label a rule-1 player death, so ~7.4% of "head-on" deaths were mislabelled and the `ram its SIDE` toast fired on deaths that were already a side ram — a worse lesson than the generic string. | **Fixed.** A head-on is now the rival's head on the player's **head**, or on the tile the player just **vacated** (the swap). Verified: a constructed body-ram-with-a-stray-rival-head death reports the flank cause while a genuine head-on reports the charge cause. |
 | **Advisory** stale figures in round 3's own dispositions (251/77/53-20) plus a quoted cause string that is not in the code. | **Fixed**, and the numbers are now re-derived per round rather than copied forward. |
 | **Advisory** coverage gaps: sibling-telegraph rejection untested; the one-shot teach toast untested (string, once-only, persistence key); B7 asserted no credit delta. | **Fixed** — D7 (400 spawns, 0 overlaps), B16/B16b/B16c (fires once with the SIDE wording, silent on a later death, flag persists), and B7 now asserts the delta. |
+
+---
+
+## Reviewer round 5 (`345ebfa`)
+
+The revert and the classifier fix were confirmed clean (0/115 mislabels; 258/84 green; the suite fails
+exactly 2 against `7e1824b`). One residual divergence remained, phase-dependent, and it was fixed rather
+than documented.
+
+| Finding | Disposition |
+|---|---|
+| **Residual** the leech's early-removal clause fired on a tick when the rival did NOT move (its cadence stride skipped, or a real freeze). A stationary rival keeps its head on the tile the player charges into, so `wrappedHead === rHead` was true, the drain left ≥2 segments, and the player survived with a credited, rewarded kill where the base build kills them. Measured 16 occurrences in ~78k ticks, and it flipped on the rival's invisible `moveCounter` — the same phase-dependent texture as JC's original report. | **Fixed.** New per-rival `movedThisTick`, reset for every rival in the tick prologue and set in `updateRival` when the move is committed; the clause is now gated on it. Reproduced first (skip, freeze, and the moving-convergence contrast), then verified: skip and freeze now both give `gameover, delta 0` exactly as the unbrewed player gets, while the moving convergence still pays. Justification recorded in code and AGENTS.md: when the rival moved, its pre-move body cannot hold its new tile (that would be a self-hit), so base survived the charge too — the removal was always base-consistent and only the reward is new. |
+| **Doc** AGENTS.md claimed "base parity across the four geometries is pinned by the B7 family" — false for the stationary shape, since B7's `same` geometry uses a moving rival. | **Corrected** — the four pinned geometries are now named individually, with an explicit warning not to read B7 as covering the stationary case. |
+| **Doc** the pre-v13 differential was 55/25, not 56/24. | **Corrected and re-derived** (now 57/26 for 87 assertions; run twice, consistent). |
+| **Nit** the classifier cannot distinguish "I charged it" from "it charged me" in a mutual perpendicular convergence. | **Documented as a deliberate non-fix** in AGENTS.md: both actors moved into the same previously-empty tile, neither string would be right, and the actionable advice is identical. |
+| **Nit** the leech descriptor's "sharing your tile" did not cover the convergence. | **Reworded** to "destroys a rival that steps onto your tile", which is now literally accurate given the `movedThisTick` gate. |
+| **Confirmed** the reviewer retracted their round-4 suggestion (pre-move-head comparison) as carrying the same hole. | Noted — the post-move `rHead` comparison is the correct one and is what the code uses. |
