@@ -676,3 +676,17 @@ against the over-suppressed build. The findings were all in the tests and one de
 | **Lesson** — the reviewer's observation that all three rounds' blind spots were single-axis sweeps. | **Recorded in AGENTS.md's Verification Notes:** a single-sample fixture is not an assertion; the test is mutation (delete the predicate, confirm the assertion fails). Multi-sample loops with a pinned `seedPrng` are the shape that discriminates. |
 
 | **Also found by auditing the same pattern** C4b passed for the wrong reason: its fixture placed the materialising rival's head on the player's HEAD tile (si=0), which rule 1 owns and `si = 1` skips anyway — so removing the `!active` guard in `resolveRivalRams` left it green. The credit was separately suppressed by `removeRival`'s `wasActive` check, so `delta === 0` could not observe it either. | **Fixed.** C4/C4b now place the rival BOTH on the destination tile and on the player's NECK (si >= 1) and assert the telegraph's body survives intact, which is the observable that proves inertness. Verified: with the `!active` guard deleted, `onBody.len` collapses to 0 and C4b fails. |
+
+---
+
+## Reviewer round 8 (`2db1801`)
+
+All three round-7 fixes verified by the reviewer's own mutation sweep, and the 24-mutation sweep
+found two more assertions of the same class — plus the leader's own sweep found a third.
+
+| Finding | Disposition |
+|---|---|
+| **F3d** the title promised "a body but no ring" while checking only `rects`; forcing the proximity predicate to always-true added an arc and it still passed. | **Fixed** — asserts `arcs` equality against the no-rival baseline too. Falsified: forced-true proximity now fails F3d. |
+| **C5b** asserted `typeof moveCounter === 'number'`, which `restoreFromSnapshot`'s own `moveCounter \|\| 0` default satisfies, so a snapshot that dropped the field entirely still passed. | **Fixed** — asserts the field is SERIALISED (`hasOwnProperty`) and round-trips a non-zero value (5), plus new **C5c** asserting the restored stride phase (moves on the next call, skips the one after). Falsified: dropping the field from the builder fails C5b and C5c. |
+| **Found by the leader's own 13-mutation sweep** the first-class rival onboarding toast (`snake_has_seen_rival` + the directional `srSpeak`) had no assertion at all — deleting it entirely left the suite green. | **Fixed** — new **B19/B19b/B19c/B19d**: the first spawn warns once with the dashed-ring hint, does not repeat, announces a direction to the screen reader, and the flag persists. Falsified: deleting the toast fails B19/B19d. |
+| **Non-findings the reviewer checked and correctly reported as neutral** — F1b (the enclosing save/restore already restores dash state), E3 (the first mutation flipped a zero `dx`, so `-0 === 0`), and `si = 1` (behaviourally equivalent to `si = 0` now that `rivalHeadContactIdx` suppresses the head tile). | Recorded. `si = 1` is belt-and-braces rather than a pinned invariant; the comment at the scan is a second line of defence, not the mechanism. |

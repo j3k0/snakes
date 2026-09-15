@@ -670,6 +670,46 @@ try {
           r.phoenixUsed === true && r.onRival === false, JSON.stringify(r));
 } catch (e) { fail_('B15: phoenix rebuild', e.message); }
 
+// B19: the FIRST-CLASS onboarding cue — the rival's arrival warns the player once per save,
+// with a directional srSpeak line. The head-on teaching toast is pinned by B16; this one was
+// unpinned, so deleting it entirely went unnoticed by the whole suite.
+try {
+    const r = await page.evaluate(`(() => {
+        ${PRE}
+        const spawnOne = () => {
+            cleanRun();
+            snake = [{ x: 40, y: 40 }, { x: 20, y: 40 }];
+            rivals = []; obstacles = []; hazards = []; extraFoods = []; food = null;
+            const heard = [], spoken = [];
+            const oq = window.queueToast, os = window.srSpeak;
+            window.queueToast = function (m) { heard.push(String(m)); };
+            window.srSpeak = function (m) { spoken.push(String(m)); };
+            hasSeenRival = false;
+            spawnRival(0);
+            const first = { heard: heard.slice(), spoken: spoken.slice() };
+            heard.length = 0; spoken.length = 0;
+            rivals = [];
+            spawnRival(0);
+            const second = { heard: heard.slice(), spoken: spoken.slice() };
+            window.queueToast = oq; window.srSpeak = os;
+            return { first, second, flag: hasSeenRival,
+                     stored: saveManager.get('snake_has_seen_rival', '') };
+        };
+        return spawnOne();
+    })()`);
+    const taught = r.first.heard.filter(function (m) { return /Rival incoming/.test(m); });
+    check('B19: the first rival warns once, with the dashed-ring hint',
+          taught.length === 1 && /dashed ring/i.test(taught[0]), JSON.stringify(r));
+    check('B19b: it does not repeat on later spawns',
+          r.second.heard.filter(function (m) { return /Rival incoming/.test(m); }).length === 0,
+          JSON.stringify(r.second));
+    check('B19c: the arrival is announced to the screen reader with a direction',
+          r.first.spoken.filter(function (m) { return /^Rival incoming, /.test(m); }).length === 1,
+          JSON.stringify(r.first.spoken));
+    check('B19d: the one-shot flag persists',
+          r.flag === true && r.stored === '1', JSON.stringify({ flag: r.flag, stored: r.stored }));
+} catch (e) { fail_('B19: rival onboarding', e.message); }
+
 // B16: the head-on rule is taught exactly once, and only on a genuine head-on. The cause
 // string cannot carry the counterplay (it must stay short for the 320px recap card), so the
 // one-shot toast IS the teaching mechanism — nothing pinned it, its string, or its flag.
@@ -921,17 +961,57 @@ try {
         rivals = [];
         spawnRival(0);
         const windupBefore = rivals[0].respawnTimer;
+        rivals[0].moveCounter = 5;   // non-zero: the round-trip must carry the VALUE
         const snap = JSON.parse(JSON.stringify(buildSnapshotObject()));
         rivals = [];
         restoreFromSnapshot(snap, false);
         const rv = rivals[0];
         const okState = rv && rv.active === false && rv.snake.length === 3;
         const restoredTimer = rv ? rv.respawnTimer : -1;
-        return { okState, restoredTimer, windupBefore, hasMoveCounter: rv ? typeof rv.moveCounter : 'none' };
+        // A non-zero value, so the assertion can distinguish "the snapshot carried it" from
+        // "restoreFromSnapshot defaulted it": the restore's own moveCounter-or-0 means a
+        // typeof check is satisfied by the DEFAULT, and a snapshot that drops the field
+        // entirely still passes. The stride phase is the observable — a desynchronised
+        // counter changes which call the rival moves on.
+        const snapHasField = Object.prototype.hasOwnProperty.call(snap.rivals[0], 'moveCounter');
+        const restoredValue = rv ? rv.moveCounter : -1;
+        return { okState, restoredTimer, windupBefore, snapHasField, restoredValue };
     })()`);
     check('C5: a mid-wind-up snapshot restores as materialising',
           r.okState && Math.abs(r.restoredTimer - r.windupBefore) < 200, JSON.stringify(r));
-    check('C5b: moveCounter round-trips', r.hasMoveCounter === 'number', JSON.stringify(r));
+    check('C5b: moveCounter is serialised and round-trips its VALUE',
+          r.snapHasField === true && r.restoredValue === 5, JSON.stringify(r));
+    // And the phase survives: a length-14 rival (stride 3) restored at moveCounter 5 must
+    // skip its next call and move on the one after.
+    const phase = await page.evaluate(`(() => {
+        ${PRE}
+        cleanRun();
+        playerAt(40, 40, 4);
+        rivals = [];
+        spawnRival(0);
+        rivals[0].snake = [{ x: 200, y: 200 }, { x: 180, y: 200 }, { x: 160, y: 200 },
+                          { x: 140, y: 200 }, { x: 120, y: 200 }, { x: 100, y: 200 },
+                          { x: 80, y: 200 }, { x: 60, y: 200 }, { x: 40, y: 200 },
+                          { x: 20, y: 200 }, { x: 0, y: 200 }, { x: 380, y: 200 },
+                          { x: 360, y: 200 }, { x: 340, y: 200 }];
+        rivals[0].active = true;
+        rivals[0].moveCounter = 5;
+        food = { x: 40, y: 380, type: 'common', spawnTime: 0 };
+        const snap = JSON.parse(JSON.stringify(buildSnapshotObject()));
+        rivals = [];
+        restoreFromSnapshot(snap, false);
+        const rv = rivals[0];
+        const restored = rv.moveCounter;   // read BEFORE the calls, which advance it
+        const head0 = rv.snake[0].x + ',' + rv.snake[0].y;
+        updateRival(0);                       // 5 + 1 = 6, 6 % 3 === 0 -> MOVES
+        const afterFirst = rv.snake[0].x + ',' + rv.snake[0].y;
+        updateRival(0);                       // 7 % 3 !== 0 -> skips
+        const afterSecond = rv.snake[0].x + ',' + rv.snake[0].y;
+        return { restored, head0, afterFirst, afterSecond };
+    })()`);
+    check('C5c: the restored stride phase aligns (moves, then skips)',
+          phase.restored === 5 && phase.afterFirst !== phase.head0 &&
+          phase.afterSecond === phase.afterFirst, JSON.stringify(phase));
 } catch (e) { fail_('C5: wind-up snapshot', e.message); }
 
 // C6: the wind-up pauses during a hoard (it inherits the respawn loop's freeze gate).
@@ -1358,8 +1438,12 @@ try {
           r.materialising.arcs - r.noRival.arcs >= 2, JSON.stringify(r));
     check('F3c: a dead rival adds no drawing at all',
           r.dead.rects === r.noRival.rects && r.dead.arcs === r.noRival.arcs, JSON.stringify(r));
+    // The title is the contract: a FAR rival adds a body but NO ring. Asserting only `rects`
+    // left the ring half unchecked — forcing the proximity predicate to `true` added an arc
+    // and this still passed. Both counters must be pinned.
     check('F3d: an active rival adds a body but no ring when far away',
-          r.activeFar.rects - r.noRival.rects >= 3, JSON.stringify(r));
+          r.activeFar.rects - r.noRival.rects >= 3 &&
+          r.activeFar.arcs === r.noRival.arcs, JSON.stringify(r));
 } catch (e) { fail_('F3: telegraph draws', e.message); }
 
 // C7: the deferral is bounded — camping the telegraph relocates it rather than disarming
