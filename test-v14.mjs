@@ -405,6 +405,36 @@ console.log('\nD2: NEW BEST toast + cascade correction');
 }
 
 // ---------------------------------------------------------------------------
+// E — the screen-reader queue keeps two messages, in order.
+console.log('\nE: srSpeak depth 2');
+{
+  const r = await page.evaluate(`(async () => {
+    const speak = window.__origSrSpeak || window.srSpeak;
+    if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;
+    const el = document.getElementById('srAnnounce');
+    const heard = [];
+    const mo = new MutationObserver(() => { if (el.textContent) heard.push(el.textContent); });
+    mo.observe(el, { childList: true, characterData: true, subtree: true });
+    await new Promise(res => setTimeout(res, 600));   // let any pending drain finish
+    heard.length = 0;
+    srQueue = Array.isArray(srQueue) ? [] : '';       // drop leftovers from earlier scenarios
+    lastSrSpeak = Date.now();                         // open a 500ms window
+    speak('FIRST'); speak('SECOND');
+    const queued = Array.isArray(srQueue) ? srQueue.slice() : srQueue;
+    await new Promise(res => setTimeout(res, 1800));  // two drain windows
+    lastSrSpeak = Date.now();
+    for (let i = 0; i < 5; i++) speak('X' + i);
+    const capped = Array.isArray(srQueue) ? srQueue.slice() : srQueue;
+    await new Promise(res => setTimeout(res, 1800));
+    mo.disconnect();
+    return { heard, queued, capped };
+  })()`);
+  const iF = r.heard.indexOf('FIRST'), iS = r.heard.indexOf('SECOND');
+  check('E1 two messages in one window are both spoken, in order', iF >= 0 && iS > iF, JSON.stringify(r));
+  check('E2 the queue is capped at 2 (third+ dropped)', Array.isArray(r.capped) && r.capped.length === 2 && r.capped[0] === 'X0' && r.capped[1] === 'X1', JSON.stringify(r.capped));
+}
+
+// ---------------------------------------------------------------------------
 await page.evaluate(() => {
   if (window.__origPlaySound) window.playSound = window.__origPlaySound;
   if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;

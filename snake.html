@@ -1086,19 +1086,26 @@ function spawnFloater(x, y, text, color, size, duration) {
 // --- end v6 ---
 // v6: Screen reader support
 let lastSrSpeak = 0;
-let srQueue = '';
+// v14 E: 2-deep FIFO. The old single slot let a second message inside the 500ms window
+// overwrite the first — 'Rival incoming' was routinely lost under an eat line. A third
+// message inside one window is dropped (cap 2, same precedent as dirQueue).
+let srQueue = [];
 function srSpeak(text) {
     var el = document.getElementById('srAnnounce');
     if (!el) return;
     var now = Date.now();
-    if (now - lastSrSpeak < 500) { srQueue = text; return; }
+    if (now - lastSrSpeak < 500) {
+        if (srQueue.length < 2) srQueue.push(text);
+        return;
+    }
     lastSrSpeak = now;
     el.textContent = '';
     setTimeout(function() { el.textContent = text; }, 50);
 }
 setInterval(function() {
-    if (srQueue && Date.now() - lastSrSpeak >= 500) {
-        var msg = srQueue; srQueue = '';
+    if (srQueue.length && Date.now() - lastSrSpeak >= 500) {
+        var msg = srQueue.shift();   // one per drain tick; the rest waits a window
+        lastSrSpeak = Date.now();
         var el = document.getElementById('srAnnounce');
         if (el) { el.textContent = ''; setTimeout(function() { el.textContent = msg; }, 50); }
     }
