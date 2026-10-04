@@ -3614,6 +3614,14 @@ const TRAIL_RENDER_CONFIG = {
                 } else {
                     food = null;
                 }
+                // v14 A: the rival's meal is a player-facing event — you just lost a race.
+                // Deliberately quieter than the player's own eat cue (4 particles vs 8-18,
+                // a floater phrase not a '+pts', one short blip), and NO toast (ambient
+                // information, not an interruption). Fires for every food type.
+                spawnFloater(newHead.x, newHead.y, 'rival ate', '#FF8888', 12, 0.8);
+                spawnParticles(newHead.x, newHead.y, 4, r.color);
+                playSound('rival_eat');
+                srSpeak('Rival ate');
                 // v12 A: Pressure Cooker resonance (rivalShrink) — a rival eating also
                 // shrinks the board. advanceShrinkZone() tests the PLAYER's head, so a
                 // rival's meal can kill the player; that is what the descriptor promises.
@@ -4331,6 +4339,15 @@ const TRAIL_RENDER_CONFIG = {
                     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
                     osc.start(now);
                     osc.stop(now + 0.25);
+                    break;
+                case 'rival_eat':
+                    // v14 A: one short low blip, 175Hz 0.1s — quieter and shorter than any
+                    // player cue. 175 (not the plan's 196) so it does not echo rival_warn's
+                    // second tone; collides with none of the existing pitches.
+                    osc.frequency.setValueAtTime(175, now);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+                    osc.start(now);
+                    osc.stop(now + 0.1);
                     break;
                 case 'rare_spawn':
                     // Two quick ascending notes, 0.2s total
