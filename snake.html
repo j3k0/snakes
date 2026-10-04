@@ -2214,9 +2214,13 @@ const TRAIL_RENDER_CONFIG = {
         }
         // v9 D: snap a teleport destination to the nearest free tile if occupied
         function snapToFreeTile(x, y) {
+            // v14 C: test the materialising telegraph too (rivalCombinedSnake covers every
+            // rival with a body, active or winding up) — the old r.active filter let the
+            // portal exit land the player on a rival that solidified a tick later.
+            var rivalSegs = rivalCombinedSnake();
             if (!snake.some(function(s) { return s.x === x && s.y === y; }) &&
                 !obstacles.some(function(o) { return o.x === x && o.y === y; }) &&
-                !rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === x && s.y === y; }); })) {
+                !rivalSegs.some(function(s) { return s.x === x && s.y === y; })) {
                 return { x: x, y: y };
             }
             var neighbors = [{x:x+TILE_SIZE,y:y},{x:x-TILE_SIZE,y:y},{x:x,y:y+TILE_SIZE},{x:x,y:y-TILE_SIZE}];
@@ -2224,7 +2228,7 @@ const TRAIL_RENDER_CONFIG = {
                 var n = wrapPosition(neighbors[i]);
                 if (!snake.some(function(s) { return s.x === n.x && s.y === n.y; }) &&
                     !obstacles.some(function(o) { return o.x === n.x && o.y === n.y; }) &&
-                    !rivals.some(function(r) { return r.active && r.snake.some(function(s) { return s.x === n.x && s.y === n.y; }); })) {
+                    !rivalSegs.some(function(s) { return s.x === n.x && s.y === n.y; })) {
                     return n;
                 }
             }

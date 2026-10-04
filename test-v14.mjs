@@ -235,6 +235,37 @@ console.log('\nB: the board constrains the rival');
 }
 
 // ---------------------------------------------------------------------------
+// C — the portal exit never lands on a materialising rival.
+console.log('\nC: snapToFreeTile respects telegraphs');
+{
+  const sweep = (active) => page.evaluate(PRE + `
+    cleanRun();
+    const rng = mulberry32(hashString('c-sweep'));
+    const cols = PLAY_WIDTH / TILE_SIZE, rows = PLAY_HEIGHT / TILE_SIZE;
+    let good = 0; const bad = [];
+    for (let t = 0; t < 50; t++) {
+      const x = (2 + Math.floor(rng() * (cols - 4))) * TILE_SIZE;
+      const y = (2 + Math.floor(rng() * (rows - 4))) * TILE_SIZE;
+      // A 3-segment body whose HEAD sits on the exit candidate; one perpendicular
+      // neighbour also covered, so the snap has to choose among the rest.
+      rivals = [{ snake: [{x, y}, {x: x - 20, y}, {x: x - 40, y}], dx: 20, dy: 0,
+                  active: ${active}, respawnTimer: ${active ? 0 : 1600}, moveCounter: 0, color: '#B71C1C' }];
+      snake = [{ x: x, y: y - 20 }, { x: x, y: y - 40 }];
+      obstacles = [];
+      const out = snapToFreeTile(x, y);
+      const onRival = rivalCombinedSnake().some(s => s.x === out.x && s.y === out.y);
+      const onSnake = snake.some(s => s.x === out.x && s.y === out.y);
+      if (!onRival && !onSnake) good++; else if (bad.length < 3) bad.push(x + ',' + y + '->' + out.x + ',' + out.y);
+    }
+    ({ good, bad });
+  `);
+  const c1 = await sweep(false);
+  check('C1 materialising rival: exit snaps off the telegraph (50/50)', c1.good === 50, JSON.stringify(c1));
+  const c2 = await sweep(true);
+  check('C2 active rival: exit snaps off the body (50/50, regression)', c2.good === 50, JSON.stringify(c2));
+}
+
+// ---------------------------------------------------------------------------
 await page.evaluate(() => {
   if (window.__origPlaySound) window.playSound = window.__origPlaySound;
   if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;
