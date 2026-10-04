@@ -796,6 +796,11 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let sessionStartTime = 0;
         let sessionFoodEaten = 0;
         let sessionModeHighStart = 0;
+        // v14 D2: one NEW BEST toast per run (set at the first crossing), and the raw score
+        // this run last banked into modeHighScores mid-run (0 = this run banked nothing) —
+        // finalizeSession uses it to undo a mid-run best that the cascade then lowered.
+        let sessionNewBestAnnounced = false;
+        let sessionRunMaxRaw = 0;
         // v12 C: recap disclosure state. sessionRawScore is the score BEFORE the cascade
         // multiply; sessionCascadeMult is the factor applied (1 = no cascade). Both are
         // reset in resetGame/resetWaveState and set at the two session ends.
@@ -2480,13 +2485,18 @@ const TRAIL_RENDER_CONFIG = {
 
         function updateScoreDisplay() {
             if (score > (modeHighScores[gameMode] || 0)) {
-                const prevBest = modeHighScores[gameMode];
                 modeHighScores[gameMode] = score;
                 saveManager.setJSON('snake_mode_highs', modeHighScores);
-                if (sessionModeHighStart > 0 && prevBest && score > prevBest) {
-                    queueToast('🏆 NEW BEST! ' + MODE_CONFIG[gameMode].name + ': ' + score, 3000);
-                    playSound('achievement');
-                }
+                sessionRunMaxRaw = score;
+            }
+            // v14 D2: ONE celebration per run, at the first crossing. The per-crossing form
+            // fired 19 toasts in a 40-eat record run (58 queued vs a cap of 20), and never
+            // fired at all in a fresh mode (`prevBest &&` failed on undefined — the run most
+            // deserving of one). score > 0 is implied: sessionModeHighStart >= 0.
+            if (gameState === 'playing' && score > sessionModeHighStart && !sessionNewBestAnnounced) {
+                sessionNewBestAnnounced = true;
+                queueToast('🏆 NEW BEST! ' + MODE_CONFIG[gameMode].name + ': ' + score, 3000);
+                playSound('achievement');
             }
             if (score > highScore) {
                 highScore = score;
@@ -2635,6 +2645,8 @@ const TRAIL_RENDER_CONFIG = {
             if (gameMode === 'zen') zenActive = true;
             sessionStartTime = Date.now();
             sessionModeHighStart = modeHighScores[gameMode] || 0;
+            sessionNewBestAnnounced = false;
+            sessionRunMaxRaw = 0;
             gameState = 'playing';
             updateMenuFooter();
             tickInterval = getEffectiveSpeed();
@@ -3132,6 +3144,10 @@ const TRAIL_RENDER_CONFIG = {
                 sessionXP = data.sessionXP || 0;
                 sessionStartTime = data.sessionStartTime || Date.now();
                 sessionModeHighStart = data.sessionModeHighStart || 0;
+                // v14 D2: re-derived, not serialised. A resumed run already past its start
+                // best has had its toast and banked its raw score mid-run.
+                sessionNewBestAnnounced = score > sessionModeHighStart;
+                sessionRunMaxRaw = score > sessionModeHighStart ? score : 0;
                 sessionUsedShield = !!data.sessionUsedShield;
                 lastEatenType = (data.lastEatenType == null) ? 'common' : data.lastEatenType;
                 replayEvents = (data.replayEvents || []).slice();
@@ -3788,6 +3804,15 @@ const TRAIL_RENDER_CONFIG = {
             saveAllState();
             if (score > (modeHighScores[gameMode] || 0)) {
                 modeHighScores[gameMode] = score;
+                saveManager.setJSON('snake_mode_highs', modeHighScores);
+            }
+            // v14 D2: the mid-run best was banked from the RAW score; the cascade can lower
+            // it. If THIS run's mid-run write is still the persisted value and the
+            // post-cascade score is lower, correct it so the mode-select Best agrees with
+            // the recap card. (Pause-quit never reaches here and keeps its raw best.)
+            if (sessionCascadeMult < 1 && sessionRunMaxRaw > 0 &&
+                modeHighScores[gameMode] === sessionRunMaxRaw && sessionRunMaxRaw > score) {
+                modeHighScores[gameMode] = Math.max(score, sessionModeHighStart);
                 saveManager.setJSON('snake_mode_highs', modeHighScores);
             }
             // v10 D: Daily Seed Leaderboard — personal top-5 per daily seed

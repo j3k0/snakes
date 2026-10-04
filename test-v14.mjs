@@ -306,6 +306,105 @@ console.log('\nD1: mode-select descriptions within bounds');
 }
 
 // ---------------------------------------------------------------------------
+// D2 — one NEW BEST per run; the cascade-lowered best is corrected.
+console.log('\nD2: NEW BEST toast + cascade correction');
+{
+  const D2PRE = PRE + `
+  const savedHighs = JSON.stringify(modeHighScores);
+  const toasts = [];
+  if (!window.__origQueueToast) window.__origQueueToast = window.queueToast;
+  window.queueToast = (m) => { toasts.push(String(m)); };
+  const newBests = () => toasts.filter(t => t.includes('NEW BEST')).length;
+  const runIn = (mode, startBest, mutators) => {
+    cleanRun({ mode });
+    // cleanRun started a run; set the best and restart so sessionModeHighStart reads it.
+    stopGameLoop();
+    if (startBest === undefined) delete modeHighScores[mode]; else modeHighScores[mode] = startBest;
+    saveManager.setJSON('snake_mode_highs', modeHighScores);
+    startGame(); stopGameLoop();
+    activeMutators = mutators || []; activeBrews = []; score = 0;
+    toasts.length = 0;
+  };
+  const restore = () => {
+    window.queueToast = window.__origQueueToast;
+    modeHighScores = JSON.parse(savedHighs);
+    saveManager.setJSON('snake_mode_highs', modeHighScores);
+    resetGame();
+  };
+  `;
+  const a = await page.evaluate(D2PRE + `
+    runIn('classic', 100);
+    for (let i = 0; i < 40; i++) addScore(10);
+    const out = { n: newBests(), best: modeHighScores.classic, score };
+    restore(); out;
+  `);
+  check('D2a a record run queues exactly one NEW BEST toast', a.n === 1 && a.best === a.score, JSON.stringify(a));
+
+  const b = await page.evaluate(D2PRE + `
+    runIn('snap', undefined);
+    addScore(10); addScore(10);
+    const out = { n: newBests(), start: sessionModeHighStart };
+    restore(); out;
+  `);
+  check('D2b a fresh mode gets its NEW BEST at the first crossing', b.n === 1 && b.start === 0, JSON.stringify(b));
+
+  const c = await page.evaluate(D2PRE + `
+    runIn('classic', 500);
+    for (let i = 0; i < 70; i++) addScore(10);
+    resetGame(); // the pause-menu Quit path: no finalizeSession
+    const out = { persisted: saveManager.getJSON('snake_mode_highs', {}).classic };
+    restore(); out;
+  `);
+  check('D2c pause-quit keeps the raw mid-run best (unchanged)', c.persisted === 700, JSON.stringify(c));
+
+  const d = await page.evaluate(D2PRE + `
+    runIn('classic', 40, ['gravity', 'mirror']);
+    for (let i = 0; i < 10; i++) addScore(10);
+    const mid = modeHighScores.classic;
+    gameOver();
+    const out = { mid, score, mult: sessionCascadeMult,
+                  persisted: saveManager.getJSON('snake_mode_highs', {}).classic,
+                  live: modeHighScores.classic, recapNew: recapData && recapData.isNewBest };
+    restore(); out;
+  `);
+  check('D2d cascade-lowered best is corrected to the post-cascade score', d.mid === 100 && d.mult === 0.5 && d.score === 50 && d.persisted === 50 && d.live === 50 && d.recapNew === true, JSON.stringify(d));
+
+  const d2 = await page.evaluate(D2PRE + `
+    runIn('classic', 80, ['gravity', 'mirror']);
+    for (let i = 0; i < 10; i++) addScore(10);
+    gameOver();
+    const out = { score, persisted: saveManager.getJSON('snake_mode_highs', {}).classic };
+    restore(); out;
+  `);
+  check('D2d\' correction never drops below the start best', d2.score === 50 && d2.persisted === 80, JSON.stringify(d2));
+
+  const e = await page.evaluate(D2PRE + `
+    runIn('classic', 40, ['gravity']);
+    for (let i = 0; i < 10; i++) addScore(10);
+    gameOver();
+    const out = { score, persisted: saveManager.getJSON('snake_mode_highs', {}).classic };
+    restore(); out;
+  `);
+  check('D2e single-mutator run: the persisted best is the raw score', e.score === 100 && e.persisted === 100, JSON.stringify(e));
+
+  const f = await page.evaluate(D2PRE + `
+    runIn('classic', 200);
+    for (let i = 0; i < 50; i++) addScore(10);
+    const snap = buildSnapshotObject();
+    resetGame();
+    sessionNewBestAnnounced = false; sessionRunMaxRaw = 0; // prove restore re-derives them
+    restoreFromSnapshot(snap);
+    stopGameLoop();
+    toasts.length = 0;
+    const flag = sessionNewBestAnnounced, maxRaw = sessionRunMaxRaw;
+    addScore(10);
+    const out = { flag, maxRaw, n: newBests(), score, start: sessionModeHighStart };
+    restore(); out;
+  `);
+  check('D2f a resumed record run does not re-fire the toast', f.flag === true && f.maxRaw === 500 && f.n === 0 && f.start === 200, JSON.stringify(f));
+}
+
+// ---------------------------------------------------------------------------
 await page.evaluate(() => {
   if (window.__origPlaySound) window.playSound = window.__origPlaySound;
   if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;
