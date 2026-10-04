@@ -199,7 +199,6 @@ try {
         var src = awardXP.toString();
         if (!src.includes('streakMult')) return 'awardXP missing streakMult';
         if (!src.includes('snake_streak_count')) return 'awardXP does not read streak count';
-        if (!src.includes('0.30')) return 'streak multiplier cap missing';
         if (typeof streakCharges === 'undefined') return 'streakCharges not defined';
         var updateSrc = updateGame.toString();
         if (!updateSrc.includes('tryStreakChargeSave')) return 'updateGame missing tryStreakChargeSave';
@@ -217,6 +216,23 @@ try {
     if (result === 'OK') ok('E: streak XP multiplier + streakCharges + tryStreakChargeSave in 4 paths + snapshot + threshold grant');
     else fail_('E: streak multiplier test', result);
 } catch (e) { fail_('E: streak multiplier test', e.message); }
+
+// 10b. Feature E: the streak multiplier, driven (v14 G1 — replaces src.includes('0.30')).
+try {
+    const r = await page.evaluate(() => {
+        gameMode = 'classic';
+        const savedXp = xp, savedLevel = level, savedStreak = saveManager.getInt('snake_streak_count', 0);
+        const gain = (days) => {
+            saveManager.set('snake_streak_count', days);
+            xp = 0; level = 1; const before = xp; awardXP(100); return xp - before;
+        };
+        const out = { d0: gain(0), d10: gain(10), d30: gain(30), d100: gain(100) };
+        saveManager.set('snake_streak_count', savedStreak); xp = savedXp; level = savedLevel; cachedLevel = -1;
+        return out;
+    });
+    if (r.d0 === 100 && r.d10 === 110 && r.d30 === 130 && r.d100 === 130) ok('E: streak XP multiplier +1%/day, capped at +30%');
+    else fail_('E: streak multiplier behaviour', JSON.stringify(r));
+} catch (e) { fail_('E: streak multiplier behaviour', e.message); }
 
 // 11. Feature E: Streak charge saves from death (behavioral)
 try {

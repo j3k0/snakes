@@ -66,11 +66,17 @@ test('D1: easeOutBack exists and eases 0->1', async (page) => {
 
 test('D1: generateFood sets spawnTime', async (page) => {
   await setup(page);
-  const hasSpawnTime = await page.evaluate(() => {
+  // v14 G1: a fixed or stale number passed the old `typeof === 'number'` check; the pop-in
+  // animation keys off spawnTime being NOW, so assert the window.
+  // Bracket the call: `performance.now()` counts from page load, so a bare "< 1000ms ago"
+  // window passes `spawnTime: 0` on a freshly loaded page.
+  const r = await page.evaluate(() => {
+    const before = performance.now();
     const f = generateFood([{ x: 0, y: 0 }]);
-    return !!(f && typeof f.spawnTime === 'number');
+    const now = performance.now();
+    return { ok: !!f, before, t: f && f.spawnTime, now };
   });
-  if (!hasSpawnTime) throw new Error('generateFood did not set spawnTime');
+  if (!r.ok || !(r.t >= r.before && r.t <= r.now)) throw new Error('spawnTime not stamped at generation: ' + JSON.stringify(r));
 });
 
 test('D1: drawFood renders without error across all food types', async (page) => {

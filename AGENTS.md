@@ -7,7 +7,7 @@
 - Speed changes still require clearing and re-scheduling the existing timeout chain.
 
 ## Dual Render Loops
-- The game runs TWO concurrent loops: `setInterval` (50-120ms) for `updateGame()` → `drawGame()` (core game state), and `requestAnimationFrame` (60fps) for `animateVisuals()` (particles, score animation, screen effects)
+- The game runs TWO concurrent loops: the `setTimeout` chain (`scheduleNextTick()`, `snake.html` ~L281; 50-120ms) for `updateGame()` → `drawGame()` (core game state), and `requestAnimationFrame` (60fps) for `animateVisuals()` (particles, score animation, screen effects)
 - The rAF loop reads game state (particle array, score values, timer flags) but NEVER writes to game logic state — no write contention between loops
 - `animateVisuals(timestamp)` receives the rAF timestamp automatically; compute delta via `Math.min(timestamp - lastFrameTime, 100)` and use it for all timer-based decays. Cap at 100ms to prevent jumps when resuming from tab-hidden state
 - Hardcoded frame-rate assumptions (e.g., `16 / maxLife`) break on variable-refresh-rate displays — always use delta time
@@ -158,15 +158,16 @@
 - If the flag is declared once outside the `forEach`, it's a single global that ALL buttons share. This is intentional — only one touch interaction can be in flight at a time on a phone. If two buttons were touched simultaneously (extremely unlikely), the flag would suppress the second button's click, which is the correct behavior.
 
 ## State Management — Specific Bypasses
-- `helpOverlayVisible` toggle (H key, lines ~2878-2888) has no `gameState` guard. During gameplay, it fills the canvas with `rgba(0,0,0,0.85)` while the game continues running — the player may die without seeing it. At gameover, it obscures the game-over screen.
-- `Escape` key handler checks `gameState === 'gameover'` before `helpOverlayVisible`, so pressing Escape during an open help overlay at gameover transitions to idle instead of closing help first.
+- The `helpOverlayVisible` toggle (H key, `snake.html` ~L9294) is idle-only: `if (gameState !== 'idle') return;`. The help overlay can therefore never cover live play or the game-over screen. (Pre-v14 versions of this file said it had no guard — that was fixed long ago; v14 corrected the note.)
+- The `Escape` handler (~L9238) closes an open help overlay FIRST, then handles `gameover` → idle. Since help only opens at idle, the two branches never compete.
+- The only remaining `setInterval` in the file is the `srSpeak` drain (~L1094).
 
 ## Progression Systems — Zen Mode Gap
 - `endZenSession()` calls `finalizeSession(true)` but does NOT call `checkAchievements()` or `checkDailyCompletion()`, unlike `gameOver()`. Zen-mode achievements that depend on session-end state (`CENTURY`, `ZEN_MASTER`, etc.) only trigger on food-eat ticks via `checkAchievements(score)` at line ~2276. If the player's last food-eat didn't trigger the condition, quitting Zen mode won't check it.
 - `gameOver()` and `endZenSession()` are parallel session-end paths. Any new feature that adds session-end logic must be added to BOTH functions.
 
 ## Code Clarity — playSound() Switch Case
-- `playSound()` can have duplicate `case` labels without a JavaScript error — the second case is simply unreachable dead code. The switch at lines ~1109-1206 had two `case 'combo_milestone':` blocks. The first (ascending C5→E5 arpeggio) always fires; the second (sustained 660Hz tone) never does. This makes the code confusing: a reader at line 1197 assumes that case is active.
+- `playSound()` can have duplicate `case` labels without a JavaScript error — the second case is simply unreachable dead code. *Historical:* the switch once had two `case 'combo_milestone':` blocks (the second, a 660Hz tone, never fired). Only one exists now (~L4360), pinned by `test-bugfixes.mjs` B4.
 - When adding new sounds to `playSound()`, grep for the case label first to check for duplicates.
 
 ## Walled Mode
@@ -509,7 +510,7 @@
 - `buildFoodTableRows()` derives the help overlay's tier table from `FOOD_TIERS`; `buildFoodLegendText()` derives the `L` legend from the same source. Neither may be hand-copied again — before v12 the overlay printed stale weights (Common 40% vs the real 0.33, Bonus 15% vs 0.13) and omitted hunter and bomb.
 - Food-tier colours are looked up **by the key being rendered**, never by an array index — the old `foodColor(Object.keys(FOOD_TIERS)[i])` miscoloured the whole table the moment a tier was inserted.
 - `HELP_BINDINGS` is the controls-table source. It is **hand-maintained**: add an entry when adding a binding. Context-scoped keys are labelled (`C (idle)` vs `C (draft)`, `X (playing)` vs `X (idle L20)`, `R (idle)` vs `R (draft)`, `S (idle)`).
-- **Help overlay geometry — never trust a hardcoded text offset.** Two columns of 13 rows at 14px pitch, column 2 at `x = 235`; descriptions at `x + 92` (col 1) and `x + 67` (col 2). **Canvas text metrics are environment-dependent**: `'Cycle combo-bank mode'` measures 132.7px in one Chromium build and 149.1px in another, so any fixed offset that fits in one clips mid-glyph in the other — this was found and re-found across two review rounds. All help text therefore goes through `fillTextClipped(text, x, y, maxX)`, which measures at draw time and truncates with an ellipsis. `test-v12.mjs` asserts zero overflow at 1.0x, 1.15x and 1.35x simulated font widths. Do not replace it with a tuned constant.
+- **Help overlay geometry — never trust a hardcoded text offset.** Two columns of 13 rows at 14px pitch, column 2 at `x = 235`; descriptions at `x + 92` (col 1) and `x + 67` (col 2). **Canvas text metrics are environment-dependent**: `'Cycle combo-bank mode'` measures 132.7px in one Chromium build and 149.1px in another, so any fixed offset that fits in one clips mid-glyph in the other — this was found and re-found across two review rounds. All help text therefore goes through `fillTextClipped(text, x, y, maxX)`, which measures at draw time and truncates with an ellipsis. Do not replace it with a tuned constant. (No test simulates scaled font widths — an earlier version of this note claimed one in `test-v12.mjs`; it never existed.)
 - A single 25-row controls column is NOT an option — at 12px pitch it puts `modeY` at ~456 and the last mode row on the footer. The mode rows also ellipsise (their descriptions are full sentences).
 - **Known pre-existing clipping, NOT from v12:** the mode-select screen draws `getModeDesc(mode)` centred at 13px (`snake.html` ~L4986). 'painter' (552.7px) and 'gauntlet' (517.4px) overhang a 440px canvas by 56.3px and 38.7px **on each side**. The help overlay truncates cleanly; the mode-select screen does not. Fixing it properly needs a wrap/short-form decision — deliberately left for a later cycle.
 

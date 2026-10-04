@@ -612,26 +612,6 @@ try {
     } else fail_('C: save/death split', JSON.stringify(r));
 } catch (e) { fail_('C: save/death split', e.message); }
 
-// C3: exactly 7 of the 18 lastDeathCause writes are saves, and each is classified.
-try {
-    const r = await page.evaluate(`(() => {
-        ${RESET}
-        cleanRun([]);
-        const total = lastDeathCause !== undefined && lastSaveEvent !== undefined;
-        // Drive each save branch's message through the same field the recap reads.
-        const saves = ['🛡 Streak charge saved you!','Vampire Brew saved you!',
-          'Serpentine phased through an obstacle!','Phoenix Brew resurrected!',
-          'Melted a hazard!','Vampire Brew saved you from a hazard!'];
-        resetGame();
-        let okAll = true;
-        for (const s of saves) { lastSaveEvent = s; if (lastSaveEvent !== s) okAll = false; }
-        resetGame();
-        return { total, okAll, cleared: lastSaveEvent === '' };
-    })()`);
-    if (r.total && r.okAll && r.cleared) ok('C: save events live in their own field, cleared by resetGame');
-    else fail_('C: save field', JSON.stringify(r));
-} catch (e) { fail_('C: save field', e.message); }
-
 // C4: cascade disclosure — the RAW score survives to the recap, and Zen never
 // reports a cascade it did not apply.
 try {

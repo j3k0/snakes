@@ -95,10 +95,11 @@ async function run() {
   });
 
   // Test B3: Daily streak
-  test('B3: daily streak functions exist', async () => {
-    const hasStartGame = await page.evaluate(() => typeof startGame === 'function');
-    const hasSyncDaily = await page.evaluate(() => typeof syncDailyState === 'function');
-    if (!hasStartGame || !hasSyncDaily) throw new Error('Required functions missing');
+  // v14 G1: `typeof startGame === 'function'` could not fail on any build that loads.
+  test('B3: mode registry intact (8 modes, descriptions present)', async () => {
+    const r = await page.evaluate(() => ({ modes: Object.keys(MODE_CONFIG).length,
+      painterDesc: getModeDesc('painter').length, hasSyncDaily: typeof syncDailyState === 'function' }));
+    if (r.modes !== 8 || !(r.painterDesc > 0) || !r.hasSyncDaily) throw new Error(JSON.stringify(r));
   });
 
   // B4: Duplicate case
