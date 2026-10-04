@@ -3534,13 +3534,29 @@ const TRAIL_RENDER_CONFIG = {
                         }
                         return false;
                     };
-                    var safe = possible.filter(function(d) { return !bodyHit(d); });
+                    // v14 B1: the rival steers around SOLID geometry when a free move exists.
+                    // Never fatal: when nothing is safe the fallback below takes the blocked
+                    // move (the "spirit" escape hatch — the v4 trapped-rival rule stays dead).
+                    // Chase branch only: the 20% straight / 10% random branches still walk
+                    // through obstacles (measured residual — see AGENTS.md v14).
+                    var obstacleHit = function(d) {
+                        var nx = head.x + d.dx, ny = head.y + d.dy;
+                        if (MODE_CONFIG[gameMode].wrap) {
+                            nx = ((nx % PLAY_WIDTH) + PLAY_WIDTH) % PLAY_WIDTH;
+                            ny = ((ny % PLAY_HEIGHT) + PLAY_HEIGHT) % PLAY_HEIGHT;
+                        }
+                        for (var oi = 0; oi < obstacles.length; oi++) {
+                            if (obstacles[oi].x === nx && obstacles[oi].y === ny) return true;
+                        }
+                        return false;
+                    };
+                    var safe = possible.filter(function(d) { return !bodyHit(d) && !obstacleHit(d); });
                     if (safe.length === 0) {
                         // Every axis candidate is blocked. Try the perpendiculars before
                         // accepting a self-hit — without this the guard was best-effort and
                         // the rival still drove into its own body whenever the food axis and
                         // the body axis were the same.
-                        safe = perpCandidates().filter(function(d) { return !bodyHit(d); });
+                        safe = perpCandidates().filter(function(d) { return !bodyHit(d) && !obstacleHit(d); });
                     }
                     if (safe.length > 0) possible = safe;
                     if (possible.length > 0) {
@@ -3590,6 +3606,17 @@ const TRAIL_RENDER_CONFIG = {
             r.snake.unshift(newHead);
             r.movedThisTick = true;   // v13: the move is committed — see the leech clause
             if (r.snake.length > RIVAL_MAX_LENGTH) r.snake.pop();
+
+            // v14 B2: the rift is lethal to everyone standing in it. Post-move: a rival
+            // stepping OUT of an igniting rift survives, one stepping IN dies. Runs before
+            // the eat block, so a rival cannot eat a food inside a live rift. Credit is
+            // false: the player did not ram it, and this must not pay a defeat.
+            // (Call-site invariant: updateRival only runs when !hoardActive &&
+            // rivalFreezeMs <= 0 && !gauntletIntermission — updateGame's hoisted block.)
+            if (MODE_CONFIG[gameMode].hazardsEnabled && isHazardCollision(newHead)) {
+                removeRival(idx, false);
+                return;
+            }
 
             if (food && newHead.x === food.x && newHead.y === food.y) {
                 // v13: growth is the vacated tail returned to the body. The old
@@ -3673,7 +3700,8 @@ const TRAIL_RENDER_CONFIG = {
                 playSound('powerdown');   // reused — the defeat needs no new sound case
                 queueToast('\u2694\uFE0F Rival defeated!', 1500);
             }
-            srSpeak('Rival destroyed');
+            // v14 B3: credit-aware SR line — the toast above is already credit-gated.
+            srSpeak(defeatedByPlayer ? 'Rival destroyed' : 'Rival destroyed itself');
         }
 
         // v13: wrap-aware Manhattan distance between two tiles, in tiles.
