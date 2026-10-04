@@ -32,9 +32,12 @@
    `osc.start(now); osc.stop(now + 0.1);`. **Grep `case 'rival_eat'` first** — must be exactly 1.
 
 **Test** (`test-v14.mjs`, new file, harness = test-helpers.mjs):
-- `A1`: fixture — rival at 2 tiles from food, `dx` toward it, floaters pinned empty
-  (`page.evaluate(() => { floaters.length = 0; })`), sound log via `playSound` stub capture.
-  Drive one `updateRival(0)` call. Assert: `floaters.length === 1 && floaters[0].text === 'rival
+- `A1`: fixture — rival head ONE tile from food (a 3-segment trailing body, `moveCounter: 0`,
+  length < `RIVAL_CADENCE_MID` so stride is 1), `dx` toward it, `seededRandom` stubbed to
+  `() => 0` (forces the chase branch; the 10% random-turn branch would otherwise deflect it),
+  floaters pinned empty (`page.evaluate(() => { floaters.length = 0; })`), sound log via
+  `playSound` stub capture. Drive one `updateRival(0)` call. [P7/P8: at 2 tiles one call moves
+  1 tile and never eats — the rev-1 fixture was red on a correct build.] Assert: `floaters.length === 1 && floaters[0].text === 'rival
   ate'`; sounds contains exactly one 'rival_eat'; particles delta === 4.
 - `A2` (mutation gate): same fixture on the pre-A build must produce 0/0/0. Run by
   `git show c3289a1:snake.html > /tmp/pre-v14.html`, sed-rewrite `FILE` — v13's differential
@@ -117,16 +120,26 @@
    — credit-aware SR line (the toast at 3666 is already credit-gated).
 
 **Tests** (`test-v14.mjs`):
-- `B1`: rival next to an obstacle wall, food beyond it — chase-branch geometry; assert the rival
-  does NOT enter an obstacle tile over 20 ticks (position never equals any obstacle tile).
+- `B1`: rival at (100,200) heading +x, a full obstacle wall at x=200 (y 60..340), food at
+  (340,200); `seededRandom` stubbed to `() => 0` (chase branch every tick — the 20%/10% branches
+  are deliberately untouched and DO still phase through, see B3). Assert the rival does NOT
+  enter an obstacle tile over 20 ticks. Red on `c3289a1` (it walks straight into x=200).
+  [P10: with an unpinned PRNG a CORRECT build enters the wall in 11/50 trials — the rev-1
+  fixture was flaky by construction.]
 - `B2a`: hazard kill — place an on-phase rift, force the rival's next move into it. Assert
   `rivals[0].active === false`, `stats.rivalsDefeated` delta === 0, score delta === 0.
 - `B2b` (mutation): same fixture with `false` → `true` in the new call must produce delta 1 —
   run as a source-mutation check in the review phase, not per-run.
-- `B3` (time-to-food, the [R1] replacement for the vacuous stall gate): paired-seed probe — pin
-  `seedPrng` (mulberry32), obstacle-heavy board, drive 300 ticks, record ticks-to-eat; run the
-  same seed against the pre-B build (`/tmp/pre-B.html` variant). Assert `meanAfter <= meanBefore
-  * 1.25` and phase-throughs (rival head on an obstacle tile) === 0 after.
+- `B3` (time-to-food, the [R1] replacement for the vacuous stall gate): 20 seeds
+  (`mulberry32(hashString('b3-seed-' + s))`), three-wall board (x=140/240/320, one gap each),
+  300 ticks or until the rival dies, pre-B vs post-B (`/tmp/pre-B.html` variant). AGGREGATE
+  over all seeds (a single seed is noise — rival lifetime swings 33→300 ticks on self-crash,
+  and the PRNG streams diverge after the first eat). Assert:
+  `ticksAlive/eats` after `<= 1.25 ×` before, and total phase-throughs after `<= 0.5 ×` before.
+  Measured on the plan's exact edit (P11): 23.4 → 27.7 ticks/eat (+18%); phase-throughs on
+  chase ticks 154 → 2 (blocked-move fallback), on straight/random ticks 72 → 65. **Not zero** —
+  the design's [R2] "→ 0" figure is wrong; the residual is the untouched 30% branches and is
+  recorded in AGENTS.md (Step 9), not asserted away.
 - `B4`: self-crash inside a rift fires `removeRival(false)` exactly once (srSpeak 'destroyed
   itself', no double particles).
 - `B5`: a rival stepping OUT of an igniting rift survives (post-move semantics pin).
@@ -135,7 +148,7 @@
 
 ---
 
-## Step 3 — Feature C: snapToFreeTile respects telegraphs
+## Step 4 — Feature C: snapToFreeTile respects telegraphs
 
 **Edit:** `snapToFreeTile` (2216-2232): replace both `rivals.some(function(r) { return r.active &&
 … })` predicates (2219, 2227) with `rivalCombinedSnake().some(...)`. `rivalCombinedSnake` is
@@ -152,7 +165,7 @@ defined at 821-828 (hoisted function declaration — safe to call from any earli
 
 ---
 
-## Step 4 — Feature D1: mode-select clip
+## Step 5 — Feature D1: mode-select clip
 
 **Edits:**
 1. `snake.html` ~5245-5249: inside the existing `if (isSelected)` block, replace
@@ -165,12 +178,16 @@ defined at 821-828 (hoisted function declaration — safe to call from any earli
    ```
    (`fillTextClipped` measures under the CURRENT font — the 13px font set at 5247 stays.)
 2. `getModeDesc` (~1956-1969): trim the two strings:
-   - painter → `'Paint the board! Trail is permanent. No self-collision. Score = coverage %.'`
+   - painter → `'Paint the board! Permanent trail, no self-collision. Score = coverage %.'`
+     (407.9px at 13px Arial vs 420 available — P12. The rev-1 string measured 425.5px and
+     would still have been ellipsised: `fillTextClipped`'s 4th arg is the right EDGE, so
+     `CANVAS_WIDTH - 10` from x=10 leaves 420, not 430.)
    - gauntlet → `'5 waves, unique objectives. Death ends the run!'`
 
 **Tests:**
 - `D1a`: for each of the 8 modes (drive the mode-select screen, one at a time via
-  `modeSelectIndex` + drawGame(1)): assert a fillText call happened for the description (stub
+  `modeSelectIndex` + drawGame(1), with `welcomeOverlay = false; gameState = 'idle'` — P3: with
+  the first-run welcome overlay up only classic/timeAttack descriptions are drawn at all): assert a fillText call happened for the description (stub
   counting) and `ctx.measureText` of the full string against the drawn prefix — no drawn glyph
   extends beyond `CANVAS_WIDTH - 10`.
 - `D1b` (mutation): on the pre-D1 build, painter/gauntlet exceed the canvas (the negative
@@ -180,7 +197,7 @@ defined at 821-828 (hoisted function declaration — safe to call from any earli
 
 ---
 
-## Step 5 — Feature D2: cascade correction + once-per-run toast
+## Step 6 — Feature D2: cascade correction + once-per-run toast
 
 **Edits:**
 1. Module state (near `sessionModeHighStart` at 798): `let sessionNewBestAnnounced = false;`
@@ -240,7 +257,7 @@ defined at 821-828 (hoisted function declaration — safe to call from any earli
 
 ---
 
-## Step 6 — Feature E: srSpeak depth 2
+## Step 7 — Feature E: srSpeak depth 2
 
 **Edits** (`snake.html` 1083-1100): replace `let srQueue = '';` with `let srQueue = [];`; rewrite
 `srSpeak` and the drain interval per the design plan's snippet (FIFO push cap 2; drain shifts one
@@ -258,7 +275,7 @@ per tick and stamps `lastSrSpeak`).
 
 ---
 
-## Step 6 — Features F + H: death-frame rival + per-rival head colours
+## Step 8 — Features F + H: death-frame rival + per-rival head colours
 
 **Edits:**
 1. Module state (beside `recapData`, ~766): `let deathRivals = [];`
@@ -293,11 +310,11 @@ per tick and stamps `lastSrSpeak`).
 
 ---
 
-## Step 7 — G2.5: the v14 AGENTS.md section
+## Step 9 — G2.5: the v14 AGENTS.md section
 
 Append a `## v14 Features` section: the eat cue (weight justification + the measured no-throttle
-evidence), obstacle steering (chase-branch only, blocked-move fallback, the measured time-to-food
-parity), hazard lethality for the rival (post-move semantics, uncredited, classic+timeAttack
+evidence), obstacle steering (chase-branch only, blocked-move fallback, the measured +18%
+ticks/eat and the ~65/20-seed residual phase-through from the untouched straight/random branches), hazard lethality for the rival (post-move semantics, uncredited, classic+timeAttack
 domain), the once-per-run NEW BEST toast (design change: 19→1) + the cascade correction (the
 `=== sessionRunMaxRaw` guard), the snap-telegraph fix, srSpeak depth 2, the death-frame copy, the
 head colours — each with its accepted-behaviour notes. Plus the deliberate non-fixes list
@@ -309,7 +326,7 @@ Commit `docs(v14): AGENTS.md v14 section`.
 
 ---
 
-## Step 8 — Live-game verification + full sweep
+## Step 10 — Live-game verification + full sweep
 
 1. Full suite: `node test-bugfixes.mjs && node test-bughunt.mjs && node test-evolution.mjs &&
    node test-feature-d.mjs && node test-gameloop.mjs && node test-gameplay.mjs &&
@@ -328,5 +345,18 @@ Commit `docs(v14): AGENTS.md v14 section`.
 
 ## Dispositions of review findings (this plan's own review follows)
 
-To be filled after the impl-plan review: a disposition table per finding (accepted / rejected +
-reason), v13-style.
+Review by in-page probes P1-P12 (emulating each planned edit against `c3289a1` + the plan's
+snippets; probe scripts were throwaway and are not committed — figures recorded here).
+
+| # | Finding | Probe | Disposition |
+|---|---------|-------|-------------|
+| 1 | A1 fixture (food 2 tiles ahead, one `updateRival` call) never eats — one call moves one tile. Unpinned, 200 ticks from dist 2 also produced 0 eats. | P7, P8 | **Accepted.** Fixture is 1 tile + trailing body + `seededRandom` stubbed to 0. |
+| 2 | Feature A snippet placement verified: floater 'rival ate', 4 particles, 'rival_eat' sound, SR line, food regenerated. | P5, P6 | No change. |
+| 3 | B1's "never enters an obstacle in 20 ticks" fails on a CORRECT build (11/50 unpinned trials): the 20% straight / 10% random branches are untouched by design and walk into walls. | P10 | **Accepted.** B1 pins the chase branch; the residual is measured in B3 and documented. Branches stay untouched (design decision kept — the 30% noise is the rival's character; extending the filter there is a design change for a later cycle). |
+| 4 | B3's "phase-throughs === 0 after" is unreachable for the same reason; the design's [R2] "1-4 per seed → 0" claim does not reproduce (post: 0-8 per seed). | P10, P11 | **Accepted.** Gate is now ≤ 0.5× pre, aggregate over 20 seeds. Design [R2] figure noted as wrong here rather than re-opening the design doc. |
+| 5 | Single-seed time-to-food is noise (P10: 9 → 5 eats on one seed; P11 per-seed ranges 2-13). Aggregate: 23.4 → 27.7 ticks/eat (+18%). | P10, P11 | **Accepted.** 20-seed aggregate gate, 1.25× threshold kept — the measured +18% passes with margin; a routing rival legitimately takes detours. |
+| 6 | `obstacleHit` closure resolves the chase block's `head` correctly (blocked axis → safe=[], perpendiculars offered). | P9 | No change. |
+| 7 | C bug reproduces: `snapToFreeTile` returns a tile on a materialising rival's head. C1 is red on the current tree as required. | P8 | No change. |
+| 8 | D1 trimmed painter string (425.5px) still exceeds the 420px avail (`maxX` is an edge, not a width) — it would draw with an ellipsis. Gauntlet trim fits (276.8). Untrimmed: painter 552.7, gauntlet 517.4 vs canvas 440. | P1, P2, P3, P12 | **Accepted.** Painter string replaced (407.9px). |
+| 9 | With `welcomeOverlay` on, mode-select draws only classic/timeAttack descriptions — D1a would silently test 2/8 modes. With it off, all 8 draw exactly once at their index. | P3, P4 | **Accepted.** D1a sets `welcomeOverlay = false`. |
+| 10 | Duplicate step numbers (two Step 3s, two Step 6s). | — | **Accepted.** Renumbered 1-10. |
