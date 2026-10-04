@@ -435,6 +435,69 @@ console.log('\nE: srSpeak depth 2');
 }
 
 // ---------------------------------------------------------------------------
+// F + H — the death frame keeps its rival; the two rival heads differ.
+console.log('\nF/H: death-frame rival + per-rival head colours');
+{
+  const r = await page.evaluate(PRE + `
+    cleanRun();
+    // Bottom-left corner, well outside the centred recap card.
+    rivalAt([[40,360],[20,360],[0,360]], 20, 0);
+    // Board coords -> device pixels: drawGame applies DPR and translates by the play margin.
+    const px = (x, y) => { const d = ctx.getImageData(Math.round((PLAY_MARGIN_LEFT + x) * DPR), Math.round((PLAY_MARGIN_TOP + y) * DPR), 1, 1).data; return [d[0], d[1], d[2]]; };
+    // Sanity: the same pixel is red while PLAYING, so the probe point is right.
+    drawGame(1);
+    const live = px(50, 370);
+    lastDeathCause = 'test';
+    gameOver();
+    deathFragments = []; deathFragmentsActive = false; particles.length = 0;
+    drawGame(1);
+    const dead = px(50, 370);
+    const rivalsAfter = rivals.length;
+    // Escape -> idle
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const state = gameState;
+    welcomeOverlay = false;
+    drawGame(1);
+    const idle = px(50, 370);
+    resetGame();
+    ({ live, dead, idle, state, rivalsAfter, deathLen: typeof deathRivals !== 'undefined' ? deathRivals.length : 0 });
+  `);
+  const reddish = (c) => c[0] > 150 && c[0] > c[1] + 40 && c[0] > c[2] + 20;
+  check('F0 fixture: the rival head pixel is red while playing', reddish(r.live), JSON.stringify(r));
+  check('F1 the game-over frame still shows the rival', r.rivalsAfter === 0 && reddish(r.dead), JSON.stringify(r));
+  check('F1 after Escape to idle the rival is gone (and resetGame clears the copy)', r.state === 'idle' && !reddish(r.idle) && r.deathLen === 0, JSON.stringify(r));
+
+  const h = await page.evaluate(PRE + `
+    cleanRun();
+    rivals = [
+      { snake: [{x:40,y:100},{x:20,y:100}], dx: 20, dy: 0, active: true, respawnTimer: 0, moveCounter: 0, color: '#B71C1C' },
+      { snake: [{x:40,y:300},{x:20,y:300}], dx: 20, dy: 0, active: true, respawnTimer: 0, moveCounter: 0, color: '#AD1457' },
+    ];
+    const heads = [];
+    const origRect = ctx.fillRect;
+    ctx.fillRect = function(x, y) {
+      if ((x === 41 && (y === 101 || y === 301))) heads.push(y + ':' + ctx.fillStyle);
+      return origRect.apply(this, arguments);
+    };
+    drawRival(0);
+    ctx.fillRect = origRect;
+    rivals[1].active = false; rivals[1].respawnTimer = 800; // materialising branch too
+    const heads2 = [];
+    ctx.fillRect = function(x, y) {
+      if (x === 41 && y === 301) heads2.push(ctx.fillStyle);
+      return origRect.apply(this, arguments);
+    };
+    drawRival(0);
+    ctx.fillRect = origRect;
+    resetGame();
+    ({ heads, heads2 });
+  `);
+  const c0 = (h.heads.find(s => s.startsWith('101:')) || '').slice(4), c1 = (h.heads.find(s => s.startsWith('301:')) || '').slice(4);
+  check('H1 two rivals draw distinguishable head colours', c0 && c1 && c0 !== c1, JSON.stringify(h));
+  check('H1 the materialising telegraph uses the same per-rival head colour', h.heads2.length === 1 && h.heads2[0] === c1, JSON.stringify(h));
+}
+
+// ---------------------------------------------------------------------------
 await page.evaluate(() => {
   if (window.__origPlaySound) window.playSound = window.__origPlaySound;
   if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;

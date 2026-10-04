@@ -765,6 +765,11 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         // v8 D: Game-Over Recap Card — replaces sessionSummary/sessionSummaryTimer.
         // Built in BOTH gameOver() and endZenSession() (non-gauntlet only); reset in resetGame().
         let recapData = null;
+        // v14 F: the rivals as they stood on the killing frame. gameOver() empties rivals[]
+        // (so nothing can tick against a dead run); this frame-scoped copy is what drawRival
+        // renders while gameState === 'gameover', so the death screen shows what killed you.
+        // Cleared by resetGame / resetWaveState — no idle path can ghost it.
+        let deathRivals = [];
         let recapQuestBaseline = null;
         // v8 F: Bounty Rush — timed mid-run contracts. Bank immediately on completion
         // (no session-end hook needed); die with the run if uncompleted. Additive in the
@@ -1241,6 +1246,9 @@ let padChangeTick = 0;
         let newObstacleFlash = [];
         let newObstacleToastTimer = 0;
         const RIVAL_MAX_LENGTH = 20;
+        // v14 H: per-rival head colours — under double_rival the two heads were the same
+        // '#FF5555' and could not be told apart. Rival 0 stays in the familiar red family.
+        const RIVAL_HEAD_COLORS = ['#FF6655', '#FF66AA'];
         // v13 rival tuning — all tick-counted, never wall-clock.
         const RIVAL_SPAWN_LENGTH = 3;      // arena spec: the rival spawns with a body
         const RIVAL_RESPAWN_MS = 10000;    // dead → active, unchanged from the old literal
@@ -2391,6 +2399,7 @@ const TRAIL_RENDER_CONFIG = {
             powerUpSpawnCounter = 0;
             powerUpDespawnCounter = 0;
             powerUpPickup = null;
+            deathRivals = [];
             rivals = [];
             activeMutators = [];
             draftScreenVisible = false;
@@ -3856,6 +3865,9 @@ const TRAIL_RENDER_CONFIG = {
             }
             saveReplay(score, snake.length);
             updateMenuFooter();
+            deathRivals = rivals.map(function (r) {
+                return { snake: r.snake.slice(), color: r.color, active: r.active, respawnTimer: r.respawnTimer };
+            });
             rivals = [];
             srSpeak('Game over. Score ' + score + '. ' + (lastDeathCause || ''));
             finalizeSession(false);
@@ -6200,8 +6212,10 @@ const TRAIL_RENDER_CONFIG = {
         // covers both. Everything here is information and always renders — calm mode gates
         // only the brightness ramp, never the ring or the arc.
         function drawRival(t) {
-            for (var ri = 0; ri < rivals.length; ri++) {
-                var r = rivals[ri];
+            var rivalList = gameState === 'gameover' ? deathRivals : rivals; // v14 F
+            for (var ri = 0; ri < rivalList.length; ri++) {
+                var r = rivalList[ri];
+                var headColor = RIVAL_HEAD_COLORS[ri % RIVAL_HEAD_COLORS.length]; // v14 H
                 if (r.snake.length === 0) continue;
                 ctx.save();
                 if (!r.active) {
@@ -6210,7 +6224,7 @@ const TRAIL_RENDER_CONFIG = {
                     var calm = calmModeEffective();
                     ctx.globalAlpha = calm ? 0.5 : 0.15 + 0.35 * (1 - windFrac);
                     for (var rw = 0; rw < r.snake.length; rw++) {
-                        ctx.fillStyle = rw === 0 ? '#FF5555' : r.color;
+                        ctx.fillStyle = rw === 0 ? headColor : r.color;
                         ctx.fillRect(r.snake[rw].x + 1, r.snake[rw].y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
                     }
                     ctx.globalAlpha = 1;
@@ -6229,7 +6243,7 @@ const TRAIL_RENDER_CONFIG = {
                     continue;
                 }
                 for (var rj = 0; rj < r.snake.length; rj++) {
-                    ctx.fillStyle = rj === 0 ? '#FF5555' : r.color;
+                    ctx.fillStyle = rj === 0 ? headColor : r.color;
                     ctx.fillRect(r.snake[rj].x + 1, r.snake[rj].y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
                 }
                 // Proximity cue: same dashed-ring vocabulary, so "dashed red ring" means
@@ -6690,6 +6704,7 @@ const TRAIL_RENDER_CONFIG = {
             powerUpPickup = null;
             powerUpSpawnCounter = 0;
             powerUpDespawnCounter = 0;
+            deathRivals = [];
             rivals = [];
             obstacles = [];
             generateObstaclesForWave(wave);
