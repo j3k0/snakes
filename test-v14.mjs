@@ -266,6 +266,46 @@ console.log('\nC: snapToFreeTile respects telegraphs');
 }
 
 // ---------------------------------------------------------------------------
+// D1 — mode-select descriptions draw within the canvas.
+console.log('\nD1: mode-select descriptions within bounds');
+{
+  const draw = (longDesc) => page.evaluate(PRE + `
+    cleanRun();
+    gameState = 'idle';
+    const savedWelcome = welcomeOverlay;
+    welcomeOverlay = false; // P3: with the welcome overlay up, 6 of 8 descriptions never draw
+    const origFill = ctx.fillText, origDesc = window.getModeDesc;
+    if (${longDesc}) window.getModeDesc = () => 'W'.repeat(80);
+    const res = {};
+    for (let i = 0; i < MODE_ORDER.length; i++) {
+      const mode = MODE_ORDER[i];
+      const want = getModeDesc(mode);
+      const hits = [];
+      ctx.fillText = function(text, x, y) {
+        const t = String(text);
+        if (t === want || (t.endsWith('\u2026') && want.startsWith(t.slice(0, -1)))) {
+          const w = ctx.measureText(t).width;
+          const left = ctx.textAlign === 'center' ? x - w / 2 : ctx.textAlign === 'right' ? x - w : x;
+          hits.push({ left: Math.round(left * 10) / 10, right: Math.round((left + w) * 10) / 10, clipped: t !== want });
+        }
+        return origFill.apply(this, arguments);
+      };
+      modeSelectIndex = i;
+      drawGame(1);
+      res[mode] = hits;
+    }
+    ctx.fillText = origFill; window.getModeDesc = origDesc; welcomeOverlay = savedWelcome;
+    ({ res, W: CANVAS_WIDTH });
+  `);
+  const r = await draw(false);
+  const bad = Object.entries(r.res).filter(([m, h]) => h.length !== 1 || h[0].left < 0 || h[0].right > r.W || h[0].clipped);
+  check('D1a all 8 descriptions drawn once, whole, inside the canvas', Object.keys(r.res).length === 8 && bad.length === 0, JSON.stringify(bad));
+  const r2 = await draw(true);
+  const bad2 = Object.entries(r2.res).filter(([m, h]) => h.length !== 1 || h[0].left < 0 || h[0].right > r2.W - 10 || !h[0].clipped);
+  check('D1b an over-long description is ellipsised inside the canvas', bad2.length === 0, JSON.stringify(bad2.slice(0, 2)));
+}
+
+// ---------------------------------------------------------------------------
 await page.evaluate(() => {
   if (window.__origPlaySound) window.playSound = window.__origPlaySound;
   if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;

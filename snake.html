@@ -1961,8 +1961,8 @@ const TRAIL_RENDER_CONFIG = {
                 daily: 'Complete today\'s unique challenge! 3 attempts per day.',
                 snap: 'Snake shrinks every 3s — keep eating to survive!',
                 walled: 'Classic Snake with walls. Hitting the edge kills you. No second chances.',
-                painter: 'Paint the board! Eat food to grow. Your trail is permanent. No self-collision. Score = coverage %.',
-                gauntlet: '5 waves, each with a unique objective. Pick bonuses between waves. Death ends the run!',
+                painter: 'Paint the board! Permanent trail, no self-collision. Score = coverage %.',
+                gauntlet: '5 waves, unique objectives. Death ends the run!',
             };
             return descs[mode] || '';
         }
@@ -5294,7 +5294,18 @@ const TRAIL_RENDER_CONFIG = {
                     if (isSelected) {
                         ctx.fillStyle = '#AAA';
                         ctx.font = '13px Arial';
-                        ctx.fillText(getModeDesc(mode), CANVAS_WIDTH / 2, y + 20);
+                        // v14 D1: centred when it fits (all eight do after the v14 trims);
+                        // otherwise left-aligned and ellipsised so no glyph leaves the canvas.
+                        // Pre-v14 painter/gauntlet overhung a 440px canvas by ~56/39px a side.
+                        var modeDesc = getModeDesc(mode);
+                        if (ctx.measureText(modeDesc).width <= CANVAS_WIDTH - 20) {
+                            ctx.fillText(modeDesc, CANVAS_WIDTH / 2, y + 20);
+                        } else {
+                            ctx.save();
+                            ctx.textAlign = 'left';
+                            fillTextClipped(modeDesc, 10, y + 20, CANVAS_WIDTH - 10);
+                            ctx.restore();
+                        }
                     }
                 }
                 let currentY = CANVAS_HEIGHT - 95;
