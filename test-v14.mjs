@@ -498,6 +498,46 @@ console.log('\nF/H: death-frame rival + per-rival head colours');
 }
 
 // ---------------------------------------------------------------------------
+// R — resetGame board generation ignores the previous run's leftovers.
+console.log('\nR: resetGame determinism');
+{
+  const r = await page.evaluate(PRE + `
+    cleanRun();
+    stopGameLoop();
+    gameMode = 'daily'; document.getElementById('seedField').value = '';
+    const board = () => JSON.stringify({ f: food && [food.x, food.y, food.type], o: obstacles.map(o => o.x + ',' + o.y) });
+    food = null; resetGame(); const clean = board();
+    // Leave a stale food on every tile the clean board puts an obstacle or food on —
+    // exactly where it used to steer the draw (generateObstacles skips the food tile).
+    const targets = obstacles.map(o => [o.x, o.y]).concat([[food.x, food.y]]);
+    const bad = [];
+    for (const [x, y] of targets) {
+      food = { x, y, type: 'rare', spawnTime: performance.now() };
+      food2 = { x: 0, y: 0, type: 'common' };
+      resetGame();
+      if (board() !== clean) bad.push(x + ',' + y);
+    }
+    ({ n: targets.length, bad });
+  `);
+  check('R1 a leftover food never changes the daily board', r.n > 1 && r.bad.length === 0, JSON.stringify(r));
+
+  const e = await page.evaluate(PRE + `
+    cleanRun();
+    stopGameLoop();
+    gameMode = 'classic'; document.getElementById('seedField').value = '';
+    const orig = window.pickRandomFoodType;
+    window.pickRandomFoodType = () => 'epic';
+    resetGame();
+    window.pickRandomFoodType = orig;
+    const twin = food && food.portalLink && extraFoods.find(ef => ef.x === food.portalLink.x && ef.y === food.portalLink.y);
+    const out = { type: food && food.type, linked: !!(food && food.portalLink), twin: !!twin, extra: extraFoods.length };
+    resetGame();
+    out;
+  `);
+  check('R2 an epic opening food keeps its portal twin', e.type === 'epic' && e.linked && e.twin, JSON.stringify(e));
+}
+
+// ---------------------------------------------------------------------------
 await page.evaluate(() => {
   if (window.__origPlaySound) window.playSound = window.__origPlaySound;
   if (window.__origSrSpeak) window.srSpeak = window.__origSrSpeak;

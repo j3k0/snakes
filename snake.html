@@ -2452,6 +2452,16 @@ const TRAIL_RENDER_CONFIG = {
                 activeSeed = null;
                 seedPrng = null;
             }
+            // The previous run's food must be gone BEFORE board generation:
+            // generateObstacles() skips the current food tile, so a stale food from the
+            // last run steered the obstacle draw and consumed a different number of
+            // seededRandom() calls — the same daily seed produced different boards
+            // depending on what the previous run left behind (test-bughunt, 2026-10-04).
+            food = null;
+            food2 = null; // v6: Echo Brew duplicate food
+            // Cleared before generateFood(), not after: an epic opening food pushes its
+            // portal twin into extraFoods, and clearing afterwards orphaned that twin.
+            extraFoods = []; // v9 D: clear portal + hoard foods
             generateObstacles();
             hazards = []; // v10 C: clear hazard zones
             hazardTickCounter = 0; // v10 C: reset spawn timer
@@ -2475,8 +2485,6 @@ const TRAIL_RENDER_CONFIG = {
             stopPad();
              const combinedInitial = snake.concat(rivalCombinedSnake());
             food = generateFood(combinedInitial);
-            food2 = null; // v6: Echo Brew duplicate food
-            extraFoods = []; // v9 D: clear portal + hoard foods
             transientRings = []; // v9 F: clear visual rings
             hoardActive = false; hoardTimer = 0; hoardTickCounter = 0; scoreMultiplier = 1; // v9 E: clear hoard state
             hoardPigmentCount = 0; pigmentRushTimer = 0; pigmentRushActive = false; // v11 C
