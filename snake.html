@@ -134,6 +134,17 @@
         </style>
 
     <script>
+        // --- Anonymous player counter (FOV-2041) ---
+        // Anonymous counters via Abacus (abacus.jasoncameron.dev, free CORS counting
+        // API): page loads, per-UTC-day loads, games started, games finished. No cookies, no fingerprinting,
+        // no personal data, nothing stored. Fires ONLY on the public deployment
+        // (j3k0.github.io) — local runs and test harnesses are never counted.
+        const _snakesCount = location.hostname === 'j3k0.github.io'
+            ? function (key) { try { fetch('https://abacus.jasoncameron.dev/hit/j3k0.github.io/' + key, { mode: 'no-cors', keepalive: true }); } catch (e) {} }
+            : function () {};
+        _snakesCount('load');
+        _snakesCount('day-' + new Date().toISOString().slice(0, 10)); // distinct visiting days
+
         const TILE_SIZE = 20;
         const CANVAS_WIDTH = 440;
         const CANVAS_HEIGHT = 600;
@@ -2576,6 +2587,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function startGame() {
+            _snakesCount('start');
             // v7 E: starting a fresh run — discard any saved snapshot so the
             // idle "Resume Run" button doesn't offer a stale unrelated run.
             clearSnapshot();
@@ -3854,6 +3866,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function gameOver() {
+            _snakesCount('finish');
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
@@ -3944,6 +3957,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function endZenSession() {
+            _snakesCount('finish');
             stopGameLoop();
             gameState = 'gameover';
             clearSnapshot();
