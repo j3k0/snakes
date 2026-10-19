@@ -135,14 +135,15 @@
 
     <script>
         // --- Anonymous player counter (FOV-2041) ---
-        // 3 anonymous counters via Abacus (abacus.jasoncameron.dev, free CORS counting
-        // API): page loads, games started, games finished. No cookies, no fingerprinting,
+        // Anonymous counters via Abacus (abacus.jasoncameron.dev, free CORS counting
+        // API): page loads, per-UTC-day loads, games started, games finished. No cookies, no fingerprinting,
         // no personal data, nothing stored. Fires ONLY on the public deployment
         // (j3k0.github.io) — local runs and test harnesses are never counted.
         const _snakesCount = location.hostname === 'j3k0.github.io'
             ? function (key) { try { fetch('https://abacus.jasoncameron.dev/hit/j3k0.github.io/' + key, { mode: 'no-cors', keepalive: true }); } catch (e) {} }
             : function () {};
         _snakesCount('load');
+        _snakesCount('day-' + new Date().toISOString().slice(0, 10)); // distinct visiting days
 
         const TILE_SIZE = 20;
         const CANVAS_WIDTH = 440;
