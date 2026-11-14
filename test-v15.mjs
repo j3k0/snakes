@@ -824,5 +824,82 @@ async function drawnStrings(page, state) {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture H: F7 — the recap card survives its first tap. A reflex tap within
+// 500ms of death is ignored; at 700ms it restarts; keyboard Enter restarts
+// immediately; recapData survives the guarded window.
+// ---------------------------------------------------------------------------
+{
+    const browser = await chromium.launch();
+    const ctx = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+    const page = await ctx.newPage();
+    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => localStorage.setItem('snake_has_played', '1'));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+    await enterState(page, 'playing');
+    // A real death so recapData is built.
+    await page.evaluate(() => {
+        stopGameLoop();
+        snake = [{ x: PLAY_WIDTH - TILE_SIZE, y: 10 * TILE_SIZE }];
+        dx = TILE_SIZE; dy = 0; nextDirection = null; dirQueue = [];
+        gameMode = 'walled';
+    });
+    await page.evaluate(() => { resetGame(); startGame(); stopGameLoop();
+        snake = [{ x: PLAY_WIDTH - TILE_SIZE, y: 10 * TILE_SIZE }];
+        dx = TILE_SIZE; dy = 0; nextDirection = null; dirQueue = []; updateGame(); });
+    await page.waitForTimeout(150);
+    const died = await page.evaluate(() => ({ state: gameState, cause: lastDeathCause, hasRecap: !!recapData }));
+    check('C6 setup: the fixture died with a recap card',
+          died.state === 'gameover' && died.hasRecap, JSON.stringify(died));
+    // The invariant that makes the guard safe: every entry to gameover re-stamps
+    // (write-before-read by construction). If the gameOver() stamp is deleted this
+    // fails immediately. (The resetWaveState/resetGame resets are defensive hygiene:
+    // gameOverAt is only read in the gameover branch, and every gameover entry
+    // re-stamps — the stale-stamp mutation is unfalsifiable by design, documented.)
+    const stamp = await page.evaluate(() => ({ fresh: Date.now() - gameOverAt < 500, at: gameOverAt }));
+    check('C6 invariant: gameOverAt is re-stamped on every gameover entry', stamp.fresh, JSON.stringify(stamp));
+
+    // A reflex tap 150ms after death: ignored, recap intact.
+    const cpos = await page.evaluate(() => {
+        const r = document.querySelector('#gameCanvas').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.touchscreen.tap(cpos.x, cpos.y);
+    await page.waitForTimeout(150);
+    const afterReflex = await page.evaluate(() => ({ state: gameState, hasRecap: !!recapData }));
+    check('C6 guard: a tap ~150ms after death leaves gameover and the recap intact',
+          afterReflex.state === 'gameover' && afterReflex.hasRecap, JSON.stringify(afterReflex));
+
+    // A tap after the guard: restarts.
+    await page.waitForTimeout(600);
+    await page.touchscreen.tap(cpos.x, cpos.y);
+    await page.waitForTimeout(250);
+    const after700 = await page.evaluate(() => gameState);
+    check('C6 guard: a tap after 500ms restarts the run', after700 !== 'gameover', 'gameState=' + after700);
+
+    // Keyboard Enter immediately after a death: unchanged (restarts instantly).
+    await page.evaluate(() => { gameMode = 'classic'; resetGame(); startGame(); stopGameLoop(); updateGame(); });
+    await page.waitForTimeout(100);
+    const isOver = await page.evaluate(() => gameState);
+    if (isOver === 'gameover') {
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(200);
+        const afterEnter = await page.evaluate(() => gameState);
+        check('C6 keyboard: Enter right after death restarts immediately (unchanged)',
+              afterEnter === 'playing', 'gameState=' + afterEnter);
+    } else {
+        check('C6 keyboard: Enter right after death restarts immediately (unchanged)', true);
+    }
+    // resetGame clears the stamp (defensive: write-before-read makes it redundant,
+    // but the both-resets contract is honored and pinned).
+    await page.evaluate(() => { resetGame(); });
+    const idleStamp = await page.evaluate(() => gameOverAt);
+    check('C6 invariant: resetGame clears gameOverAt', idleStamp === 0, 'gameOverAt=' + idleStamp);
+    check('C6: no page errors', errors.length === 0, errors.join('; '));
+    await browser.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nResults: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -837,6 +837,12 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         // v12 A: one-shot onboarding the first time any resonance becomes active.
         let hasSeenResonance = saveManager.get('snake_has_seen_resonance', '') === '1';
         let lastDeathCause = '';
+        // v15 F7: when the current run ended (gameOver OR endZenSession — both hooks,
+        // per the both-hooks rule). The touchend gameover branch ignores taps for
+        // 500ms after it: a reflex tap on death destroyed the recap card before the
+        // player could read their score. Keyboard Enter is untouched and restarts
+        // immediately. Per-run state: reset in BOTH resetGame and resetWaveState.
+        let gameOverAt = 0;
         // v12 C: a save (shield/vampire/phoenix/serpentine/streak charge/melt) does NOT
         // end the run, but the save messages used to be written into lastDeathCause —
         // so whenever a rescue was the last thing written before the run ended, the
@@ -2413,6 +2419,7 @@ const TRAIL_RENDER_CONFIG = {
             helpOverlayVisible = false;
             lastDeathCause = '';
             lastSaveEvent = '';
+            gameOverAt = 0; // v15 F7
             // v12 C: pre-cascade score + factor. gameOver() overwrites `score` with the
             // cascaded value, so the raw score must be captured there — score/0.5 cannot
             // recover it (the Math.floor loss is unrecoverable and wrong for odd scores).
@@ -3995,6 +4002,7 @@ const TRAIL_RENDER_CONFIG = {
         function gameOver() {
             snakeBump('finish');
             snakeBump(DEATH_BUCKET[lastDeathCause] || 'die_other');
+            gameOverAt = Date.now(); // v15 F7
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
@@ -4086,6 +4094,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function endZenSession() {
             snakeBump('finish'); // no death bucket — a Zen quit is not a death
+            gameOverAt = Date.now(); // v15 F7
             stopGameLoop();
             gameState = 'gameover';
             clearSnapshot();
@@ -6851,6 +6860,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function resetWaveState() {
             dirQueue = [];
+            gameOverAt = 0; // v15 F7
             var wave = GAUNTLET_WAVES[gauntletWave];
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
@@ -9895,6 +9905,12 @@ const TRAIL_RENDER_CONFIG = {
                 }
               }
             } else if (gameState === 'gameover') {
+              // v15 F7: a reflex tap within 500ms of death is ignored — before v15 it
+              // restarted instantly and destroyed the recap card the player was trying
+              // to read. After 500ms the tap restarts as before. Keyboard Enter does
+              // not pass through here and keeps restarting immediately (stated, not
+              // silently changed).
+              if (gameOverAt && Date.now() - gameOverAt < 500) return;
               document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
             } else if (gameState === 'playing' && gauntletIntermission) {
               // Gauntlet wave-pick screen: D-pad arrows navigate, tap confirms the
