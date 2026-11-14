@@ -135,15 +135,62 @@
 
     <script>
         // --- Anonymous player counter (FOV-2041) ---
-        // Anonymous counters via Abacus (abacus.jasoncameron.dev, free CORS counting
-        // API): page loads, per-UTC-day loads, games started, games finished. No cookies, no fingerprinting,
-        // no personal data, nothing stored. Fires ONLY on the public deployment
-        // (j3k0.github.io) — local runs and test harnesses are never counted.
-        const _snakesCount = location.hostname === 'j3k0.github.io'
-            ? function (key) { try { fetch('https://abacus.jasoncameron.dev/hit/j3k0.github.io/' + key, { mode: 'no-cors', keepalive: true }); } catch (e) {} }
-            : function () {};
-        _snakesCount('load');
-        _snakesCount('day-' + new Date().toISOString().slice(0, 10)); // distinct visiting days
+        // Funnel v2 (v15 F1): anonymous, cookie-less, one-shot-per-load counter keys via
+        // Abacus (abacus.jasoncameron.dev, free CORS counting API). No cookies, no
+        // fingerprinting, no personal data, nothing stored. Fires ONLY on the hostname
+        // allow-list — the production origin, itch's embed host, Newgrounds — so local
+        // runs and test harnesses are never counted (file://, localhost and CI match
+        // nothing). `localStorage.snake_nocount = '1'` suppresses every beacon (set by
+        // every scripted live check, so our own traffic never reaches the counters).
+        //
+        // Keys are LOAD-SCOPED: one fire per page load, not per run — five runs in one
+        // visit produce one `start`, one `first_food` (the first), one death bucket
+        // (the first). A Zen quit (endZenSession, no death) leaves a `start` with no
+        // death key: in the report that reads "quit or still playing", never "still
+        // playing". `snakeBump` resolves `isCountedHost` by bare name at CALL time —
+        // never capture the answer at module init (tests override the gate).
+        function isCountedHost(h) {
+            if (!h) return false;
+            if (h === 'j3k0.github.io') return true;
+            if (h === 'itch.zone' || h.endsWith('.itch.zone')) return true;
+            if (h === 'newgrounds.com' || h.endsWith('.newgrounds.com')) return true;
+            return false;
+        }
+        function channelForHost(h) {
+            if (!isCountedHost(h)) return null;
+            if (h === 'j3k0.github.io') return 'ch_github';
+            if (h === 'itch.zone' || h.endsWith('.itch.zone')) return 'ch_itch';
+            return 'ch_other';
+        }
+        const _firedFunnel = new Set();
+        function snakeBump(key) {
+            if (!key) return;
+            try {
+                if (!isCountedHost(location.hostname)) return;
+                if (localStorage.snake_nocount === '1') return;
+                if (_firedFunnel.has(key)) return;
+                _firedFunnel.add(key);
+                fetch('https://abacus.jasoncameron.dev/hit/j3k0.github.io/' + key, { mode: 'no-cors', keepalive: true });
+            } catch (e) {}
+        }
+        // Death buckets: a fixed map from lastDeathCause (its own field since v12 C —
+        // never the cause STRING, and never `lastSaveEvent`: a rescue is not a death
+        // and must not reach a bucket). Unmapped terminal causes — 'Starvation!',
+        // 'You shrunk to nothing!', 'Caught by the shrinking zone!', 'The board filled
+        // up!' — land on die_other via the fallback. 'Zen session ended.' never gets
+        // here (endZenSession, not gameOver).
+        const DEATH_BUCKET = {
+            'Hit the wall!': 'die_wall',
+            'You ran into yourself!': 'die_self',
+            'Hit an obstacle!': 'die_obs',
+            'You charged the rival head-on!': 'die_rival',
+            'You ran into the rival!': 'die_rival',
+            'Caught in a hazard rift!': 'die_hazard',
+            "Time's up!": 'die_time'
+        };
+        snakeBump('load');
+        snakeBump('day-' + new Date().toISOString().slice(0, 10)); // distinct visiting days
+        snakeBump(channelForHost(location.hostname));
 
         const TILE_SIZE = 20;
         const CANVAS_WIDTH = 440;
@@ -2587,7 +2634,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function startGame() {
-            _snakesCount('start');
+            snakeBump('start');
             // v7 E: starting a fresh run — discard any saved snapshot so the
             // idle "Resume Run" button doesn't offer a stale unrelated run.
             clearSnapshot();
@@ -3866,7 +3913,8 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function gameOver() {
-            _snakesCount('finish');
+            snakeBump('finish');
+            snakeBump(DEATH_BUCKET[lastDeathCause] || 'die_other');
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
@@ -3957,7 +4005,7 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function endZenSession() {
-            _snakesCount('finish');
+            snakeBump('finish'); // no death bucket — a Zen quit is not a death
             stopGameLoop();
             gameState = 'gameover';
             clearSnapshot();
@@ -7949,6 +7997,7 @@ const TRAIL_RENDER_CONFIG = {
                 triggerEvolutionIfReady();
                 if (activeSeed !== null) recordReplayGrow(gameTick);
                 const eatenType = food.type;
+                snakeBump('first_food'); // v15 F1: once per load (the Set enforces it)
 
                 // v10 B: Bomb food — tactical, 0 score/XP. Blasts obstacles + trims rival.
                 if (eatenType === 'bomb') {
@@ -8205,6 +8254,7 @@ const TRAIL_RENDER_CONFIG = {
                 snakeGrew = true;
                 triggerEvolutionIfReady();
                 if (activeSeed !== null) recordReplayGrow(gameTick);
+                snakeBump('first_food'); // v15 F1
                 sessionFoodEaten++;
                 stats.totalFoodEaten++;
                 stats.normalFoodEaten++;
@@ -8235,6 +8285,7 @@ const TRAIL_RENDER_CONFIG = {
                         spawnParticles(exitTile.x, exitTile.y, 18, '#AA44FF');
                         playSound('bonus');
                         // Grant the epic's bonus
+                        snakeBump('first_food'); // v15 F1
                         sessionFoodEaten++;
                         stats.totalFoodEaten++;
                         stats.epicFoodEaten++;
@@ -8270,6 +8321,7 @@ const TRAIL_RENDER_CONFIG = {
                         snakeGrew = true;
                         triggerEvolutionIfReady();
                         if (activeSeed !== null) recordReplayGrow(gameTick);
+                        snakeBump('first_food'); // v15 F1
                         sessionFoodEaten++;
                         stats.totalFoodEaten++;
                         stats.bonusFoodEaten++;
@@ -9006,12 +9058,17 @@ const TRAIL_RENDER_CONFIG = {
             // field, diary filter). Otherwise every global hotkey fires mid-typing
             // (e.g. 'x' in the seed field ruins a run by triggering Prestige).
             if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA')) return;
+            // v15 F1: first input class — a trusted keypress means a keyboard visitor.
+            // Synthetic events (the D-pad dispatches its own keydowns) are isTrusted=false
+            // and never count as keyboard input.
+            if (e.isTrusted) snakeBump('keys');
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
                 e.preventDefault();
             }
 
             if (welcomeOverlay && gameState === 'idle') {
                 welcomeOverlay = false;
+                snakeBump('overlay_gone');
                 saveManager.set('snake_has_played', '1');
                 visualDirty = true;
             }
@@ -9233,6 +9290,10 @@ const TRAIL_RENDER_CONFIG = {
 
             if (e.key === 'p' || e.key === 'P' || e.key === ' ') {
                 if (gameState === 'playing') {
+                    // v15 F1: paused_early — pause within the first 50 ticks (~6s at the
+                    // 120ms base tick) of a run start. Per-run via gameTick (reset in BOTH
+                    // resetGame and resetWaveState); once per load via the funnel Set.
+                    if (gameTick < 50) snakeBump('paused_early');
                     autoPaused = false;
                     gameState = 'paused';
                     pauseMenuSelection = 0;
@@ -9576,6 +9637,7 @@ const TRAIL_RENDER_CONFIG = {
 
         canvas.addEventListener('touchend', function(e) {
           e.preventDefault();
+          snakeBump('touch'); // v15 F1: first input class — a touch on the board
           const dx_touch = e.changedTouches[0].clientX - touchStartX;
           const dy_touch = e.changedTouches[0].clientY - touchStartY;
 
@@ -9583,6 +9645,7 @@ const TRAIL_RENDER_CONFIG = {
           if (Math.abs(dx_touch) < 10 && Math.abs(dy_touch) < 10) {
             if (welcomeOverlay) {
               welcomeOverlay = false;
+              snakeBump('overlay_gone');
               saveManager.set('snake_has_played', '1');
               updateMenuFooter();
               visualDirty = true; // overlay replaced the idle menu — force a redraw
