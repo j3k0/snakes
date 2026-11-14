@@ -3,7 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
-    <title>Snake Game</title>
+    <title>Snakes</title>
+    <!-- v15 F9: link-preview metadata. Before this, a pasted link rendered as a bare
+         line of text on Reddit/Discord/Twitter — no title, no description, no image.
+         og:image is ABSOLUTE (the deploy repo serves og-image.png from the site root);
+         a relative URL is the trap the gate exists to catch. The README's stale "3
+         keys" privacy line is fixed at deploy with the wording that stays true. -->
+    <meta name="description" content="One HTML file. Eight modes. A rival snake that eats your food.">
+    <meta property="og:title" content="Snakes">
+    <meta property="og:description" content="One HTML file. Eight modes. A rival snake that eats your food.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://j3k0.github.io/snakes/">
+    <meta property="og:image" content="https://j3k0.github.io/snakes/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Snakes">
+    <meta name="twitter:description" content="One HTML file. Eight modes. A rival snake that eats your food.">
+    <meta name="twitter:image" content="https://j3k0.github.io/snakes/og-image.png">
     <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22Snakes%22%2C%22short_name%22%3A%22Snakes%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23222%22%2C%22theme_color%22%3A%22%23111%22%2C%22orientation%22%3A%22portrait%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22data%3Aimage%2Fsvg%2Bxml%2C%253Csvg%2520xmlns%253D%2522http%253A%252F%252Fwww.w3.org%252F%252F2000%252Fsvg%2522%2520viewBox%253D%25220%25200%2520192%2520192%2522%253E%253Crect%2520width%253D%2522192%2522%2520height%253D%2522192%2522%2520fill%253D%2522%2523111%2522%2520rx%253D%252224%2522%252F%253E%253Cpath%2520d%253D%2522M96%252040%2520C60%252040%252C%252040%252060%252C%252040%252080%2520C40%2520100%252C%252060%2520100%252C%252096%2520100%2520C132%2520100%252C%2520152%2520100%252C%2520152%2520120%2520C152%2520140%252C%2520132%2520152%252C%252096%2520152%2522%2520stroke%253D%2522%252344FF44%2522%2520stroke-width%253D%252214%2522%2520fill%253D%2522none%2522%2520stroke-linecap%253D%2522round%2522%252F%253E%253Ccircle%2520cx%253D%252240%2522%2520cy%253D%252272%2522%2520r%253D%25225%2522%2520fill%253D%2522%2523FFF%2522%252F%253E%253C%252Fsvg%253E%22%2C%22sizes%22%3A%22192x192%22%2C%22type%22%3A%22image%2Fsvg%2Bxml%22%7D%5D%7D">
     <meta name="theme-color" content="#111">
     <style>

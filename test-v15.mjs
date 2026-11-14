@@ -901,5 +901,49 @@ async function drawnStrings(page, state) {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture I: F9 — link-preview metadata. Tags exist in <head>, og:image is
+// ABSOLUTE (the trap the gate exists to catch), and the preview image is a real
+// 1200x630 PNG. The post-deploy fetch check (tags on the live page, og:image 200
+// image/png) runs at deploy time — see the deploy note.
+// ---------------------------------------------------------------------------
+{
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+    const meta = await page.evaluate(() => {
+        const get = (sel, attr) => { const el = document.head.querySelector(sel); return el ? el.getAttribute(attr) || el.getAttribute('content') || null : null; };
+        return {
+            title: document.title,
+            desc: get('meta[name="description"]', 'content'),
+            ogTitle: get('meta[property="og:title"]', 'content'),
+            ogDesc: get('meta[property="og:description"]', 'content'),
+            ogUrl: get('meta[property="og:url"]', 'content'),
+            ogImage: get('meta[property="og:image"]', 'content'),
+            twitterCard: get('meta[name="twitter:card"]', 'content'),
+            twitterImage: get('meta[name="twitter:image"]', 'content')
+        };
+    });
+    check('C7 meta: title is Snakes, description present',
+          meta.title === 'Snakes' && !!meta.desc && meta.desc.length > 20,
+          JSON.stringify(meta));
+    check('C7 meta: og:title/og:description/og:url present and canonical',
+          meta.ogTitle === 'Snakes' && !!meta.ogDesc &&
+          meta.ogUrl === 'https://j3k0.github.io/snakes/',
+          JSON.stringify(meta));
+    check('C7 meta: og:image is ABSOLUTE (a relative URL is the trap)',
+          meta.ogImage === 'https://j3k0.github.io/snakes/og-image.png',
+          'ogImage=' + meta.ogImage);
+    check('C7 meta: twitter:card summary_large_image + twitter:image match',
+          meta.twitterCard === 'summary_large_image' && meta.twitterImage === meta.ogImage,
+          JSON.stringify(meta));
+    const png = readFileSync(join(__dirname, 'og-image.png'));
+    const okPng = png.slice(0, 8).toString('hex') === '89504e470d0a1a0a';
+    const w = png.readUInt32BE(16), h = png.readUInt32BE(20);
+    check('C7 image: og-image.png is a real 1200x630 PNG',
+          okPng && w === 1200 && h === 630, `${w}x${h} magic=${okPng}`);
+    await browser.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nResults: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
