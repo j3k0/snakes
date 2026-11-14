@@ -385,5 +385,112 @@ async function hostMappedPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture D: F2 — the board fits the phone. Scale-only: the whole board (its
+// border box) inside the visual viewport, computed from getBoundingClientRect,
+// never from CSS. Four viewports × four states, plus the two mid-session cases.
+// ---------------------------------------------------------------------------
+const BOARD_STATES = ['welcome', 'idle', 'playing', 'gameover'];
+async function enterState(page, st) {
+    await page.evaluate((st) => {
+        if (st === 'idle') { welcomeOverlay = false; gameState = 'idle'; resetGame(); }
+        if (st === 'welcome') { welcomeOverlay = true; gameState = 'idle'; resetGame(); }
+        if (st === 'playing') { gameMode = 'classic'; resetGame(); startGame(); stopGameLoop(); }
+        if (st === 'gameover') { gameMode = 'classic'; resetGame(); startGame(); stopGameLoop(); gameOver(); }
+        updateMenuFooter(); drawGame(1);
+    }, st);
+    await page.waitForTimeout(150);
+}
+async function boardRect(page) {
+    return page.evaluate(() => {
+        const c = document.querySelector('#gameCanvas').getBoundingClientRect();
+        const dEl = document.getElementById('dpad');
+        const dVisible = getComputedStyle(dEl).display !== 'none';
+        const d = dVisible ? dEl.getBoundingClientRect() : null;
+        return {
+            top: c.top, bottom: c.bottom, h: c.height, innerH: window.innerHeight,
+            compact: document.body.classList.contains('compact'),
+            h1: getComputedStyle(document.querySelector('h1')).display !== 'none',
+            scoreLine: getComputedStyle(document.getElementById('scoreLine')).display !== 'none',
+            highScore: getComputedStyle(document.getElementById('highScore')).display !== 'none',
+            dpad: d ? { top: d.top, bottom: d.bottom } : null
+        };
+    });
+}
+{
+    const browser = await chromium.launch();
+    for (const [w, h] of [[320, 568], [360, 640], [390, 844]]) {
+        const ctx = await browser.newContext({ hasTouch: true, viewport: { width: w, height: h } });
+        const page = await ctx.newPage();
+        const errors = []; page.on('pageerror', e => errors.push(String(e)));
+        await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(400);
+        for (const st of BOARD_STATES) {
+            await enterState(page, st);
+            const r = await boardRect(page);
+            const fits = r.top >= 0 && r.bottom <= r.innerH;
+            check(`C2 ${w}x${h} [${st}]: whole board inside the visual viewport`, fits,
+                  `top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} innerH=${r.innerH}`);
+        }
+        const idle = await (async () => { await enterState(page, 'idle'); return boardRect(page); })();
+        if (h < 700) {
+            check(`C2 ${w}x${h}: compact fires on a short touch viewport (h1/score/high hidden)`,
+                  idle.compact && !idle.h1 && !idle.scoreLine && !idle.highScore,
+                  JSON.stringify(idle));
+        } else {
+            check(`C2 ${w}x${h}: the common phone keeps today's board (>=500px, h1 and score visible, no compact)`,
+                  !idle.compact && idle.h1 && idle.scoreLine && idle.highScore && idle.h >= 500,
+                  `h=${idle.h.toFixed(0)} compact=${idle.compact} h1=${idle.h1} score=${idle.scoreLine}`);
+        }
+        check(`C2 ${w}x${h}: no page errors`, errors.length === 0, errors.join('; '));
+        await ctx.close();
+    }
+    // Desktop, fine pointer: no compact, title/score visible, board unchanged (600px box).
+    for (const [w, h] of [[1366, 768], [1280, 650]]) {
+        const ctx = await browser.newContext({ viewport: { width: w, height: h } });
+        const page = await ctx.newPage();
+        await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(400);
+        for (const st of ['idle', 'playing']) {
+            await enterState(page, st);
+            const r = await boardRect(page);
+            const fits = r.top >= 0 && r.bottom <= r.innerH;
+            check(`C2 ${w}x${h} fine-pointer [${st}]: board fits, no compact, h1/score visible`,
+                  fits && !r.compact && r.h1 && r.scoreLine && r.highScore,
+                  `top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} compact=${r.compact} h1=${r.h1}`);
+        }
+        if (w === 1366) {
+            const r = await boardRect(page);
+            check('C2 1366x768: desktop board unchanged (600px style box + border)',
+                  Math.abs(r.h - 604) <= 6, 'h=' + r.h.toFixed(1));
+        }
+        await ctx.close();
+    }
+    // Mid-session: URL-bar collapse mid-play, then rotation mid-play.
+    {
+        const ctx = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+        const page = await ctx.newPage();
+        await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(400);
+        await enterState(page, 'playing');
+        await page.setViewportSize({ width: 320, height: 488 });
+        await page.waitForTimeout(300);
+        let r = await boardRect(page);
+        check('C2 mid-session: URL-bar collapse (-80px) mid-play keeps the board visible',
+              r.top >= 0 && r.bottom <= r.innerH,
+              `top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} innerH=${r.innerH}`);
+        await page.setViewportSize({ width: 568, height: 320 });
+        await page.waitForTimeout(300);
+        r = await boardRect(page);
+        check('C2 mid-session: rotation mid-play (568x320) keeps the board visible',
+              r.top >= 0 && r.bottom <= r.innerH,
+              `top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} innerH=${r.innerH}`);
+        check('C2 mid-session: rotation keeps the D-pad reachable (top edge on-screen)',
+              r.dpad && r.dpad.top >= 0, JSON.stringify(r.dpad));
+        await ctx.close();
+    }
+    await browser.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nResults: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

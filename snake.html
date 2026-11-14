@@ -12,12 +12,21 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
+            /* v15 F2: when the column overflows, anchor to the TOP instead of
+               clipping both sides — today the symmetric clip eats the h1 above
+               AND the controls below, and the board's position depended on how
+               the clip happened to split. Old browsers keep plain center. */
+            justify-content: safe center;
             height: 100vh;
             margin: 0;
             background-color: #222;
             font-family: Arial, sans-serif;
             color: white;
             overflow: hidden;
+            /* v15 F4: the page is a full-viewport game with nothing to scroll — stop
+               pull-to-refresh at the document edge so a phone visitor's down-drag
+               never leaves the page (and reaches our swipe discrimination). */
+            overscroll-behavior-y: contain;
         }
         h1 {
             margin-bottom: 10px;
@@ -69,6 +78,16 @@
             #score { display: none; }
             #highScore { display: none; }
         }
+        /* v15 F2: compact — a touch device with a short viewport (<700 CSS px). The
+           same three elements standalone mode hides: the page title and the two
+           redundant DOM score lines (the canvas HUD draws score and XP during play).
+           Gated on (pointer: coarse) so it can never fire on a desktop window.
+           #scoreLine (hiding #score alone leaves an empty "Score:" paragraph) and
+           #highScore leave because at 320×568 the h1-only cap leaves a ~216px board —
+           too small to host a start control that meets F3's ≥24 physical px floor. */
+        body.compact h1,
+        body.compact #scoreLine,
+        body.compact #highScore { display: none; }
     </style>
 </head>
 <body>
@@ -89,7 +108,7 @@
         <button class="dpad-btn" data-key=" " aria-label="Pause" style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;margin-top:4px;">⏸</button>
       </div>
     </div>
-    <p>Score: <span id="score">0</span></p>
+    <p id="scoreLine">Score: <span id="score">0</span></p>
     <p id="highScore">Best: 0</p>
         <div id="xpDisplay" style="color:#aaa;font-size:0.9em;"></div>
         <div id="seedContainer" style="margin-top:6px;display:flex;align-items:center;gap:6px;justify-content:center;font-size:12px;">
@@ -2598,6 +2617,7 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState !== 'idle') {
                 footer.style.display = 'none';
                 if (seedContainer) seedContainer.style.display = 'none';
+                resizeCanvas(); // v15 F2: chrome changed — re-derive the board cap
                 return;
             }
             footer.style.display = 'block';
@@ -2631,6 +2651,7 @@ const TRAIL_RENDER_CONFIG = {
             } else {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests  |  S Settings</span>';
             }
+            resizeCanvas(); // v15 F2: chrome changed — re-derive the board cap
         }
 
         function startGame() {
@@ -2880,21 +2901,56 @@ const TRAIL_RENDER_CONFIG = {
         function resizeCanvas() {
             var canvasEl = document.getElementById('gameCanvas');
             if (!canvasEl) return;
-            var dpad = document.getElementById('dpad');
-            var scoreBar = document.getElementById('score');
-            var scoreBarHeight = scoreBar ? scoreBar.offsetHeight : 0;
-            var dpadHeight = dpad ? dpad.offsetHeight : 0;
+            // v15 F2: the board must FIT the viewport — scale, never clip.
+            //
+            // The canvas is capped by the ESSENTIAL chrome (measured, live): everything
+            // visible above it, plus the menu footer and D-pad below. `safe center`
+            // (body CSS) anchors the column to the top on overflow, so the top edge
+            // never clips; the cap below keeps the board + controls inside the bottom.
+            // Everything is MEASURED, so state changes that hide or show chrome
+            // (updateMenuFooter) just re-run this function.
+            // compact (h1 + the two DOM score lines hidden) exists because at 320×568
+            // the h1-only cap leaves a ~216px board — too small for F3's start control.
+            document.body.classList.toggle('compact',
+                window.matchMedia('(pointer: coarse)').matches && window.innerHeight < 700);
+            // Essential chrome: everything visible ABOVE the canvas, plus the two
+            // elements below it that the player actually needs — the menu footer
+            // (the door hint at idle) and the D-pad (the touch controls). The DOM
+            // score lines, seed row and combo line are deliberately NOT counted:
+            // on a phone they are the bottom of the stack and clip off first,
+            // exactly as today (hiding them is a deferred item, not this feature).
+            var above = 0, belowEssential = 0, seenCanvas = false;
+            var kids = document.body.children;
+            for (var i = 0; i < kids.length; i++) {
+                var el = kids[i];
+                if (el.id === 'gameCanvas') { seenCanvas = true; continue; }
+                var cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.position === 'fixed' || cs.position === 'absolute') continue;
+                var h = el.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+                if (!seenCanvas) above += h;
+                else if (el.id === 'menuFooter' || el.id === 'dpad') belowEssential += h;
+            }
+            var bcs = getComputedStyle(document.body);
+            var padV = (parseFloat(bcs.paddingTop) || 0) + (parseFloat(bcs.paddingBottom) || 0);
+            // The canvas carries its own 2px border, which is on-screen but outside
+            // the style box — budget it on both axes (measured, not assumed).
+            var ccs = getComputedStyle(canvasEl);
+            var borderV = (parseFloat(ccs.borderTopWidth) || 0) + (parseFloat(ccs.borderBottomWidth) || 0);
+            var borderH = (parseFloat(ccs.borderLeftWidth) || 0) + (parseFloat(ccs.borderRightWidth) || 0);
+            var availableHeight = Math.max(140, window.innerHeight - padV - above - belowEssential - 8 - borderV);
             var margin = 16;
-            // v7: standalone mode — no browser chrome, reclaim vertical space
-            var chromeOffset = isStandalone ? 0 : (scoreBarHeight + dpadHeight + margin);
-            var availableHeight = isStandalone ? window.innerHeight - margin : window.innerHeight - chromeOffset;
-            var availableWidth = window.innerWidth - margin;
-            // Preserve 440x600 aspect ratio: fit within available space
+            var availableWidth = window.innerWidth - margin - borderH;
+            // Preserve 440x600 aspect ratio: fit within available space. NO pixel
+            // floor — a floor is a clip by another name when it exceeds the cap above
+            // (the old 300px floor is what pinned row 0 off-screen at 320×568).
             var scaleX = availableWidth / CANVAS_WIDTH;
             var scaleY = availableHeight / CANVAS_HEIGHT;
             var scale = Math.min(scaleX, scaleY, 1);
-            canvasEl.style.width = Math.max(300, Math.round(CANVAS_WIDTH * scale)) + 'px';
-            canvasEl.style.height = Math.max(300, Math.round(CANVAS_HEIGHT * scale)) + 'px';
+            canvasEl.style.width = Math.round(CANVAS_WIDTH * scale) + 'px';
+            canvasEl.style.height = Math.round(CANVAS_HEIGHT * scale) + 'px';
+            // Exposed for tests and the touch handler (tap bands re-map from the rect
+            // at event time, but the applied scale is a fact worth asserting).
+            document.documentElement.style.setProperty('--snakes-scale', String(scale));
             // v8 A: recompute DPR + backing store on resize (covers moving a window
             // between displays with different pixel densities). Invalidate the grid
             // cache theme so ensureGridCache rebuilds at the new DPR on next drawGrid.
