@@ -756,5 +756,73 @@ async function drawnStrings(page, state) {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture G: F6 — a survivable opening lane. 3000 pinned seeds against the real
+// generateObstacles (classic) and generateObstaclesForWave (gauntlet): zero boards
+// with an obstacle in lane tiles 1-4. Today's build measurably produces blocked
+// lanes, so the probe can fail.
+// ---------------------------------------------------------------------------
+{
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+    const probe = await page.evaluate(() => {
+        const origSeeded = seededRandom;
+        // The lane definition here is INDEPENDENT of the shipped inOpeningLane —
+        // a probe that reads the predicate it tests is vacuous the moment the
+        // predicate is mutated (the first mutation run proved exactly that).
+        const inLane = (x, y) => y === 10 * TILE_SIZE && x > 10 * TILE_SIZE && x <= 14 * TILE_SIZE;
+        const results = { classicBlocked: [], waveBlocked: [], classicBoards: 0, waveBoards: 0 };
+        // Classic: the full generator (pattern arms + fallback) per seed.
+        for (let seed = 1; seed <= 3000; seed++) {
+            seededRandom = mulberry32(seed);
+            gameMode = 'classic';
+            snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
+            obstacles = [];
+            food = null; food2 = null; extraFoods = []; hazards = [];
+            generateObstacles();
+            results.classicBoards++;
+            if (obstacles.some(o => inLane(o.x, o.y))) results.classicBlocked.push(seed);
+        }
+        // Gauntlet: the wave generator per seed (findFreeTile consumes the PRNG too).
+        for (let seed = 1; seed <= 1000; seed++) {
+            seededRandom = mulberry32(seed + 50000);
+            gameMode = 'gauntlet';
+            snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
+            obstacles = [];
+            food = null; food2 = null; extraFoods = []; hazards = [];
+            generateObstaclesForWave({ obstacles: 15 });
+            results.waveBoards++;
+            if (obstacles.some(o => inLane(o.x, o.y))) results.waveBlocked.push(seed);
+        }
+        seededRandom = origSeeded;
+        gameMode = 'classic';
+        return results;
+    });
+    check('C5 classic: 0 of 3000 seeds put an obstacle in lane tiles 1-4',
+          probe.classicBlocked.length === 0,
+          `blocked=${probe.classicBlocked.length} first seeds: ${probe.classicBlocked.slice(0, 8).join(',')}`);
+    check('C5 gauntlet: 0 of 1000 wave boards put an obstacle in the lane',
+          probe.waveBlocked.length === 0,
+          `blocked=${probe.waveBlocked.length} first seeds: ${probe.waveBlocked.slice(0, 8).join(',')}`);
+    // The lane test itself is not vacuous: the helper must classify the four lane
+    // tiles IN and every adjacent tile OUT.
+    const laneUnits = await page.evaluate(() => ({
+        t1: inOpeningLane(11 * TILE_SIZE, 10 * TILE_SIZE),
+        t4: inOpeningLane(14 * TILE_SIZE, 10 * TILE_SIZE),
+        t0: inOpeningLane(10 * TILE_SIZE, 10 * TILE_SIZE),
+        t5: inOpeningLane(15 * TILE_SIZE, 10 * TILE_SIZE),
+        offRow: inOpeningLane(11 * TILE_SIZE, 11 * TILE_SIZE),
+        behind: inOpeningLane(9 * TILE_SIZE, 10 * TILE_SIZE)
+    }));
+    check('C5 lane units: tiles 1-4 in lane; head, tile 5, off-row, behind out',
+          laneUnits.t1 && laneUnits.t4 && !laneUnits.t0 && !laneUnits.t5 && !laneUnits.offRow && !laneUnits.behind,
+          JSON.stringify(laneUnits));
+    check('C5: no page errors', errors.length === 0, errors.join('; '));
+    await browser.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nResults: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

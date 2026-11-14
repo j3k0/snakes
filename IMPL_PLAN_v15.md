@@ -295,10 +295,15 @@ beside their anchor); `generateObstaclesForWave` `:6633`; spawn `snake = [{10·T
 `generateObstaclesForWave` fixtures likewise 0. Today's build measurably produces
 blocked lanes, so the fixture can fail (it is not vacuous).
 
-**Mutations:** drop the corridor test → the probe returns ~2.6–4.5% blocked; test only
-the anchor → the 0.9% two-tile case survives and the probe fails; the wave probe is
-the gate for the wave generator, so the sentence "check the wave generator" from rev 1
-is now an assertion (R2-11).
+**Mutations (as run):** drop the corridor test (predicate → always false) → the probe
+returns 109/3000 classic (3.6%) and 91/1000 wave boards (9.1%) blocked — the wave
+generator is nearly 3x worse than the classic one was. Removing only the pattern-tile
+check (keeping the fallback's) also yields 109 — the tile-set check is load-bearing.
+**Fixture lesson (recorded):** the probe's lane definition is INLINE and independent of
+the shipped `inOpeningLane` — a probe that reads the predicate it tests passes the
+moment the predicate is mutated (the first mutation run proved exactly that; the
+lane-units assertion caught it, and the probe now catches it too). Differential on
+`ee0e3f2`: 109/3000 + 91/1000 blocked pre-v15, zero post.
 
 ## C6 — F7: the recap card survives its first tap
 

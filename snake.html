@@ -3467,6 +3467,21 @@ const TRAIL_RENDER_CONFIG = {
             return null;
         }
 
+        // v15 F6: the opening lane — the four tiles directly ahead of the spawn head
+        // (10,10, moving right: tiles 11-14 on row 10). The obstacle generators must
+        // test the PATTERN's tile set, not its anchor: four of the five patterns
+        // extend beside their anchor, and the old anchor-only 3-tile Manhattan rule
+        // let an arm reach into the lane while the anchor sat outside it (measured:
+        // ~2.6-4.5% of boards killed the run before the second input). The anchor-only
+        // check survives the 2-tile-ahead case but not the arm cases — the assertion
+        // is tiles 1-4 for exactly that reason. findFreeTile's own shared 3-tile
+        // guard is untouched (five death-save callers depend on it).
+        function inOpeningLane(tx, ty) {
+            const laneHeadX = 10 * TILE_SIZE, laneHeadY = 10 * TILE_SIZE;
+            if (ty !== laneHeadY) return false;
+            return tx > laneHeadX && tx <= laneHeadX + 4 * TILE_SIZE;
+        }
+
         function generateObstacles() {
             obstacles = [];
             if (gameMode === 'zen' || gameMode === 'walled' || gameMode === 'painter' || gameMode === 'gauntlet') return;
@@ -3491,6 +3506,7 @@ const TRAIL_RENDER_CONFIG = {
                         const tx = anchorX + offset.dx;
                         const ty = anchorY + offset.dy;
                         if (tx < 0 || tx >= PLAY_WIDTH || ty < 0 || ty >= PLAY_HEIGHT) { conflict = true; break; }
+                        if (inOpeningLane(tx, ty)) { conflict = true; break; } // v15 F6
                         if (snake.some(s => s.x === tx && s.y === ty)) { conflict = true; break; }
                         if (obstacles.some(o => o.x === tx && o.y === ty)) { conflict = true; break; }
                         if (food && food.x === tx && food.y === ty) { conflict = true; break; }
@@ -3510,6 +3526,7 @@ const TRAIL_RENDER_CONFIG = {
                         const obsY = Math.floor(seededRandom() * (PLAY_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                         const dist = Math.abs(obsX - headX) + Math.abs(obsY - headY);
                         if (dist < 3 * TILE_SIZE) continue;
+                        if (inOpeningLane(obsX, obsY)) continue; // v15 F6
                         if (snake.some(s => s.x === obsX && s.y === obsY)) continue;
                         if (obstacles.some(o => o.x === obsX && o.y === obsY)) continue;
                         if (food && food.x === obsX && food.y === obsY) continue;
@@ -6803,6 +6820,10 @@ const TRAIL_RENDER_CONFIG = {
             var headY = 10 * TILE_SIZE;
             for (var i = 0; i < wave.obstacles; i++) {
                 var tile = findFreeTile(headX, headY);
+                // v15 F6: findFreeTile's 3-tile guard does not cover the lane (a tile
+                // 3-4 ahead on the spawn row passes it), so the wave generator gets
+                // its own check — the review's point: a sentence is not a gate.
+                if (tile && inOpeningLane(tile.x, tile.y)) continue;
                 if (tile) obstacles.push(tile);
             }
         }
