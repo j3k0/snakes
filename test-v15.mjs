@@ -624,5 +624,137 @@ function contrastRatio(l1, l2) { const a = Math.max(l1, l2), b = Math.min(l1, l2
 }
 
 // ---------------------------------------------------------------------------
+// Fixture F: F4 — onboarding that tells the truth on touch. Exact replacement
+// strings, a /Press\s/ sweep over {welcome, idle, gameover} on touch, one tap
+// dismisses AND starts, a swipe dismisses without starting, and overlay_gone +
+// start fire together on the same tap (F1 semantics re-checked here).
+// ---------------------------------------------------------------------------
+async function drawnStrings(page, state) {
+    await enterState(page, state);
+    return page.evaluate(() => {
+        const c = document.getElementById('gameCanvas');
+        const ctx2 = c.getContext('2d');
+        const orig = ctx2.fillText.bind(ctx2);
+        const seen = [];
+        ctx2.fillText = function (str) { seen.push(String(str)); return orig.apply(null, arguments); };
+        try { drawGame(1); } finally { ctx2.fillText = orig; }
+        return seen;
+    });
+}
+{
+    const browser = await chromium.launch();
+    const ctx = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+    const page = await ctx.newPage();
+    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+
+    // Fresh visitor: welcome overlay is up (no snake_has_played).
+    const welcomeUp = await page.evaluate(() => welcomeOverlay === true);
+    check('C4 fresh profile: the welcome overlay is up', welcomeUp);
+    const wStr = await drawnStrings(page, 'welcome');
+    check('C4 copy: the welcome overlay draws the two survival facts verbatim',
+          wStr.includes('A rival hunts your food — ram its side, never its head.') &&
+          wStr.includes("Rifts pulse — cross while they're dim."),
+          JSON.stringify(wStr));
+    check('C4 copy: the welcome footer promises a tap (and no Press on touch)',
+          wStr.includes('\uD83D\uDC46 Tap to start playing') && !wStr.some(t => /Press\s/.test(t)),
+          JSON.stringify(wStr));
+
+    // One deliberate tap dismisses AND starts.
+    const cpos = await page.evaluate(() => {
+        const r = document.querySelector('#gameCanvas').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.touchscreen.tap(cpos.x, cpos.y);
+    await page.waitForTimeout(300);
+    const afterTap = await page.evaluate(() => ({ state: gameState, overlay: welcomeOverlay }));
+    check('C4 tap: one tap on the welcome overlay dismisses AND starts',
+          afterTap.state === 'playing' && afterTap.overlay === false,
+          JSON.stringify(afterTap));
+
+    // The string sweep: no drawn string on touch names an input touch lacks.
+    for (const st of ['welcome', 'idle', 'gameover']) {
+        const ctxS = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+        const pS = await ctxS.newPage();
+        await pS.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await pS.evaluate(() => localStorage.setItem('snake_has_played', '1'));
+        await pS.reload({ waitUntil: 'domcontentloaded' });
+        await pS.waitForTimeout(400);
+        const strs = await drawnStrings(pS, st);
+        const dom = await pS.evaluate(() => document.body.innerText); // innerText excludes display:none content
+        const bad = strs.filter(t => /Press\s/.test(t));
+        check(`C4 sweep [${st}]: no drawn string matches /Press\\s/ on touch`, bad.length === 0,
+              JSON.stringify(bad));
+        check(`C4 sweep [${st}]: no DOM string matches /Press\\s/ on touch`, !/Press\s/.test(dom),
+              dom.slice(0, 200));
+        await ctxS.close();
+    }
+
+    // Swipe on the overlay: dismiss WITHOUT starting.
+    {
+        const ctxW = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+        const pW = await ctxW.newPage();
+        await pW.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await pW.evaluate(() => localStorage.removeItem('snake_has_played'));
+        await pW.reload({ waitUntil: 'domcontentloaded' });
+        await pW.waitForTimeout(500);
+        const swipe = await pW.evaluate(() => {
+            const pre = { overlay: welcomeOverlay, state: gameState };
+            const c = document.getElementById('gameCanvas');
+            const r = c.getBoundingClientRect();
+            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            const t1 = new Touch({ identifier: 1, target: c, clientX: cx, clientY: cy });
+            c.dispatchEvent(new TouchEvent('touchstart', { touches: [t1], targetTouches: [t1], changedTouches: [t1], bubbles: true, cancelable: true }));
+            const t2 = new Touch({ identifier: 1, target: c, clientX: cx, clientY: cy + 60 });
+            c.dispatchEvent(new TouchEvent('touchend', { touches: [], targetTouches: [], changedTouches: [t2], bubbles: true, cancelable: true }));
+            return pre; // the state BEFORE the events is the meaningful half
+        });
+        await pW.waitForTimeout(200);
+        const after = await pW.evaluate(() => ({ overlay: welcomeOverlay, state: gameState }));
+        check('C4 swipe: a 60px drag on the overlay dismisses WITHOUT starting',
+              swipe.overlay === true && after.overlay === false && after.state === 'idle',
+              JSON.stringify({ before: swipe, after }));
+        await ctxW.close();
+    }
+    check('C4: no page errors', errors.length === 0, errors.join('; '));
+    await browser.close();
+}
+
+// ---------------------------------------------------------------------------
+// Fixture F2: host-mapped + touch — the same tap fires overlay_gone AND start
+// together (F1's documented semantics under F4).
+// ---------------------------------------------------------------------------
+{
+    const { server, browser, page, hits } = await hostMappedPage();
+    const ctxT = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+    const pageT = await ctxT.newPage();
+    const hitsT = [];
+    await pageT.route('https://' + ABACUS + '/**', route => {
+        hitsT.push(route.request().url().split('/hit/j3k0.github.io/')[1]);
+        return route.fulfill({ status: 200, body: '' });
+    });
+    await pageT.goto('http://j3k0.github.io:8099/snake.html', { waitUntil: 'domcontentloaded' });
+    await pageT.waitForTimeout(500);
+    const pos = await pageT.evaluate(() => {
+        const r = document.querySelector('#gameCanvas').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await pageT.touchscreen.tap(pos.x, pos.y);
+    await pageT.waitForTimeout(300);
+    check('C4 funnel: the welcome tap fires overlay_gone AND start (once each, with touch and ch_github)',
+          hitsT.filter(k => k === 'overlay_gone').length === 1 &&
+          hitsT.filter(k => k === 'start').length === 1 &&
+          hitsT.filter(k => k === 'touch').length === 1 &&
+          hitsT.filter(k => k === 'ch_github').length === 1,
+          'got: ' + hitsT.join(','));
+    const st = await pageT.evaluate(() => gameState);
+    check('C4 funnel: the tap actually started the run', st === 'playing', 'gameState=' + st);
+    await ctxT.close();
+    await browser.close();
+    server.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nResults: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

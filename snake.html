@@ -4262,7 +4262,9 @@ const TRAIL_RENDER_CONFIG = {
             // Retry prompt — anchored to the card bottom, so it follows any card growth.
             ctx.font = '12px Arial';
             ctx.fillStyle = '#888';
-            ctx.fillText('Press ENTER to retry', cx, cardY + cardH - 22);
+            // v15 F4: a touch device cannot press ENTER — the prompt names the input
+            // the device actually has (the tap lands in C6's 500ms guard).
+            ctx.fillText(hasTouch ? 'Tap to play again' : 'Press ENTER to retry', cx, cardY + cardH - 22);
             ctx.restore();
         }
         // v8 F: Bounty Rush — templates and logic.
@@ -5155,15 +5157,31 @@ const TRAIL_RENDER_CONFIG = {
             var p3Y = p2Y + panelSpacing;
             ctx.fillStyle = '#FFD700';
             ctx.font = 'bold 13px Arial';
-            ctx.fillText('Progression', CANVAS_WIDTH / 2, p3Y);
-            ctx.fillStyle = '#CCC';
-            ctx.font = '12px Arial';
-            ctx.fillText('⭐ Eat food to earn XP and unlock cosmetics.', CANVAS_WIDTH / 2, p3Y + 18);
-            ctx.fillText('Press C for cosmetics!', CANVAS_WIDTH / 2, p3Y + 34);
+            if (isMobile || hasTouch) {
+                // v15 F4: on touch the panel teaches what ends run one, not a
+                // keyboard shortcut the device cannot press. Both facts are
+                // mechanics the game already enforces — nothing new advertised.
+                ctx.fillText('Stay alive', CANVAS_WIDTH / 2, p3Y);
+                ctx.fillStyle = '#CCC';
+                ctx.font = '12px Arial';
+                ctx.fillText('A rival hunts your food — ram its side, never its head.', CANVAS_WIDTH / 2, p3Y + 18);
+                ctx.fillText("Rifts pulse — cross while they're dim.", CANVAS_WIDTH / 2, p3Y + 34);
+            } else {
+                ctx.fillText('Progression', CANVAS_WIDTH / 2, p3Y);
+                ctx.fillStyle = '#CCC';
+                ctx.font = '12px Arial';
+                ctx.fillText('⭐ Eat food to earn XP and unlock cosmetics.', CANVAS_WIDTH / 2, p3Y + 18);
+                ctx.fillText('Press C for cosmetics!', CANVAS_WIDTH / 2, p3Y + 34);
+            }
 
             ctx.fillStyle = '#666';
             ctx.font = '11px Arial';
-            ctx.fillText('Press any key or tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+            if (isMobile || hasTouch) {
+                // v15 F4: now TRUE — one tap dismisses this overlay and starts the run.
+                ctx.fillText('\uD83D\uDC46 Tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+            } else {
+                ctx.fillText('Press any key or tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+            }
 
             ctx.restore();
         }
@@ -9754,7 +9772,14 @@ const TRAIL_RENDER_CONFIG = {
               saveManager.set('snake_has_played', '1');
               updateMenuFooter();
               visualDirty = true; // overlay replaced the idle menu — force a redraw
-              return; // Touch/click: dismiss but don't start game
+              // v15 F4: one deliberate tap dismisses AND starts. The copy has
+              // promised this since v7 ("tap to start playing"); the old early
+              // return dismissed onto the zero-CTA idle screen instead. A swipe
+              // (below) is displacement-discriminated and never starts — the page
+              // has nothing to scroll, so time-based guards protected a gesture
+              // that cannot exist here.
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+              return;
             }
             if (gameState === 'paused') {
               const rect = canvas.getBoundingClientRect();
@@ -9863,6 +9888,18 @@ const TRAIL_RENDER_CONFIG = {
 
           // Idle-state swipe detection for mode selection
           if (gameState === 'idle') {
+            // v15 F4: a swipe on the welcome overlay (>=10px displacement — anything
+            // the tap branch above rejected) is a deliberate non-tap: dismiss the
+            // overlay WITHOUT starting the run. Checked before mode selection so a
+            // drag never changes the mode behind the overlay either.
+            if (welcomeOverlay) {
+              welcomeOverlay = false;
+              snakeBump('overlay_gone');
+              saveManager.set('snake_has_played', '1');
+              updateMenuFooter();
+              visualDirty = true;
+              return;
+            }
             if (Math.abs(dy_touch) > Math.abs(dx_touch) && Math.abs(dy_touch) > 30) {
               // Swipe up moves the highlight up the mode list — same semantics as
               // ArrowUp (which decrements the index), not the inverted natural-scroll.

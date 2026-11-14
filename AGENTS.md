@@ -179,9 +179,9 @@
 
 ## First-Time Onboarding
 - `welcomeOverlay` flag initialized from `saveManager.get('snake_has_played', '')` at page load
-- `drawWelcomeOverlay()` renders a 3-panel overlay with controls (keyboard vs touch-adapted), food info, and progression info
+- `drawWelcomeOverlay()` renders a 3-panel overlay with controls (keyboard vs touch-adapted), food info, and the third panel: keyboard shows Progression, touch shows "Stay alive" (the two things that end run one — rival head-on, live rifts) — copy from mechanics the game already enforces
 - Overlay dismissed on any keypress (idle state): sets `saveManager.set('snake_has_played', '1')`, then falls through for normal key processing (Enter starts game immediately on first press)
-- On mobile: touch/click dismisses WITHOUT dispatching Enter (prevents accidental game start)
+- **On touch (v15 F4, REVERSED from pre-v15): a tap dismisses AND starts the run.** The overlay's copy ("Tap to start playing") has promised this since v7; the old dismiss-only behaviour dropped the visitor on the zero-CTA idle screen. A SWIPE (≥10 px displacement, the same threshold the tap branch uses) dismisses WITHOUT starting — discrimination is displacement-based, never time-based (the page has nothing to scroll, so a time window guarded a gesture that cannot exist). `overscroll-behavior-y: contain` keeps pull-to-refresh from eating the gesture first.
 - `drawWelcomeOverlay()` MUST use `ctx.save()`/`ctx.restore()` for all text rendering per canvas save/restore discipline
 - The welcome overlay only renders when `gameState === 'idle'` and replaces the normal idle screen entirely
 
