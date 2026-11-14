@@ -68,7 +68,9 @@
         .prestige-gold { color: #FFD700; font-weight: bold; font-size: 14px; }
         .prestige-purple { color: #AA44FF; font-weight: bold; font-size: 13px; }
         .prestige-gray { color: #888; font-size: 14px; }
-        .shortcut-dim { color: #555; font-size: 13px; }
+        /* v15 F3: #555 on #222 was 2.13:1 — below the 4.5:1 floor the footer's own
+           text is now asserted against. #999 measures 5.6:1. */
+        .shortcut-dim { color: #999; font-size: 13px; }
         @media (pointer: coarse) {
             #menuFooter { font-size: 12px; line-height: 1.3; max-width: calc(100vw - 20px); }
         }
@@ -822,6 +824,11 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let helpOverlayVisible = false;
         let resumeRunTextY = CANVAS_HEIGHT - 95; // v7 E: capture position for tap band
         let welcomeOverlay = !saveManager.get('snake_has_played', '');
+        // v15 F3: the idle screen's start control, in CANVAS coordinates. Written by
+        // the idle draw (drawOverlay), read by the touchend handler — the band is the
+        // ONLY idle tap target on touch, so it is load-bearing, not decoration. Null
+        // on every draw path that does not render it (drawOverlay resets it at entry).
+        let startBandRect = null;
         let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
@@ -2647,7 +2654,7 @@ const TRAIL_RENDER_CONFIG = {
             }
             prestigeInfo.innerHTML = info;
             if (hasTouch) {
-                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap to Start | Swipe \u2191\u2193 to change mode</span>';
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap the button to start | Swipe \u2191\u2193 to change mode</span>';
             } else {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests  |  S Settings</span>';
             }
@@ -5439,6 +5446,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function drawOverlay(text, subtext) {
             ctx.save();
+            startBandRect = null; // set again below iff the idle band is drawn
             if (gameState === 'idle') {
                 if (welcomeOverlay) {
                     drawWelcomeOverlay();
@@ -5543,6 +5551,43 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.font = '11px Arial';
                     ctx.fillText('(tap to install)', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 10);
                 }
+
+                // v15 F3: the start control. The idle screen had no call to action at
+                // all — the 'Press ENTER to Start' subtext (drawGame's drawOverlay
+                // call) was received and never rendered, and on touch there was no
+                // way in except an invisible catch-all tap. The band is drawn LAST in
+                // the idle branch so it owns its rectangle outright, in the lower
+                // third of the play area (y 456-504: below the mode list, above the
+                // daily/resume stack at 505). 48 canvas px tall => >= 24 physical px
+                // at the worst 0.5 scale the C2 gate allows. White on #2E7D32 is
+                // 5.1:1. touchend accepts taps inside startBandRect only — the band
+                // is load-bearing (see the touch handler).
+                ctx.save();
+                var bandW = 220, bandH = 48;
+                var bandX = (CANVAS_WIDTH - bandW) / 2;
+                var bandY = 456;
+                startBandRect = { x: bandX, y: bandY, w: bandW, h: bandH };
+                ctx.fillStyle = '#2E7D32';
+                ctx.fillRect(bandX, bandY, bandW, bandH);
+                ctx.strokeStyle = '#81C784';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(bandX + 1, bandY + 1, bandW - 2, bandH - 2);
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 18px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                var bandText = hasTouch ? '\uD83D\uDC46 Tap to play' : (subtext || 'Press ENTER to Start');
+                if (ctx.measureText(bandText).width <= bandW - 12) {
+                    ctx.fillText(bandText, CANVAS_WIDTH / 2, bandY + bandH / 2 + 1);
+                } else {
+                    // v12's environment-dependent metrics lesson: never trust a
+                    // centered fit across Chromium builds — degrade to clipped left.
+                    ctx.save();
+                    ctx.textAlign = 'left';
+                    fillTextClipped(bandText, bandX + 6, bandY + bandH / 2 + 1, bandX + bandW - 6);
+                    ctx.restore();
+                }
+                ctx.restore();
 
                 ctx.restore();
                 return;
@@ -7138,6 +7183,10 @@ const TRAIL_RENDER_CONFIG = {
         // --- end v6 ---
 
                 function drawGame(t) {
+            // v15 F3: the start band is frame-scoped — drawGame resets it every
+            // frame (drawOverlay re-sets it when the idle band renders), so a stale
+            // rect can never accept a tap after the state changed.
+            startBandRect = null;
             // v8 A: absolute base transform — DPR scale + folded shake offset.
             // setTransform is absolute, so this is self-contained for every direct
             // drawGame(1) call (shakeOffset is 0 outside rAF) AND carries the shake
@@ -9782,7 +9831,24 @@ const TRAIL_RENDER_CONFIG = {
                 return;
               }
             }
-            if (gameState === 'idle' || gameState === 'gameover') {
+            // v15 F3: at idle, the START BAND is the touch start control. A tap
+            // outside it does NOTHING — before v15 any idle tap started the run,
+            // which made a visible control both unnecessary and untestable. The
+            // keyboard path (real Enter key, D-pad synthetic keydowns) is unchanged
+            // and still starts from anywhere.
+            if (gameState === 'idle') {
+              if (startBandRect) {
+                const bandRect = canvas.getBoundingClientRect();
+                const bandScaleX = CANVAS_WIDTH / bandRect.width;
+                const bandScaleY = CANVAS_HEIGHT / bandRect.height;
+                const bandTapX = (e.changedTouches[0].clientX - bandRect.left) * bandScaleX;
+                const bandTapY = (e.changedTouches[0].clientY - bandRect.top) * bandScaleY;
+                if (bandTapX >= startBandRect.x && bandTapX <= startBandRect.x + startBandRect.w &&
+                    bandTapY >= startBandRect.y && bandTapY <= startBandRect.y + startBandRect.h) {
+                  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+                }
+              }
+            } else if (gameState === 'gameover') {
               document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
             } else if (gameState === 'playing' && gauntletIntermission) {
               // Gauntlet wave-pick screen: D-pad arrows navigate, tap confirms the

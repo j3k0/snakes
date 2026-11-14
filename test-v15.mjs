@@ -492,5 +492,137 @@ async function boardRect(page) {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture E: F3 — a start control, visible and tappable. The band is load-bearing:
+// a tap OUTSIDE it at idle does nothing; a tap inside starts. Contrast is read
+// back from the band interior (min/max relative-luminance ratio), never assumed
+// from the fill colour, and the footer pair is asserted at two viewports.
+// ---------------------------------------------------------------------------
+function relLum(r, g, b) {
+    const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+function contrastRatio(l1, l2) { const a = Math.max(l1, l2), b = Math.min(l1, l2); return (a + 0.05) / (b + 0.05); }
+{
+    const browser = await chromium.launch();
+    const ctx = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+    const page = await ctx.newPage();
+    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(400);
+    await page.evaluate(() => { localStorage.setItem('snake_has_played', '1'); });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+    await enterState(page, 'idle');
+
+    // Band exists, on-screen, >= 24 physical px at 320x568.
+    const band = await page.evaluate(() => {
+        if (!startBandRect) return null;
+        const rect = document.querySelector('#gameCanvas').getBoundingClientRect();
+        const sx = rect.width / CANVAS_WIDTH, sy = rect.height / CANVAS_HEIGHT;
+        const screen = {
+            x: rect.left + startBandRect.x * sx, y: rect.top + startBandRect.y * sy,
+            w: startBandRect.w * sx, h: startBandRect.h * sy
+        };
+        return { canvas: startBandRect, screen,
+                 onScreen: screen.x >= 0 && screen.y >= 0 &&
+                            screen.x + screen.w <= window.innerWidth && screen.y + screen.h <= window.innerHeight };
+    });
+    check('C3 band: drawn at idle', !!band, 'startBandRect is null');
+    check('C3 band: rect inside the visual viewport at 320x568 (asserted BEFORE any tap)',
+          band && band.onScreen, JSON.stringify(band && band.screen));
+    check('C3 band: >= 24 physical px tall at 320x568',
+          band && band.screen.h >= 24, 'h=' + (band && band.screen.h.toFixed(1)));
+
+    // Contrast: read back the band interior (minus the border stroke), the darkest
+    // and lightest pixels are the glyph and its backdrop — ratio must clear 4.5:1.
+    const contrast = await page.evaluate(() => {
+        const c = document.getElementById('gameCanvas');
+        const dpr = Math.min(window.devicePixelRatio || 1, 3);
+        const x0 = Math.round((startBandRect.x + 3) * dpr), y0 = Math.round((startBandRect.y + 3) * dpr);
+        const w = Math.round((startBandRect.w - 6) * dpr), h = Math.round((startBandRect.h - 6) * dpr);
+        const img = c.getContext('2d').getImageData(x0, y0, w, h).data;
+        let minL = 1, maxL = 0;
+        for (let i = 0; i < img.length; i += 4) {
+            const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+            const L = 0.2126 * f(img[i]) + 0.7152 * f(img[i + 1]) + 0.0722 * f(img[i + 2]);
+            if (L < minL) minL = L;
+            if (L > maxL) maxL = L;
+        }
+        return { minL, maxL, ratio: (maxL + 0.05) / (minL + 0.05) };
+    });
+    check('C3 band: interior min/max luminance ratio >= 4.5:1',
+          contrast.ratio >= 4.5, 'ratio=' + contrast.ratio.toFixed(2));
+
+    // Footer contrast pair at two viewports.
+    for (const [w, h] of [[320, 568], [390, 844]]) {
+        const ctx2 = await browser.newContext({ hasTouch: true, viewport: { width: w, height: h } });
+        const p2 = await ctx2.newPage();
+        await p2.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await p2.evaluate(() => localStorage.setItem('snake_has_played', '1'));
+        await p2.reload({ waitUntil: 'domcontentloaded' });
+        await p2.waitForTimeout(400);
+        await enterState(p2, 'idle');
+        const foot = await p2.evaluate(() => {
+            const el = document.querySelector('.shortcut-dim');
+            const a = getComputedStyle(el);
+            const body = getComputedStyle(document.body);
+            const parse = (str) => str.match(/\d+(\.\d+)?/g).map(Number);
+            const [r1, g1, b1] = parse(a.color);
+            const [r2, g2, b2] = parse(body.backgroundColor);
+            const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+            const lum = (r, g, b) => 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+            const l1 = lum(r1, g1, b1), l2 = lum(r2, g2, b2);
+            const hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+            return { color: a.color, bg: body.backgroundColor, visible: a.display !== 'none' && el.offsetParent !== null, ratio: (hi + 0.05) / (lo + 0.05) };
+        });
+        check(`C3 footer: shortcut-dim/background pair >= 4.5:1 at ${w}x${h}`,
+              foot.visible && foot.ratio >= 4.5, JSON.stringify(foot));
+        await ctx2.close();
+    }
+
+    // THE NEGATIVE CASE — a tap ON the canvas but outside the band leaves the game
+    // idle. Canvas centre (220,300): inside the canvas by construction, above the
+    // band (y 456-504). This is the assertion that fails if the band's hit-test is
+    // deleted and the old catch-all tap returns.
+    const canvasCentre = await page.evaluate(() => {
+        const r = document.querySelector('#gameCanvas').getBoundingClientRect();
+        return { x: r.left + (CANVAS_WIDTH / 2) * (r.width / CANVAS_WIDTH),
+                 y: r.top + (300) * (r.height / CANVAS_HEIGHT) };
+    });
+    await page.touchscreen.tap(canvasCentre.x, canvasCentre.y);
+    await page.waitForTimeout(300);
+    let st = await page.evaluate(() => gameState);
+    check('C3 tap: outside the band at idle does NOT start the run (the band is load-bearing)',
+          st === 'idle', 'gameState=' + st);
+
+    // A tap at the band's centre starts the run.
+    await page.touchscreen.tap(band.screen.x + band.screen.w / 2, band.screen.y + band.screen.h / 2);
+    await page.waitForTimeout(300);
+    st = await page.evaluate(() => gameState);
+    check('C3 tap: the band centre takes idle -> playing', st === 'playing', 'gameState=' + st);
+
+    // Keyboard path unchanged: a trusted Enter at idle still starts.
+    {
+        const ctx3 = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+        const p3 = await ctx3.newPage();
+        await p3.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+        await p3.evaluate(() => localStorage.setItem('snake_has_played', '1'));
+        await p3.reload({ waitUntil: 'domcontentloaded' });
+        await p3.waitForTimeout(400);
+        await enterState(p3, 'idle');
+        await p3.keyboard.press('Enter');
+        await p3.waitForTimeout(300);
+        const s = await p3.evaluate(() => gameState);
+        check('C3 keyboard: trusted Enter at idle still starts (path unchanged)', s === 'playing', 'gameState=' + s);
+        // The band is null off idle — a stale rect must never accept a tap.
+        const nulls = await p3.evaluate(() => startBandRect);
+        check('C3 band: startBandRect is null while playing (stale rect impossible)', nulls === null, JSON.stringify(nulls));
+        await ctx3.close();
+    }
+    check('C3: no page errors', errors.length === 0, errors.join('; '));
+    await browser.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nResults: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

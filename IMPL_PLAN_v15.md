@@ -219,9 +219,14 @@ and 390×844. Taps: band centre → `idle → playing`; a tap 200 canvas px away
 what makes this gate distinguishable from today's catch-all). Band ≥ 24 physical px
 at 320×568.
 
-**Mutations:** fill `#555` → contrast fails; delete the band hit-test → the negative
-case fails (today's catch-all would start the game and the assertion catches it);
-move the band below the fold → the viewport assertion fails before the tap does.
+**Mutations (as run):** the plan's original "fill `#555`" mutation cannot bite a
+white-glyph design — white on `#555` is 7.5:1, still legal — so the contrast mutation
+is the TEXT fill (`#777` on the green band → ratio 3.64, fails). Delete the band
+hit-test (restore the catch-all) → the negative case fails. Move the band off-canvas
+(`bandY = 700`) → the contrast read-back returns 1.00 (no band pixels) and the band
+tap fails. Fixture note: the negative-case tap must land ON the canvas but outside
+the band (canvas centre 220,300) — an off-canvas tap passes even with the catch-all
+and proves nothing (caught in the first mutation run).
 
 ## C4 — F4: onboarding that tells the truth
 
