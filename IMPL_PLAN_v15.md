@@ -375,11 +375,27 @@ on ~2 visitors); `die_*` right-censored on `ch_itch` (~90 s iframe lifetime); a 
 quit is a `start` with no death key ("quit or still playing", never "still playing");
 counts printed *with* rates, ours subtracted by name and date.
 
-**Gate:** run against the live read-only API — a row for 2026-10-20 with
-`day_loads = 2`, one for 2026-11-13 with 2, no row dated today; the rate table
-asserted against fixture counts (R2-12), not by eye.
+**Gate (as run):** against the live read-only API — a row for 2026-10-20 with
+`day_loads = 2`; the 2026-11-13 row carries the live day count (the plan's
+hard-coded "2" was already stale by one visitor — the gate reads the live value);
+no row dated today; the printed rate table equals floor(a×100/b) of the fetched
+counts (R2-12), not judged by eye; --dry-run leaves the file byte-identical; a
+mutated copy pointed at /hit/ refuses with exit 1.
 
-**Mutation:** point the date at today → the no-today-row assertion fails.
+**Mutations (as run) — three real findings recorded:**
+1. The original guard (`exit 1` inside `val()`) was SWALLOWED: val runs inside
+   command substitutions, so `exit` only ended the subshell and the mutated
+   script printed the refusal 18 times, continued, and exited 0. Fixed: the
+   guard checks the URL constant at top level, where exit actually refuses.
+2. The walk refetched all 16 lifetime keys per DATE (450 requests on a 25-date
+   backfill) and Abacus's rate limit flipped keys between real values and
+   "Key not found". Fixed: lifetime totals fetch once per run; per date only
+   `day-<date>`.
+3. The "no row dated today" invariant is OVER-DETERMINED — two independent
+   bounds (the today-break and the yesterday walk bound) each prevent it, so
+   no single mutation can fail the assertion; deleting BOTH bounds produces a
+   today row and the assertion fires. Recorded as an invariant, not a
+   single-guard pin.
 
 ## C9 — docs
 

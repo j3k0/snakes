@@ -16,7 +16,7 @@ import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import http from 'http';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const htmlPath = process.env.SNAKE_FILE || join(__dirname, 'snake.html');
@@ -942,6 +942,80 @@ async function drawnStrings(page, state) {
     check('C7 image: og-image.png is a real 1200x630 PNG',
           okPng && w === 1200 && h === 630, `${w}x${h} magic=${okPng}`);
     await browser.close();
+}
+
+// ---------------------------------------------------------------------------
+// Fixture J: F10 — the report and the decision rule. The script runs against the
+// LIVE read-only API (/get/ only — a /hit/ in the snapshot job would be the worst
+// bug in the file, so the guard is asserted twice: by source inspection and by
+// running a mutated copy that must refuse). Slow (~5 min): Abacus rate-limits and
+// the script retries with pauses.
+// ---------------------------------------------------------------------------
+{
+    const SCRIPT = '/opt/shared/reports/snakes/counter-snapshot.sh';
+    const SNAP = '/opt/shared/reports/snakes/counter-snapshots.jsonl';
+    const before = readFileSync(SNAP, 'utf8');
+    const src = readFileSync(SCRIPT, 'utf8');
+    // A real counting URL would be abacus.../hit/<ns>/<key>; the guard's own case
+    // pattern (*"/hit/"*) legitimately contains the literal — the assertion targets
+    // the URL form only.
+    check('C10 guard: the script never constructs a /hit/ URL',
+          !src.includes('jasoncameron.dev/hit'), 'source has a counting URL');
+
+    // Single historical date: 2026-10-20, day_loads = 2 (the plan's pinned row).
+    const { execFile } = await import('child_process');
+    const run = (args) => new Promise((res) => {
+        execFile(SCRIPT, args, { timeout: 600000, maxBuffer: 1 << 24 }, (err, stdout, stderr) => res({ err, stdout, stderr }));
+    });
+    const r1 = await run(['--backfill', '2026-10-20', '--until', '2026-10-20', '--dry-run']);
+    check('C10 script: exits 0 on a one-date dry run', !r1.err, String(r1.err || r1.stderr).slice(0, 200));
+    const row1 = r1.stdout.split('\n').find(l => l.startsWith('DRY') && l.includes('"date":"2026-10-20"'));
+    check('C10 history: a row for 2026-10-20 with day_loads = 2',
+          !!row1 && /"day_loads":2/.test(row1), (row1 || 'no row').slice(0, 160));
+
+    // Two recent dates; no row dated today; the 11-13 day count matches the live value.
+    const r2 = await run(['--backfill', '2026-11-12', '--until', '2026-11-13', '--dry-run']);
+    const today = new Date().toISOString().slice(0, 10);
+    const dryRows = r2.stdout.split('\n').filter(l => l.startsWith('DRY'));
+    check('C10 dry-run: no row dated today (yesterday-only semantics)',
+          dryRows.every(l => !l.includes('"date":"' + today + '"')),
+          'rows: ' + dryRows.map(l => l.match(/"date":"[^"]+"/)?.[0]).join(', '));
+    const live1313 = await (await fetch('https://abacus.jasoncameron.dev/get/j3k0.github.io/day-2026-11-13')).json();
+    const row1313 = dryRows.find(l => l.includes('"date":"2026-11-13"'));
+    check('C10 live: the 2026-11-13 row carries the live day count',
+          !!row1313 && row1313.includes('"day_loads":' + (live1313.value ?? 'null')),
+          `live=${JSON.stringify(live1313)} row=${(row1313 || 'none').slice(0, 120)}`);
+
+    // The rate table is arithmetic, not prose: printed rates must equal floor(a*100/b).
+    const liveLoad = await (await fetch('https://abacus.jasoncameron.dev/get/j3k0.github.io/load')).json();
+    const liveStart = await (await fetch('https://abacus.jasoncameron.dev/get/j3k0.github.io/start')).json();
+    const rateLine = r2.stdout.split('\n').find(l => l.startsWith('rates:'));
+    const expStartLoad = liveStart.value && liveLoad.value ? Math.floor(liveStart.value * 100 / liveLoad.value) + '%' : 'n/a';
+    check('C10 rates: the printed start/load matches the fetched counts',
+          !!rateLine && rateLine.includes('start/load=' + expStartLoad),
+          'expected ' + expStartLoad + ' got: ' + rateLine);
+
+    // --dry-run appends nothing.
+    const after = readFileSync(SNAP, 'utf8');
+    check('C10 dry-run: the snapshot file is byte-identical after a dry run', before === after);
+
+    // The /hit/ guard refuses to run: a mutated copy must exit nonzero.
+    const mutated = src.replace('jasoncameron.dev/get/j3k0.github.io', 'jasoncameron.dev/hit/j3k0.github.io');
+    if (mutated === src) {
+        check('C10 guard mutation: could not build the mutated copy', false);
+    } else {
+        const tmp = join(__dirname, 'tmp-guard-test.sh');
+        writeFileSync(tmp, mutated);
+        const g = await new Promise((res) => execFile('bash', [tmp, '--backfill', '2026-11-13', '--until', '2026-11-13', '--dry-run'], { timeout: 120000 }, (err, so, se) => res({ err, se })));
+        check('C10 guard: a script pointed at /hit/ refuses (exits nonzero)', !!g.err, 'stderr: ' + String(g.se).slice(0, 120));
+        // and the honest copy, run the same way, does not refuse
+        const g2 = await new Promise((res) => execFile('bash', [SCRIPT, '--backfill', '2026-11-13', '--until', '2026-11-13', '--dry-run'], { timeout: 300000 }, (err, so, se) => res({ err, se })));
+        check('C10 guard: the honest script runs clean', !g2.err, 'stderr: ' + String(g2.se).slice(0, 120));
+        // mutation never wrote a counting request: the day key for today must not exist
+        const todayKey = await (await fetch('https://abacus.jasoncameron.dev/get/j3k0.github.io/day-' + today)).json();
+        check('C10 no-pollution: no day key was minted for today by any check', !todayKey.value, JSON.stringify(todayKey));
+        try { (await import('fs')).unlinkSync(tmp); } catch (e) {}
+    }
 }
 
 // ---------------------------------------------------------------------------
