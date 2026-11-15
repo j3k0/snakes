@@ -969,22 +969,30 @@ async function drawnStrings(page, state) {
     });
     const r1 = await run(['--backfill', '2026-10-20', '--until', '2026-10-20', '--dry-run']);
     check('C10 script: exits 0 on a one-date dry run', !r1.err, String(r1.err || r1.stderr).slice(0, 200));
+    // State-independent: the date is either printed as a DRY row (absent from the
+    // file) or skipped (present) — both prove the walk reaches it; the VALUE is
+    // asserted from the authoritative copy (the file, once healed by the backfill).
     const row1 = r1.stdout.split('\n').find(l => l.startsWith('DRY') && l.includes('"date":"2026-10-20"'));
-    check('C10 history: a row for 2026-10-20 with day_loads = 2',
-          !!row1 && /"day_loads":2/.test(row1), (row1 || 'no row').slice(0, 160));
+    const skip1 = r1.stdout.split('\n').find(l => l.includes('skip 2026-10-20'));
+    const fileRow1 = readFileSync(SNAP, 'utf8').split('\n').find(l => l.includes('"date":"2026-10-20"'));
+    check('C10 history: 2026-10-20 is walked (row or skip) and carries day_loads = 2',
+          (!!row1 && /"day_loads":2/.test(row1)) || (!!skip1 && !!fileRow1 && /"day_loads":2/.test(fileRow1)),
+          'dry=' + (row1 || 'none').slice(0, 100) + ' skip=' + (skip1 || 'none') + ' file=' + (fileRow1 || 'none').slice(0, 100));
 
     // Two recent dates; no row dated today; the 11-13 day count matches the live value.
     const r2 = await run(['--backfill', '2026-11-12', '--until', '2026-11-13', '--dry-run']);
     const today = new Date().toISOString().slice(0, 10);
-    const dryRows = r2.stdout.split('\n').filter(l => l.startsWith('DRY'));
-    check('C10 dry-run: no row dated today (yesterday-only semantics)',
-          dryRows.every(l => !l.includes('"date":"' + today + '"')),
-          'rows: ' + dryRows.map(l => l.match(/"date":"[^"]+"/)?.[0]).join(', '));
+    const walkLines = r2.stdout.split('\n').filter(l => l.startsWith('DRY') || l.includes('skip 2026-1'));
+    check('C10 dry-run: no line (row or skip) dated today (yesterday-only semantics)',
+          walkLines.every(l => !l.includes('"' + today + '"') && !l.includes(today)),
+          'lines: ' + walkLines.slice(0, 4).join(' | ').slice(0, 200));
     const live1313 = await (await fetch('https://abacus.jasoncameron.dev/get/j3k0.github.io/day-2026-11-13')).json();
-    const row1313 = dryRows.find(l => l.includes('"date":"2026-11-13"'));
-    check('C10 live: the 2026-11-13 row carries the live day count',
-          !!row1313 && row1313.includes('"day_loads":' + (live1313.value ?? 'null')),
-          `live=${JSON.stringify(live1313)} row=${(row1313 || 'none').slice(0, 120)}`);
+    const row1313 = r2.stdout.split('\n').find(l => l.startsWith('DRY') && l.includes('"date":"2026-11-13"'));
+    const fileRow1313 = readFileSync(SNAP, 'utf8').split('\n').find(l => l.includes('"date":"2026-11-13"'));
+    check('C10 live: the 2026-11-13 snapshot carries the live day count',
+          (!!row1313 && row1313.includes('"day_loads":' + (live1313.value ?? 'null'))) ||
+          (!!fileRow1313 && fileRow1313.includes('"day_loads":' + (live1313.value ?? 'null'))),
+          `live=${JSON.stringify(live1313)} dry=${(row1313 || 'none').slice(0, 80)} file=${(fileRow1313 || 'none').slice(0, 80)}`);
 
     // The rate table is arithmetic, not prose: printed rates must equal floor(a*100/b).
     const liveLoad = await (await fetch('https://abacus.jasoncameron.dev/get/j3k0.github.io/load')).json();
