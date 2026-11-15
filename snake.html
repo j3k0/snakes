@@ -114,6 +114,24 @@
       <div id="prestigeInfo"></div>
       <div id="shortcutInfo"></div>
     </div>
+    <!-- FOV-2728: touch entry for the seven menu panels. The ☰ button sits in
+         the D-PAD ROW, not in its own bar: the D-pad is already counted in
+         resizeCanvas's board cap, so the menu control costs the board ZERO
+         height — a standalone bar broke the v15 C2 board gate (476<500 at
+         390x844) and the C3 band floor (21.4<24 physical px at 320x568).
+         The button is NOT .dpad-btn (no data-key — it must not dispatch a
+         synthetic keydown); the picker is a fixed modal over #panelBackdrop
+         because body is overflow:hidden and an inline expand would push the
+         D-pad off-screen. -->
+    <div id="touchMenuList" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #888;border-radius:12px;padding:16px;z-index:100;flex-direction:column;gap:8px;min-width:230px;">
+      <button data-panel="settings" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">⚙️ Settings</button>
+      <button data-panel="quests" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">🎯 Quests</button>
+      <button data-panel="achievements" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">🏆 Achievements</button>
+      <button data-panel="cosmetics" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">🎨 Cosmetics</button>
+      <button data-panel="brews" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">🧪 Brews</button>
+      <button data-panel="diary" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">📜 Diary</button>
+      <button data-panel="stats" style="display:block;width:100%;padding:12px;background:#333;color:#FFF;border:1px solid #555;border-radius:8px;font-size:15px;cursor:pointer;touch-action:manipulation;text-align:left;">📊 Stats</button>
+    </div>
     <div id="dpad" style="display:none;margin-top:10px;touch-action:manipulation;user-select:none;-webkit-user-select:none;">
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
         <button class="dpad-btn" data-key="ArrowUp" aria-label="Up" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▲</button>
@@ -122,7 +140,10 @@
           <button class="dpad-btn" data-key="ArrowDown" aria-label="Down" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▼</button>
           <button class="dpad-btn" data-key="ArrowRight" aria-label="Right" style="width:56px;height:56px;font-size:24px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">▶</button>
         </div>
-        <button class="dpad-btn" data-key=" " aria-label="Pause" style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;margin-top:4px;">⏸</button>
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <button class="dpad-btn" data-key=" " aria-label="Pause" style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">⏸</button>
+          <button id="touchMenuBtn" aria-label="Open menu" aria-haspopup="true" style="width:56px;height:56px;font-size:20px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;">☰</button>
+        </div>
       </div>
     </div>
     <p id="scoreLine">Score: <span id="score">0</span></p>
@@ -140,6 +161,25 @@
         <div id="cosmeticsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #9B59B6;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;"></div>
         <div id="questsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #44FF88;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;"></div>
         <div id="settingsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #88AAFF;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;"></div>
+        <!-- FOV-2728: the Brews and Diary panels were referenced by show/render code
+             since v6 but their containers NEVER EXISTED — getElementById returned null
+             and the functions early-returned, so B/J were dead keys on every platform.
+             Same fixed-panel pattern as the other five. -->
+        <div id="brewsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #4488FF;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;">
+          <button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button>
+          <h2 style="text-align:center;margin-top:0;color:#4488FF;">🧪 BREWS</h2>
+          <div class="panel-subtitle">Per-run effects — unlock with tokens, equip up to 2.</div>
+          <div class="brews-grid" id="brewsGrid"></div>
+          <div style="text-align:center;font-size:12px;color:#FFD700;margin-top:10px;">🔑 Tokens: <span id="brewTokenCount">0</span></div>
+          <p id="brewsCloseHint" style="text-align:center;color:#666;font-size:0.85em;margin-top:12px;"></p>
+        </div>
+        <div id="diaryPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.96);border:2px solid #AA8866;border-radius:12px;padding:20px;color:white;font-family:sans-serif;z-index:100;min-width:320px;max-width:440px;max-height:80vh;overflow-y:auto;">
+          <button onclick="closeAllPanels()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:24px;cursor:pointer;touch-action:manipulation;padding:8px 12px;">✕</button>
+          <h2 style="text-align:center;margin-top:0;color:#AA8866;">📜 DIARY</h2>
+          <div id="diaryFilter"><select id="diaryModeFilter" onchange="renderDiary()"></select></div>
+          <div id="diaryList"></div>
+          <p id="diaryCloseHint" style="text-align:center;color:#666;font-size:0.85em;margin-top:12px;"></p>
+        </div>
         <div id="panelBackdrop" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;touch-action:manipulation;"></div>
         <!-- v6: Screen reader live region -->
         <div id="srAnnounce" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
@@ -166,6 +206,19 @@
             .panel-subtitle { text-align:center;font-size:12px;color:#AAA;margin:4px 0 12px 0; }
             #diaryFilter { text-align:center;margin:8px 0; }
             #diaryFilter select { background:#222;color:white;border:1px solid #555;padding:4px 8px;border-radius:4px;font-size:11px; }
+            /* FOV-2728: on a phone the panels' min-widths (320-480px) overflow the
+               320px viewport — the ✕ close button ended up half off-screen and the
+               backdrop sliver the player taps to dismiss vanished. Clamp to the
+               viewport on narrow screens; desktop is untouched. */
+            @media (max-width: 480px) {
+                #statsPanel, #achievementsPanel, #cosmeticsPanel, #questsPanel,
+                #settingsPanel, #brewsPanel, #diaryPanel, #touchMenuList {
+                    max-width: calc(100vw - 16px) !important;
+                    min-width: 0 !important;
+                    max-height: 80vh !important;
+                    overflow-y: auto;
+                }
+            }
             @media (display-mode: standalone) { #dpad { padding-bottom:max(8px, env(safe-area-inset-bottom)); } }
         </style>
 
@@ -703,6 +756,9 @@
                 filter.value = cur;
             }
             renderDiary();
+            // FOV-2728: close hint names an input this device actually has.
+            var dh = document.getElementById('diaryCloseHint');
+            if (dh) dh.textContent = hasTouch ? 'Tap ✕ to close' : 'Press J or ESC to close';
             el.style.display = 'block';
             srSpeak('Run diary opened');
         }
@@ -1318,6 +1374,9 @@ function showBrewsPanel() {
     if (dp) dp.style.display = 'none';
     if (ssp) ssp.style.display = 'none';
     renderBrewsPanel();
+    // FOV-2728: close hint names an input this device actually has.
+    var bh = document.getElementById('brewsCloseHint');
+    if (bh) bh.textContent = hasTouch ? 'Tap ✕ to close' : 'Press B or ESC to close';
     el.style.display = 'block';
     srSpeak('Brews panel opened');
 }
@@ -1996,7 +2055,7 @@ const TRAIL_RENDER_CONFIG = {
                 slider('Particle Density', particleDensity, 'setParticleDensity(this.value)') +
                 '<div style="padding:14px 0;border-bottom:1px solid #333;"><div style="font-size:13px;margin-bottom:8px;">Data Backup</div><div style="display:flex;gap:8px;"><button onclick="exportSaveData()" style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;touch-action:manipulation;">⬇ Export</button><label style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aaa;cursor:pointer;font-size:12px;text-align:center;touch-action:manipulation;"><input type="file" accept=".json" style="display:none;" onchange="importSaveData(this.files[0])">⬆ Import</label></div></div>' +
                 (quarantinedKeys.size > 0 ? '<div style="padding:10px 0;border-bottom:1px solid #333;"><div style="font-size:12px;color:#FFAA44;margin-bottom:6px;">⚠ ' + quarantinedKeys.size + ' corrupted key(s) backed up</div><button onclick="exportSaveData()" style="padding:6px 12px;border-radius:6px;border:1px solid #FFAA44;background:rgba(255,170,68,0.1);color:#FFAA44;cursor:pointer;font-size:12px;touch-action:manipulation;">⬇ Export Backed-Up Data</button></div>' : '') +
-                '<div style="text-align:center;color:#666;font-size:11px;margin-top:14px;">Settings apply instantly. Press S or ✕ to close.</div>';
+                '<div style="text-align:center;color:#666;font-size:11px;margin-top:14px;">' + (hasTouch ? 'Settings apply instantly. Tap ✕ to close.' : 'Settings apply instantly. Press S or ✕ to close.') + '</div>';
         }
         function showSettingsPanel() {
             const el = document.getElementById('settingsPanel');
@@ -2640,6 +2699,10 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function updateMenuFooter() {
+            // FOV-2728: the touch menu bar follows the same state gate as the keys.
+            // First line of the function so the non-idle early-return branch also
+            // sees it (gameover shows the bar; playing/paused hide it).
+            updateTouchMenu();
             var footer = document.getElementById('menuFooter');
             if (!footer) return;
             var seedContainer = document.getElementById('seedContainer');
@@ -2676,7 +2739,9 @@ const TRAIL_RENDER_CONFIG = {
             }
             prestigeInfo.innerHTML = info;
             if (hasTouch) {
-                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap the button to start | Swipe \u2191\u2193 to change mode</span>';
+                // FOV-2728: names the two gestures AND the new menu control — the
+                // shortcut row must only name inputs this device has.
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap the button to start | Swipe \u2191\u2193 to change mode | Tap \u2630 for menu</span>';
             } else {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests  |  S Settings</span>';
             }
@@ -5598,7 +5663,7 @@ const TRAIL_RENDER_CONFIG = {
                     resumeRunTextY = currentY;
                     ctx.fillStyle = '#44AAFF';
                     ctx.font = 'bold 16px Arial';
-                    ctx.fillText('\u25B6 Resume Run  (R)', CANVAS_WIDTH / 2, currentY);
+                    ctx.fillText(hasTouch ? '\u25B6 Resume Run' : '\u25B6 Resume Run  (R)', CANVAS_WIDTH / 2, currentY);
                     currentY += 20;
                 }
                 // v7: PWA install prompt
@@ -5666,7 +5731,7 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.fillText(confirmLabel, cx, CANVAS_HEIGHT / 2 - 15);
                     ctx.font = '16px Arial';
                     ctx.fillStyle = '#AAA';
-                    ctx.fillText('Enter = Yes  |  Esc = No', cx, CANVAS_HEIGHT / 2 + 20);
+                    ctx.fillText(hasTouch ? 'Tap Yes or No' : 'Enter = Yes  |  Esc = No', cx, CANVAS_HEIGHT / 2 + 20);
                     ctx.font = 'bold 22px Arial';
                     ctx.fillStyle = '#44FF44';
                     ctx.fillText('Yes', CANVAS_WIDTH / 2 - 60, CANVAS_HEIGHT / 2 + 35);
@@ -5694,7 +5759,7 @@ const TRAIL_RENDER_CONFIG = {
 
                     ctx.font = '13px Arial';
                     ctx.fillStyle = '#666';
-                    ctx.fillText('\u2191\u2193 Navigate  |  Enter Select  |  C Copy Run  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 145);
+                    ctx.fillText(hasTouch ? 'Tap an option to select it' : '\u2191\u2193 Navigate  |  Enter Select  |  C Copy Run  |  Esc/P Resume', cx, CANVAS_HEIGHT / 2 + 145);
                 }
                 ctx.restore();
                 ctx.restore();
@@ -7108,7 +7173,7 @@ const TRAIL_RENDER_CONFIG = {
             ctx.fillText('Mastery: ' + masteryTier.name + ' (' + gauntletMasteryPoints + ' pts)', CANVAS_WIDTH / 2, 130);
             ctx.fillStyle = '#AAA';
             ctx.font = '12px Arial';
-            ctx.fillText('Press Enter for menu', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 30);
+            ctx.fillText(hasTouch ? 'Tap for menu' : 'Press Enter for menu', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 30);
             ctx.restore();
         }
 
@@ -7449,13 +7514,13 @@ const TRAIL_RENDER_CONFIG = {
             } else if (gameState === 'gameover') {
                 if (gameMode === 'gauntlet' && !(gauntletWave >= GAUNTLET_WAVES.length - 1)) {
                     var runOverMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
-                    drawOverlay('Run Over — Wave ' + (gauntletWave + 1) + '/5', 'Score: ' + (gauntletScore + score) + ' | ' + runOverMsg + 'Press ENTER to Restart');
+                    drawOverlay('Run Over — Wave ' + (gauntletWave + 1) + '/5', 'Score: ' + (gauntletScore + score) + ' | ' + runOverMsg + (hasTouch ? 'Tap to Restart' : 'Press ENTER to Restart'));
                 } else if (recapData && gameMode !== 'gauntlet') {
                     // v8 D: recap card replaces the minimal GAME OVER overlay.
                     drawRecapCard();
                 } else {
                     const deathMsg = lastDeathCause ? lastDeathCause + ' | ' : '';
-                    drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + 'Press ENTER to Restart');
+                    drawOverlay('GAME OVER', 'Score: ' + score + ' | ' + deathMsg + (hasTouch ? 'Tap to Restart' : 'Press ENTER to Restart'));
                 }
             }
             // v7 D3: post-processing — called LAST in drawGame, before the flash
@@ -9058,6 +9123,52 @@ const TRAIL_RENDER_CONFIG = {
             srSpeak('Panel closed');
         }
 
+        // --- FOV-2728: touch entry for the seven panels ---
+        // The keyboard handler is the only other entry point; before this the ☰ D-pad
+        // button did not exist, so a touch player could never reach ANY panel — and
+        // Brews and Diary were dead keys for EVERYONE (their containers never
+        // existed). The ☰ button lives in the D-pad row, never a canvas tap target
+        // (v15 F3's start band keeps the board); the picker is a fixed modal; the
+        // same idle/gameover gate the keys use applies.
+        function anyPanelVisible() {
+            var ids = ['statsPanel', 'achievementsPanel', 'cosmeticsPanel', 'questsPanel',
+                       'settingsPanel', 'brewsPanel', 'diaryPanel'];
+            for (var i = 0; i < ids.length; i++) {
+                var el = document.getElementById(ids[i]);
+                if (el && el.style.display === 'block') return true;
+            }
+            return false;
+        }
+
+        function updateTouchMenu() {
+            var btn = document.getElementById('touchMenuBtn');
+            if (!btn) return;
+            // Idle/gameover parity with the key gates (S: idle/gameover; C/B/F/J/Q/Tab:
+            // not playing). Hidden on non-touch — a keyboard-only device has the keys,
+            // and a menu button next to the D-pad it cannot have would be noise.
+            var show = hasTouch && (gameState === 'idle' || gameState === 'gameover');
+            var was = btn.style.display !== 'none';
+            if (show === was) return;
+            btn.style.display = show ? 'block' : 'none';
+            if (!show) closeTouchMenuList();
+            // No resizeCanvas call: the button lives inside the D-pad (width-only),
+            // which is already measured either way.
+        }
+
+        function closeTouchMenuList() {
+            // Hides the picker only — the backdrop belongs to the panel that may
+            // have just opened on top of it, and to closeAllPanels otherwise.
+            var list = document.getElementById('touchMenuList');
+            if (list) list.style.display = 'none';
+        }
+
+        function openTouchMenuList() {
+            var list = document.getElementById('touchMenuList');
+            if (!list) return;
+            list.style.display = 'flex';
+            panelBackdropEl.style.display = 'block';
+        }
+
         function showAchievementsPanel() {
             const el = document.getElementById('achievementsPanel');
             if (!el) return;
@@ -9084,7 +9195,7 @@ const TRAIL_RENDER_CONFIG = {
                     (unlocked ? '<div style="color:#666;font-size:0.75em;margin-top:2px;margin-left:28px;">' + new Date(unlocked).toLocaleDateString() + '</div>' : '') +
                     '</div>';
             }
-            html += '</div><p style="text-align:center;color:#666;margin-top:10px;font-size:0.85em;">Press F or ESC to close</p>';
+            html += '</div><p style="text-align:center;color:#666;margin-top:10px;font-size:0.85em;">' + (hasTouch ? 'Tap ✕ to close' : 'Press F or ESC to close') + '</p>';
             el.innerHTML = html;
             el.style.display = 'block';
         }
@@ -9157,7 +9268,7 @@ const TRAIL_RENDER_CONFIG = {
                     '<button class="cosmetic-btn" data-cat="border" data-dir="1" style="background:#333;color:white;border:1px solid #555;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:18px;">▶</button>' +
                     '</div>' +
                     '</div>' +
-                    '<p style="text-align:center;color:#666;font-size:0.85em;">Press C or ESC to close</p>';
+                    '<p style="text-align:center;color:#666;font-size:0.85em;">' + (hasTouch ? 'Tap ✕ to close' : 'Press C or ESC to close') + '</p>';
 
                 el.querySelectorAll('.cosmetic-btn').forEach(function(btn) {
                     btn.addEventListener('click', function(ev) {
@@ -9218,7 +9329,7 @@ const TRAIL_RENDER_CONFIG = {
                 (pinnacleRank > 0 ? '<tr><td style="padding:4px 8px;">Pinnacle Rank</td><td style="text-align:right;padding:4px 8px;">' + pinnacleRank + '</td></tr>' : '') +
                 (xpOvercharge > 0 ? '<tr><td style="padding:4px 8px;">XP Overcharge</td><td style="text-align:right;padding:4px 8px;">' + xpOvercharge.toLocaleString() + '</td></tr>' : '') +
                 '</table>' +
-                '<p style="text-align:center;color:#888;margin-top:10px;font-size:0.9em;">Press TAB or ESC to close</p>';
+                '<p style="text-align:center;color:#888;margin-top:10px;font-size:0.9em;">' + (hasTouch ? 'Tap ✕ to close' : 'Press TAB or ESC to close') + '</p>';
             el.style.display = 'block';
         }
 
@@ -10005,6 +10116,40 @@ const TRAIL_RENDER_CONFIG = {
 
         panelBackdropEl.addEventListener('click', function() {
             closeAllPanels();
+            closeTouchMenuList(); // FOV-2728: backdrop tap also closes the picker
+        });
+
+        // FOV-2728: touch menu bar — toggle the picker.
+        document.getElementById('touchMenuBtn').addEventListener('click', function() {
+            if (gameState !== 'idle' && gameState !== 'gameover') return;
+            var list = document.getElementById('touchMenuList');
+            if (list.style.display !== 'none') {
+                closeTouchMenuList();
+                if (!anyPanelVisible()) panelBackdropEl.style.display = 'none';
+            } else {
+                openTouchMenuList();
+                srSpeak('Menu opened');
+            }
+        });
+
+        // FOV-2728: picker rows open the panel they name, through the very same
+        // show*Panel functions the keys use (cross-hiding, re-render, srSpeak).
+        document.getElementById('touchMenuList').addEventListener('click', function(e) {
+            var btn = e.target && e.target.closest ? e.target.closest('[data-panel]') : null;
+            if (!btn) return;
+            if (gameState !== 'idle' && gameState !== 'gameover') return;
+            var openers = {
+                settings: showSettingsPanel,
+                quests: showQuestsPanel,
+                achievements: showAchievementsPanel,
+                cosmetics: showCosmeticsPanel,
+                brews: showBrewsPanel,
+                diary: showDiaryPanel,
+                stats: showStatsPanel
+            };
+            closeTouchMenuList();
+            var open = openers[btn.getAttribute('data-panel')];
+            if (open) open();
         });
 
         // v7 E: Auto-save on tab close / navigation (pagehide for mobile iOS)
