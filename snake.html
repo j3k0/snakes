@@ -3,7 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
-    <title>Snake Game</title>
+    <title>Snakes</title>
+    <!-- v15 F9: link-preview metadata. Before this, a pasted link rendered as a bare
+         line of text on Reddit/Discord/Twitter — no title, no description, no image.
+         og:image is ABSOLUTE (the deploy repo serves og-image.png from the site root);
+         a relative URL is the trap the gate exists to catch. The README's stale "3
+         keys" privacy line is fixed at deploy with the wording that stays true. -->
+    <meta name="description" content="One HTML file. Eight modes. A rival snake that eats your food.">
+    <meta property="og:title" content="Snakes">
+    <meta property="og:description" content="One HTML file. Eight modes. A rival snake that eats your food.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://j3k0.github.io/snakes/">
+    <meta property="og:image" content="https://j3k0.github.io/snakes/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Snakes">
+    <meta name="twitter:description" content="One HTML file. Eight modes. A rival snake that eats your food.">
+    <meta name="twitter:image" content="https://j3k0.github.io/snakes/og-image.png">
     <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22Snakes%22%2C%22short_name%22%3A%22Snakes%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23222%22%2C%22theme_color%22%3A%22%23111%22%2C%22orientation%22%3A%22portrait%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22data%3Aimage%2Fsvg%2Bxml%2C%253Csvg%2520xmlns%253D%2522http%253A%252F%252Fwww.w3.org%252F%252F2000%252Fsvg%2522%2520viewBox%253D%25220%25200%2520192%2520192%2522%253E%253Crect%2520width%253D%2522192%2522%2520height%253D%2522192%2522%2520fill%253D%2522%2523111%2522%2520rx%253D%252224%2522%252F%253E%253Cpath%2520d%253D%2522M96%252040%2520C60%252040%252C%252040%252060%252C%252040%252080%2520C40%2520100%252C%252060%2520100%252C%252096%2520100%2520C132%2520100%252C%2520152%2520100%252C%2520152%2520120%2520C152%2520140%252C%2520132%2520152%252C%252096%2520152%2522%2520stroke%253D%2522%252344FF44%2522%2520stroke-width%253D%252214%2522%2520fill%253D%2522none%2522%2520stroke-linecap%253D%2522round%2522%252F%253E%253Ccircle%2520cx%253D%252240%2522%2520cy%253D%252272%2522%2520r%253D%25225%2522%2520fill%253D%2522%2523FFF%2522%252F%253E%253C%252Fsvg%253E%22%2C%22sizes%22%3A%22192x192%22%2C%22type%22%3A%22image%2Fsvg%2Bxml%22%7D%5D%7D">
     <meta name="theme-color" content="#111">
     <style>
@@ -12,12 +27,21 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
+            /* v15 F2: when the column overflows, anchor to the TOP instead of
+               clipping both sides — today the symmetric clip eats the h1 above
+               AND the controls below, and the board's position depended on how
+               the clip happened to split. Old browsers keep plain center. */
+            justify-content: safe center;
             height: 100vh;
             margin: 0;
             background-color: #222;
             font-family: Arial, sans-serif;
             color: white;
             overflow: hidden;
+            /* v15 F4: the page is a full-viewport game with nothing to scroll — stop
+               pull-to-refresh at the document edge so a phone visitor's down-drag
+               never leaves the page (and reaches our swipe discrimination). */
+            overscroll-behavior-y: contain;
         }
         h1 {
             margin-bottom: 10px;
@@ -59,7 +83,9 @@
         .prestige-gold { color: #FFD700; font-weight: bold; font-size: 14px; }
         .prestige-purple { color: #AA44FF; font-weight: bold; font-size: 13px; }
         .prestige-gray { color: #888; font-size: 14px; }
-        .shortcut-dim { color: #555; font-size: 13px; }
+        /* v15 F3: #555 on #222 was 2.13:1 — below the 4.5:1 floor the footer's own
+           text is now asserted against. #999 measures 5.6:1. */
+        .shortcut-dim { color: #999; font-size: 13px; }
         @media (pointer: coarse) {
             #menuFooter { font-size: 12px; line-height: 1.3; max-width: calc(100vw - 20px); }
         }
@@ -69,6 +95,16 @@
             #score { display: none; }
             #highScore { display: none; }
         }
+        /* v15 F2: compact — a touch device with a short viewport (<700 CSS px). The
+           same three elements standalone mode hides: the page title and the two
+           redundant DOM score lines (the canvas HUD draws score and XP during play).
+           Gated on (pointer: coarse) so it can never fire on a desktop window.
+           #scoreLine (hiding #score alone leaves an empty "Score:" paragraph) and
+           #highScore leave because at 320×568 the h1-only cap leaves a ~216px board —
+           too small to host a start control that meets F3's ≥24 physical px floor. */
+        body.compact h1,
+        body.compact #scoreLine,
+        body.compact #highScore { display: none; }
     </style>
 </head>
 <body>
@@ -89,7 +125,7 @@
         <button class="dpad-btn" data-key=" " aria-label="Pause" style="width:56px;height:56px;font-size:18px;background:#333;color:white;border:2px solid #555;border-radius:8px;cursor:pointer;touch-action:manipulation;margin-top:4px;">⏸</button>
       </div>
     </div>
-    <p>Score: <span id="score">0</span></p>
+    <p id="scoreLine">Score: <span id="score">0</span></p>
     <p id="highScore">Best: 0</p>
         <div id="xpDisplay" style="color:#aaa;font-size:0.9em;"></div>
         <div id="seedContainer" style="margin-top:6px;display:flex;align-items:center;gap:6px;justify-content:center;font-size:12px;">
@@ -135,15 +171,62 @@
 
     <script>
         // --- Anonymous player counter (FOV-2041) ---
-        // Anonymous counters via Abacus (abacus.jasoncameron.dev, free CORS counting
-        // API): page loads, per-UTC-day loads, games started, games finished. No cookies, no fingerprinting,
-        // no personal data, nothing stored. Fires ONLY on the public deployment
-        // (j3k0.github.io) — local runs and test harnesses are never counted.
-        const _snakesCount = location.hostname === 'j3k0.github.io'
-            ? function (key) { try { fetch('https://abacus.jasoncameron.dev/hit/j3k0.github.io/' + key, { mode: 'no-cors', keepalive: true }); } catch (e) {} }
-            : function () {};
-        _snakesCount('load');
-        _snakesCount('day-' + new Date().toISOString().slice(0, 10)); // distinct visiting days
+        // Funnel v2 (v15 F1): anonymous, cookie-less, one-shot-per-load counter keys via
+        // Abacus (abacus.jasoncameron.dev, free CORS counting API). No cookies, no
+        // fingerprinting, no personal data, nothing stored. Fires ONLY on the hostname
+        // allow-list — the production origin, itch's embed host, Newgrounds — so local
+        // runs and test harnesses are never counted (file://, localhost and CI match
+        // nothing). `localStorage.snake_nocount = '1'` suppresses every beacon (set by
+        // every scripted live check, so our own traffic never reaches the counters).
+        //
+        // Keys are LOAD-SCOPED: one fire per page load, not per run — five runs in one
+        // visit produce one `start`, one `first_food` (the first), one death bucket
+        // (the first). A Zen quit (endZenSession, no death) leaves a `start` with no
+        // death key: in the report that reads "quit or still playing", never "still
+        // playing". `snakeBump` resolves `isCountedHost` by bare name at CALL time —
+        // never capture the answer at module init (tests override the gate).
+        function isCountedHost(h) {
+            if (!h) return false;
+            if (h === 'j3k0.github.io') return true;
+            if (h === 'itch.zone' || h.endsWith('.itch.zone')) return true;
+            if (h === 'newgrounds.com' || h.endsWith('.newgrounds.com')) return true;
+            return false;
+        }
+        function channelForHost(h) {
+            if (!isCountedHost(h)) return null;
+            if (h === 'j3k0.github.io') return 'ch_github';
+            if (h === 'itch.zone' || h.endsWith('.itch.zone')) return 'ch_itch';
+            return 'ch_other';
+        }
+        const _firedFunnel = new Set();
+        function snakeBump(key) {
+            if (!key) return;
+            try {
+                if (!isCountedHost(location.hostname)) return;
+                if (localStorage.snake_nocount === '1') return;
+                if (_firedFunnel.has(key)) return;
+                _firedFunnel.add(key);
+                fetch('https://abacus.jasoncameron.dev/hit/j3k0.github.io/' + key, { mode: 'no-cors', keepalive: true });
+            } catch (e) {}
+        }
+        // Death buckets: a fixed map from lastDeathCause (its own field since v12 C —
+        // never the cause STRING, and never `lastSaveEvent`: a rescue is not a death
+        // and must not reach a bucket). Unmapped terminal causes — 'Starvation!',
+        // 'You shrunk to nothing!', 'Caught by the shrinking zone!', 'The board filled
+        // up!' — land on die_other via the fallback. 'Zen session ended.' never gets
+        // here (endZenSession, not gameOver).
+        const DEATH_BUCKET = {
+            'Hit the wall!': 'die_wall',
+            'You ran into yourself!': 'die_self',
+            'Hit an obstacle!': 'die_obs',
+            'You charged the rival head-on!': 'die_rival',
+            'You ran into the rival!': 'die_rival',
+            'Caught in a hazard rift!': 'die_hazard',
+            "Time's up!": 'die_time'
+        };
+        snakeBump('load');
+        snakeBump('day-' + new Date().toISOString().slice(0, 10)); // distinct visiting days
+        snakeBump(channelForHost(location.hostname));
 
         const TILE_SIZE = 20;
         const CANVAS_WIDTH = 440;
@@ -756,6 +839,11 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let helpOverlayVisible = false;
         let resumeRunTextY = CANVAS_HEIGHT - 95; // v7 E: capture position for tap band
         let welcomeOverlay = !saveManager.get('snake_has_played', '');
+        // v15 F3: the idle screen's start control, in CANVAS coordinates. Written by
+        // the idle draw (drawOverlay), read by the touchend handler — the band is the
+        // ONLY idle tap target on touch, so it is load-bearing, not decoration. Null
+        // on every draw path that does not render it (drawOverlay resets it at entry).
+        let startBandRect = null;
         let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
@@ -764,6 +852,12 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         // v12 A: one-shot onboarding the first time any resonance becomes active.
         let hasSeenResonance = saveManager.get('snake_has_seen_resonance', '') === '1';
         let lastDeathCause = '';
+        // v15 F7: when the current run ended (gameOver OR endZenSession — both hooks,
+        // per the both-hooks rule). The touchend gameover branch ignores taps for
+        // 500ms after it: a reflex tap on death destroyed the recap card before the
+        // player could read their score. Keyboard Enter is untouched and restarts
+        // immediately. Per-run state: reset in BOTH resetGame and resetWaveState.
+        let gameOverAt = 0;
         // v12 C: a save (shield/vampire/phoenix/serpentine/streak charge/melt) does NOT
         // end the run, but the save messages used to be written into lastDeathCause —
         // so whenever a rescue was the last thing written before the run ended, the
@@ -2340,6 +2434,7 @@ const TRAIL_RENDER_CONFIG = {
             helpOverlayVisible = false;
             lastDeathCause = '';
             lastSaveEvent = '';
+            gameOverAt = 0; // v15 F7
             // v12 C: pre-cascade score + factor. gameOver() overwrites `score` with the
             // cascaded value, so the raw score must be captured there — score/0.5 cannot
             // recover it (the Math.floor loss is unrecoverable and wrong for odd scores).
@@ -2551,6 +2646,7 @@ const TRAIL_RENDER_CONFIG = {
             if (gameState !== 'idle') {
                 footer.style.display = 'none';
                 if (seedContainer) seedContainer.style.display = 'none';
+                resizeCanvas(); // v15 F2: chrome changed — re-derive the board cap
                 return;
             }
             footer.style.display = 'block';
@@ -2580,14 +2676,15 @@ const TRAIL_RENDER_CONFIG = {
             }
             prestigeInfo.innerHTML = info;
             if (hasTouch) {
-                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap to Start | Swipe \u2191\u2193 to change mode</span>';
+                shortcutInfo.innerHTML = '<span class="shortcut-dim">\uD83D\uDC46 Tap the button to start | Swipe \u2191\u2193 to change mode</span>';
             } else {
                 shortcutInfo.innerHTML = '<span class="shortcut-dim">\u2191\u2193 Select  |  ENTER Start  |  TAB Stats  |  F Achievements  |  C Cosmetics  |  B Brews  |  Q Quests  |  S Settings</span>';
             }
+            resizeCanvas(); // v15 F2: chrome changed — re-derive the board cap
         }
 
         function startGame() {
-            _snakesCount('start');
+            snakeBump('start');
             // v7 E: starting a fresh run — discard any saved snapshot so the
             // idle "Resume Run" button doesn't offer a stale unrelated run.
             clearSnapshot();
@@ -2833,21 +2930,56 @@ const TRAIL_RENDER_CONFIG = {
         function resizeCanvas() {
             var canvasEl = document.getElementById('gameCanvas');
             if (!canvasEl) return;
-            var dpad = document.getElementById('dpad');
-            var scoreBar = document.getElementById('score');
-            var scoreBarHeight = scoreBar ? scoreBar.offsetHeight : 0;
-            var dpadHeight = dpad ? dpad.offsetHeight : 0;
+            // v15 F2: the board must FIT the viewport — scale, never clip.
+            //
+            // The canvas is capped by the ESSENTIAL chrome (measured, live): everything
+            // visible above it, plus the menu footer and D-pad below. `safe center`
+            // (body CSS) anchors the column to the top on overflow, so the top edge
+            // never clips; the cap below keeps the board + controls inside the bottom.
+            // Everything is MEASURED, so state changes that hide or show chrome
+            // (updateMenuFooter) just re-run this function.
+            // compact (h1 + the two DOM score lines hidden) exists because at 320×568
+            // the h1-only cap leaves a ~216px board — too small for F3's start control.
+            document.body.classList.toggle('compact',
+                window.matchMedia('(pointer: coarse)').matches && window.innerHeight < 700);
+            // Essential chrome: everything visible ABOVE the canvas, plus the two
+            // elements below it that the player actually needs — the menu footer
+            // (the door hint at idle) and the D-pad (the touch controls). The DOM
+            // score lines, seed row and combo line are deliberately NOT counted:
+            // on a phone they are the bottom of the stack and clip off first,
+            // exactly as today (hiding them is a deferred item, not this feature).
+            var above = 0, belowEssential = 0, seenCanvas = false;
+            var kids = document.body.children;
+            for (var i = 0; i < kids.length; i++) {
+                var el = kids[i];
+                if (el.id === 'gameCanvas') { seenCanvas = true; continue; }
+                var cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.position === 'fixed' || cs.position === 'absolute') continue;
+                var h = el.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+                if (!seenCanvas) above += h;
+                else if (el.id === 'menuFooter' || el.id === 'dpad') belowEssential += h;
+            }
+            var bcs = getComputedStyle(document.body);
+            var padV = (parseFloat(bcs.paddingTop) || 0) + (parseFloat(bcs.paddingBottom) || 0);
+            // The canvas carries its own 2px border, which is on-screen but outside
+            // the style box — budget it on both axes (measured, not assumed).
+            var ccs = getComputedStyle(canvasEl);
+            var borderV = (parseFloat(ccs.borderTopWidth) || 0) + (parseFloat(ccs.borderBottomWidth) || 0);
+            var borderH = (parseFloat(ccs.borderLeftWidth) || 0) + (parseFloat(ccs.borderRightWidth) || 0);
+            var availableHeight = Math.max(140, window.innerHeight - padV - above - belowEssential - 8 - borderV);
             var margin = 16;
-            // v7: standalone mode — no browser chrome, reclaim vertical space
-            var chromeOffset = isStandalone ? 0 : (scoreBarHeight + dpadHeight + margin);
-            var availableHeight = isStandalone ? window.innerHeight - margin : window.innerHeight - chromeOffset;
-            var availableWidth = window.innerWidth - margin;
-            // Preserve 440x600 aspect ratio: fit within available space
+            var availableWidth = window.innerWidth - margin - borderH;
+            // Preserve 440x600 aspect ratio: fit within available space. NO pixel
+            // floor — a floor is a clip by another name when it exceeds the cap above
+            // (the old 300px floor is what pinned row 0 off-screen at 320×568).
             var scaleX = availableWidth / CANVAS_WIDTH;
             var scaleY = availableHeight / CANVAS_HEIGHT;
             var scale = Math.min(scaleX, scaleY, 1);
-            canvasEl.style.width = Math.max(300, Math.round(CANVAS_WIDTH * scale)) + 'px';
-            canvasEl.style.height = Math.max(300, Math.round(CANVAS_HEIGHT * scale)) + 'px';
+            canvasEl.style.width = Math.round(CANVAS_WIDTH * scale) + 'px';
+            canvasEl.style.height = Math.round(CANVAS_HEIGHT * scale) + 'px';
+            // Exposed for tests and the touch handler (tap bands re-map from the rect
+            // at event time, but the applied scale is a fact worth asserting).
+            document.documentElement.style.setProperty('--snakes-scale', String(scale));
             // v8 A: recompute DPR + backing store on resize (covers moving a window
             // between displays with different pixel densities). Invalidate the grid
             // cache theme so ensureGridCache rebuilds at the new DPR on next drawGrid.
@@ -3357,6 +3489,21 @@ const TRAIL_RENDER_CONFIG = {
             return null;
         }
 
+        // v15 F6: the opening lane — the four tiles directly ahead of the spawn head
+        // (10,10, moving right: tiles 11-14 on row 10). The obstacle generators must
+        // test the PATTERN's tile set, not its anchor: four of the five patterns
+        // extend beside their anchor, and the old anchor-only 3-tile Manhattan rule
+        // let an arm reach into the lane while the anchor sat outside it (measured:
+        // ~2.6-4.5% of boards killed the run before the second input). The anchor-only
+        // check survives the 2-tile-ahead case but not the arm cases — the assertion
+        // is tiles 1-4 for exactly that reason. findFreeTile's own shared 3-tile
+        // guard is untouched (five death-save callers depend on it).
+        function inOpeningLane(tx, ty) {
+            const laneHeadX = 10 * TILE_SIZE, laneHeadY = 10 * TILE_SIZE;
+            if (ty !== laneHeadY) return false;
+            return tx > laneHeadX && tx <= laneHeadX + 4 * TILE_SIZE;
+        }
+
         function generateObstacles() {
             obstacles = [];
             if (gameMode === 'zen' || gameMode === 'walled' || gameMode === 'painter' || gameMode === 'gauntlet') return;
@@ -3381,6 +3528,7 @@ const TRAIL_RENDER_CONFIG = {
                         const tx = anchorX + offset.dx;
                         const ty = anchorY + offset.dy;
                         if (tx < 0 || tx >= PLAY_WIDTH || ty < 0 || ty >= PLAY_HEIGHT) { conflict = true; break; }
+                        if (inOpeningLane(tx, ty)) { conflict = true; break; } // v15 F6
                         if (snake.some(s => s.x === tx && s.y === ty)) { conflict = true; break; }
                         if (obstacles.some(o => o.x === tx && o.y === ty)) { conflict = true; break; }
                         if (food && food.x === tx && food.y === ty) { conflict = true; break; }
@@ -3400,6 +3548,7 @@ const TRAIL_RENDER_CONFIG = {
                         const obsY = Math.floor(seededRandom() * (PLAY_HEIGHT / TILE_SIZE)) * TILE_SIZE;
                         const dist = Math.abs(obsX - headX) + Math.abs(obsY - headY);
                         if (dist < 3 * TILE_SIZE) continue;
+                        if (inOpeningLane(obsX, obsY)) continue; // v15 F6
                         if (snake.some(s => s.x === obsX && s.y === obsY)) continue;
                         if (obstacles.some(o => o.x === obsX && o.y === obsY)) continue;
                         if (food && food.x === obsX && food.y === obsY) continue;
@@ -3866,7 +4015,9 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function gameOver() {
-            _snakesCount('finish');
+            snakeBump('finish');
+            snakeBump(DEATH_BUCKET[lastDeathCause] || 'die_other');
+            gameOverAt = Date.now(); // v15 F7
             helpOverlayVisible = false;
             stopGameLoop();
             gameState = 'gameover';
@@ -3957,7 +4108,8 @@ const TRAIL_RENDER_CONFIG = {
         }
 
         function endZenSession() {
-            _snakesCount('finish');
+            snakeBump('finish'); // no death bucket — a Zen quit is not a death
+            gameOverAt = Date.now(); // v15 F7
             stopGameLoop();
             gameState = 'gameover';
             clearSnapshot();
@@ -4151,7 +4303,9 @@ const TRAIL_RENDER_CONFIG = {
             // Retry prompt — anchored to the card bottom, so it follows any card growth.
             ctx.font = '12px Arial';
             ctx.fillStyle = '#888';
-            ctx.fillText('Press ENTER to retry', cx, cardY + cardH - 22);
+            // v15 F4: a touch device cannot press ENTER — the prompt names the input
+            // the device actually has (the tap lands in C6's 500ms guard).
+            ctx.fillText(hasTouch ? 'Tap to play again' : 'Press ENTER to retry', cx, cardY + cardH - 22);
             ctx.restore();
         }
         // v8 F: Bounty Rush — templates and logic.
@@ -5044,15 +5198,31 @@ const TRAIL_RENDER_CONFIG = {
             var p3Y = p2Y + panelSpacing;
             ctx.fillStyle = '#FFD700';
             ctx.font = 'bold 13px Arial';
-            ctx.fillText('Progression', CANVAS_WIDTH / 2, p3Y);
-            ctx.fillStyle = '#CCC';
-            ctx.font = '12px Arial';
-            ctx.fillText('⭐ Eat food to earn XP and unlock cosmetics.', CANVAS_WIDTH / 2, p3Y + 18);
-            ctx.fillText('Press C for cosmetics!', CANVAS_WIDTH / 2, p3Y + 34);
+            if (isMobile || hasTouch) {
+                // v15 F4: on touch the panel teaches what ends run one, not a
+                // keyboard shortcut the device cannot press. Both facts are
+                // mechanics the game already enforces — nothing new advertised.
+                ctx.fillText('Stay alive', CANVAS_WIDTH / 2, p3Y);
+                ctx.fillStyle = '#CCC';
+                ctx.font = '12px Arial';
+                ctx.fillText('A rival hunts your food — ram its side, never its head.', CANVAS_WIDTH / 2, p3Y + 18);
+                ctx.fillText("Rifts pulse — cross while they're dim.", CANVAS_WIDTH / 2, p3Y + 34);
+            } else {
+                ctx.fillText('Progression', CANVAS_WIDTH / 2, p3Y);
+                ctx.fillStyle = '#CCC';
+                ctx.font = '12px Arial';
+                ctx.fillText('⭐ Eat food to earn XP and unlock cosmetics.', CANVAS_WIDTH / 2, p3Y + 18);
+                ctx.fillText('Press C for cosmetics!', CANVAS_WIDTH / 2, p3Y + 34);
+            }
 
             ctx.fillStyle = '#666';
             ctx.font = '11px Arial';
-            ctx.fillText('Press any key or tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+            if (isMobile || hasTouch) {
+                // v15 F4: now TRUE — one tap dismisses this overlay and starts the run.
+                ctx.fillText('\uD83D\uDC46 Tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+            } else {
+                ctx.fillText('Press any key or tap to start playing', CANVAS_WIDTH / 2, by + bh - 12);
+            }
 
             ctx.restore();
         }
@@ -5335,6 +5505,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function drawOverlay(text, subtext) {
             ctx.save();
+            startBandRect = null; // set again below iff the idle band is drawn
             if (gameState === 'idle') {
                 if (welcomeOverlay) {
                     drawWelcomeOverlay();
@@ -5439,6 +5610,43 @@ const TRAIL_RENDER_CONFIG = {
                     ctx.font = '11px Arial';
                     ctx.fillText('(tap to install)', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 10);
                 }
+
+                // v15 F3: the start control. The idle screen had no call to action at
+                // all — the 'Press ENTER to Start' subtext (drawGame's drawOverlay
+                // call) was received and never rendered, and on touch there was no
+                // way in except an invisible catch-all tap. The band is drawn LAST in
+                // the idle branch so it owns its rectangle outright, in the lower
+                // third of the play area (y 456-504: below the mode list, above the
+                // daily/resume stack at 505). 48 canvas px tall => >= 24 physical px
+                // at the worst 0.5 scale the C2 gate allows. White on #2E7D32 is
+                // 5.1:1. touchend accepts taps inside startBandRect only — the band
+                // is load-bearing (see the touch handler).
+                ctx.save();
+                var bandW = 220, bandH = 48;
+                var bandX = (CANVAS_WIDTH - bandW) / 2;
+                var bandY = 456;
+                startBandRect = { x: bandX, y: bandY, w: bandW, h: bandH };
+                ctx.fillStyle = '#2E7D32';
+                ctx.fillRect(bandX, bandY, bandW, bandH);
+                ctx.strokeStyle = '#81C784';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(bandX + 1, bandY + 1, bandW - 2, bandH - 2);
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 18px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                var bandText = hasTouch ? '\uD83D\uDC46 Tap to play' : (subtext || 'Press ENTER to Start');
+                if (ctx.measureText(bandText).width <= bandW - 12) {
+                    ctx.fillText(bandText, CANVAS_WIDTH / 2, bandY + bandH / 2 + 1);
+                } else {
+                    // v12's environment-dependent metrics lesson: never trust a
+                    // centered fit across Chromium builds — degrade to clipped left.
+                    ctx.save();
+                    ctx.textAlign = 'left';
+                    fillTextClipped(bandText, bandX + 6, bandY + bandH / 2 + 1, bandX + bandW - 6);
+                    ctx.restore();
+                }
+                ctx.restore();
 
                 ctx.restore();
                 return;
@@ -6636,6 +6844,10 @@ const TRAIL_RENDER_CONFIG = {
             var headY = 10 * TILE_SIZE;
             for (var i = 0; i < wave.obstacles; i++) {
                 var tile = findFreeTile(headX, headY);
+                // v15 F6: findFreeTile's 3-tile guard does not cover the lane (a tile
+                // 3-4 ahead on the spawn row passes it), so the wave generator gets
+                // its own check — the review's point: a sentence is not a gate.
+                if (tile && inOpeningLane(tile.x, tile.y)) continue;
                 if (tile) obstacles.push(tile);
             }
         }
@@ -6663,6 +6875,7 @@ const TRAIL_RENDER_CONFIG = {
 
         function resetWaveState() {
             dirQueue = [];
+            gameOverAt = 0; // v15 F7
             var wave = GAUNTLET_WAVES[gauntletWave];
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
@@ -7034,6 +7247,10 @@ const TRAIL_RENDER_CONFIG = {
         // --- end v6 ---
 
                 function drawGame(t) {
+            // v15 F3: the start band is frame-scoped — drawGame resets it every
+            // frame (drawOverlay re-sets it when the idle band renders), so a stale
+            // rect can never accept a tap after the state changed.
+            startBandRect = null;
             // v8 A: absolute base transform — DPR scale + folded shake offset.
             // setTransform is absolute, so this is self-contained for every direct
             // drawGame(1) call (shakeOffset is 0 outside rAF) AND carries the shake
@@ -7949,6 +8166,7 @@ const TRAIL_RENDER_CONFIG = {
                 triggerEvolutionIfReady();
                 if (activeSeed !== null) recordReplayGrow(gameTick);
                 const eatenType = food.type;
+                snakeBump('first_food'); // v15 F1: once per load (the Set enforces it)
 
                 // v10 B: Bomb food — tactical, 0 score/XP. Blasts obstacles + trims rival.
                 if (eatenType === 'bomb') {
@@ -8205,6 +8423,7 @@ const TRAIL_RENDER_CONFIG = {
                 snakeGrew = true;
                 triggerEvolutionIfReady();
                 if (activeSeed !== null) recordReplayGrow(gameTick);
+                snakeBump('first_food'); // v15 F1
                 sessionFoodEaten++;
                 stats.totalFoodEaten++;
                 stats.normalFoodEaten++;
@@ -8235,6 +8454,7 @@ const TRAIL_RENDER_CONFIG = {
                         spawnParticles(exitTile.x, exitTile.y, 18, '#AA44FF');
                         playSound('bonus');
                         // Grant the epic's bonus
+                        snakeBump('first_food'); // v15 F1
                         sessionFoodEaten++;
                         stats.totalFoodEaten++;
                         stats.epicFoodEaten++;
@@ -8270,6 +8490,7 @@ const TRAIL_RENDER_CONFIG = {
                         snakeGrew = true;
                         triggerEvolutionIfReady();
                         if (activeSeed !== null) recordReplayGrow(gameTick);
+                        snakeBump('first_food'); // v15 F1
                         sessionFoodEaten++;
                         stats.totalFoodEaten++;
                         stats.bonusFoodEaten++;
@@ -9006,12 +9227,17 @@ const TRAIL_RENDER_CONFIG = {
             // field, diary filter). Otherwise every global hotkey fires mid-typing
             // (e.g. 'x' in the seed field ruins a run by triggering Prestige).
             if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA')) return;
+            // v15 F1: first input class — a trusted keypress means a keyboard visitor.
+            // Synthetic events (the D-pad dispatches its own keydowns) are isTrusted=false
+            // and never count as keyboard input.
+            if (e.isTrusted) snakeBump('keys');
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
                 e.preventDefault();
             }
 
             if (welcomeOverlay && gameState === 'idle') {
                 welcomeOverlay = false;
+                snakeBump('overlay_gone');
                 saveManager.set('snake_has_played', '1');
                 visualDirty = true;
             }
@@ -9233,6 +9459,10 @@ const TRAIL_RENDER_CONFIG = {
 
             if (e.key === 'p' || e.key === 'P' || e.key === ' ') {
                 if (gameState === 'playing') {
+                    // v15 F1: paused_early — pause within the first 50 ticks (~6s at the
+                    // 120ms base tick) of a run start. Per-run via gameTick (reset in BOTH
+                    // resetGame and resetWaveState); once per load via the funnel Set.
+                    if (gameTick < 50) snakeBump('paused_early');
                     autoPaused = false;
                     gameState = 'paused';
                     pauseMenuSelection = 0;
@@ -9576,6 +9806,7 @@ const TRAIL_RENDER_CONFIG = {
 
         canvas.addEventListener('touchend', function(e) {
           e.preventDefault();
+          snakeBump('touch'); // v15 F1: first input class — a touch on the board
           const dx_touch = e.changedTouches[0].clientX - touchStartX;
           const dy_touch = e.changedTouches[0].clientY - touchStartY;
 
@@ -9583,10 +9814,18 @@ const TRAIL_RENDER_CONFIG = {
           if (Math.abs(dx_touch) < 10 && Math.abs(dy_touch) < 10) {
             if (welcomeOverlay) {
               welcomeOverlay = false;
+              snakeBump('overlay_gone');
               saveManager.set('snake_has_played', '1');
               updateMenuFooter();
               visualDirty = true; // overlay replaced the idle menu — force a redraw
-              return; // Touch/click: dismiss but don't start game
+              // v15 F4: one deliberate tap dismisses AND starts. The copy has
+              // promised this since v7 ("tap to start playing"); the old early
+              // return dismissed onto the zero-CTA idle screen instead. A swipe
+              // (below) is displacement-discriminated and never starts — the page
+              // has nothing to scroll, so time-based guards protected a gesture
+              // that cannot exist here.
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+              return;
             }
             if (gameState === 'paused') {
               const rect = canvas.getBoundingClientRect();
@@ -9663,7 +9902,30 @@ const TRAIL_RENDER_CONFIG = {
                 return;
               }
             }
-            if (gameState === 'idle' || gameState === 'gameover') {
+            // v15 F3: at idle, the START BAND is the touch start control. A tap
+            // outside it does NOTHING — before v15 any idle tap started the run,
+            // which made a visible control both unnecessary and untestable. The
+            // keyboard path (real Enter key, D-pad synthetic keydowns) is unchanged
+            // and still starts from anywhere.
+            if (gameState === 'idle') {
+              if (startBandRect) {
+                const bandRect = canvas.getBoundingClientRect();
+                const bandScaleX = CANVAS_WIDTH / bandRect.width;
+                const bandScaleY = CANVAS_HEIGHT / bandRect.height;
+                const bandTapX = (e.changedTouches[0].clientX - bandRect.left) * bandScaleX;
+                const bandTapY = (e.changedTouches[0].clientY - bandRect.top) * bandScaleY;
+                if (bandTapX >= startBandRect.x && bandTapX <= startBandRect.x + startBandRect.w &&
+                    bandTapY >= startBandRect.y && bandTapY <= startBandRect.y + startBandRect.h) {
+                  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+                }
+              }
+            } else if (gameState === 'gameover') {
+              // v15 F7: a reflex tap within 500ms of death is ignored — before v15 it
+              // restarted instantly and destroyed the recap card the player was trying
+              // to read. After 500ms the tap restarts as before. Keyboard Enter does
+              // not pass through here and keeps restarting immediately (stated, not
+              // silently changed).
+              if (gameOverAt && Date.now() - gameOverAt < 500) return;
               document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
             } else if (gameState === 'playing' && gauntletIntermission) {
               // Gauntlet wave-pick screen: D-pad arrows navigate, tap confirms the
@@ -9678,6 +9940,18 @@ const TRAIL_RENDER_CONFIG = {
 
           // Idle-state swipe detection for mode selection
           if (gameState === 'idle') {
+            // v15 F4: a swipe on the welcome overlay (>=10px displacement — anything
+            // the tap branch above rejected) is a deliberate non-tap: dismiss the
+            // overlay WITHOUT starting the run. Checked before mode selection so a
+            // drag never changes the mode behind the overlay either.
+            if (welcomeOverlay) {
+              welcomeOverlay = false;
+              snakeBump('overlay_gone');
+              saveManager.set('snake_has_played', '1');
+              updateMenuFooter();
+              visualDirty = true;
+              return;
+            }
             if (Math.abs(dy_touch) > Math.abs(dx_touch) && Math.abs(dy_touch) > 30) {
               // Swipe up moves the highlight up the mode list — same semantics as
               // ArrowUp (which decrements the index), not the inverted natural-scroll.
