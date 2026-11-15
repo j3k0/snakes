@@ -648,6 +648,32 @@
             return saveManager.getJSON('snake_replays_' + mode, []);
         }
 
+        // FOV-2729: share links are built from a HARD-CODED canonical base, never
+        // location.origin — inside the itch.io iframe that is *.itch.zone, and those
+        // nested URLs rot between uploads (https://itch.io/post/15113047), so an itch
+        // player would share a link that breaks. Shares therefore always leave itch
+        // for the Pages site — intended, and said out loud to JC in FOV-2676f.
+        const CANONICAL_SHARE_BASE = 'https://j3k0.github.io/snakes/';
+        function buildChallengeLink() {
+            // Seeded run: '#mode~seed~score'. Unseeded: '#mode~~score' (score-only,
+            // which parseChallengeUrl accepts only when the score is present).
+            var hash = gameMode + '~' + (activeSeed !== null ? encodeURIComponent(activeSeed) : '') + (score > 0 ? '~' + score : '');
+            return CANONICAL_SHARE_BASE + '#' + hash;
+        }
+        function copyChallengeLink() {
+            var url = buildChallengeLink();
+            var text = score > 0 ? 'Beat my ' + score + ' in Snakes — ' + url : url;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function() {
+                    queueToast('Challenge link copied!', 2000);
+                }).catch(function() {
+                    fallbackCopy(text);
+                });
+            } else {
+                fallbackCopy(text);
+            }
+        }
+
         // v6: Snake Diary
         var MAX_DIARY_ENTRIES = 200;
 
@@ -764,6 +790,16 @@
         }
         // --- end v6 ---
 
+        // FOV-2729: the URL carries three ~-separated slots and TWO accepted forms:
+        //   'mode~seed~score'  — a seeded run with an optional score target (v1).
+        //   'mode~~score'      — score-only ("beat 120 in Classic"). An EMPTY seed is
+        //                        accepted ONLY when a score is present, so the accepted
+        //                        run stays non-deterministic (activeSeed null) and the
+        //                        whole seeded-only surface (replays, ghosts, speed-food
+        //                        burst) is untouched. 'mode~' / 'mode~~' — no score —
+        //                        is not a challenge and is rejected. Daily is rejected
+        //                        either way (a shared daily would collide with the
+        //                        attempt/streak rules); CHALLENGE_URL_VERSION stays 1.
         function parseChallengeUrl(hash) {
             var parts = hash.split('~');
             if (parts.length < 2) return null;
@@ -771,8 +807,8 @@
             if (!MODE_CONFIG[mode]) return null;
             if (mode === 'daily') return null;
             var seed = decodeURIComponent(parts[1]);
-            if (!seed || seed.indexOf('~') !== -1) return null;
             var targetScore = parts[2] ? parseInt(parts[2], 10) || null : null;
+            if (!seed && !targetScore) return null;
             return { mode: mode, seed: seed, targetScore: targetScore, version: CHALLENGE_URL_VERSION };
         }
 
@@ -900,6 +936,14 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         // ONLY idle tap target on touch, so it is load-bearing, not decoration. Null
         // on every draw path that does not render it (drawOverlay resets it at entry).
         let startBandRect = null;
+        // FOV-2729: two canvas hit rects, both set on the draw that renders them and
+        // read by the touchend handler. challenge* only while drawChallengeOverlay is
+        // up; recapShare* only while drawRecapCard draws its Share button (nulled in
+        // BOTH resetGame and resetWaveState so a stale rect can never outlive the
+        // card it belongs to).
+        let challengeAcceptRect = null;
+        let challengeDeclineRect = null;
+        let recapShareRect = null;
         let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
@@ -2494,6 +2538,7 @@ const TRAIL_RENDER_CONFIG = {
             lastDeathCause = '';
             lastSaveEvent = '';
             gameOverAt = 0; // v15 F7
+            recapShareRect = null; // FOV-2729: the Share hit area never outlives the card
             // v12 C: pre-cascade score + factor. gameOver() overwrites `score` with the
             // cascaded value, so the raw score must be captured there — score/0.5 cannot
             // recover it (the Math.floor loss is unrecoverable and wrong for odd scores).
@@ -2759,6 +2804,7 @@ const TRAIL_RENDER_CONFIG = {
             syncDailyState();
             // v8 D: reset recap state and snapshot quest progress for end-of-run delta.
             recapData = null;
+            recapShareRect = null; // FOV-2729
             recapQuestBaseline = captureQuestBaseline();
             srSpeak('Game started. Mode: ' + gameMode);
             if (gameMode === 'daily') {
@@ -4291,6 +4337,11 @@ const TRAIL_RENDER_CONFIG = {
             var hasCause = !!recapData.deathCause;
             var hasSave = !!recapData.saveEvent;
             var questRows = recapData.questDeltas.length;
+            // FOV-2729: the Share control is real only when there is something to
+            // beat — a 0-score run shares a link with no target, which is not a
+            // challenge (and 'beat 0' is not a message). Only the FINAL score is
+            // shared: the cascade-multiplied one the card shows.
+            var hasShare = recapData.score > 0;
 
             // Content height computed from the same row arithmetic used to draw, so the
             // card can never be sized differently from its contents.
@@ -4300,7 +4351,8 @@ const TRAIL_RENDER_CONFIG = {
                          + (hasCause ? 16 : 0)
                          + (hasSave ? 15 : 0)
                          + 17                                 // XP / tier line
-                         + questRows * 14;
+                         + questRows * 14
+                         + (hasShare ? 34 : 0);               // FOV-2729: Share button row
             var cardH = contentH + 26;                        // + retry-prompt row
             var cardX = (CANVAS_WIDTH - cardW) / 2;
             var cardY = CANVAS_HEIGHT / 2 - cardH / 2 + 6;
@@ -4364,6 +4416,28 @@ const TRAIL_RENDER_CONFIG = {
                 var qd = recapData.questDeltas[qi];
                 ctx.fillText('▸ ' + qd.desc + ' (+' + qd.delta + (qd.completed ? ' ✓' : '') + ')', cx, y);
                 y += 14;
+            }
+            // FOV-2729: the Share button — a hit area the touchend handler's gameover
+            // branch evaluates BEFORE the catch-all (a reflex tap after death must
+            // never destroy the card the player is trying to share). The button is
+            // drawn ONCE per card render; resetGame/resetWaveState null the rect so
+            // it can never outlive the card. Copy truth per device: touch taps it,
+            // keyboard uses K.
+            recapShareRect = null;
+            if (hasShare) {
+                ctx.font = 'bold 13px Arial';
+                var shW = cardW - 80, shH = 28;
+                var shX = cardX + (cardW - shW) / 2;
+                ctx.strokeStyle = '#88AAFF';
+                ctx.fillStyle = 'rgba(136, 170, 255, 0.15)';
+                ctx.lineWidth = 2;
+                ctx.fillRect(shX, y, shW, shH);
+                ctx.strokeRect(shX, y, shW, shH);
+                ctx.fillStyle = '#88AAFF';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(hasTouch ? '📡  Share my run' : 'Share my run (K)', shX + shW / 2, y + shH / 2 + 1);
+                recapShareRect = { x: shX, y: y, w: shW, h: shH };
+                y += shH + 6;
             }
             // Retry prompt — anchored to the card bottom, so it follows any card growth.
             ctx.font = '12px Arial';
@@ -6871,35 +6945,79 @@ const TRAIL_RENDER_CONFIG = {
             ctx.restore();
         }
 
+        // FOV-2729: the landing screen for a challenge link. Renders INSTEAD of the
+        // idle menu (drawGame calls drawChallengeOverlay instead of drawOverlay), so
+        // on a fresh profile it replaces the welcome overlay's pixels too — and the
+        // touchend welcome branch below deliberately does NOT auto-start in that
+        // case: a challenge must be accepted or declined by the player, never
+        // swallowed by the onboarding tap. FOV-2676's original overlay accepted via
+        // Enter only and its 'Press Escape to dismiss' copy lied — Escape never
+        // cleared the challenge. Now: two tappable buttons, with key parity that is
+        // stated truth (Enter accepts, Escape dismisses). All copy names the input
+        // the device actually has (v15 F4 touch-truth rule).
         function drawChallengeOverlay() {
             if (!challengeFromUrl || gameState !== 'idle') return;
             ctx.save();
+            startBandRect = null; // the challenge buttons replace the start band
+            challengeAcceptRect = null;
+            challengeDeclineRect = null;
             ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
             ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            
+
             var title = 'Challenge!';
             ctx.fillStyle = '#FFD700';
             ctx.font = 'bold 20px Arial';
             ctx.fillText(title, CANVAS_WIDTH / 2, 60);
-            
+
             var modeName = MODE_CONFIG[challengeFromUrl.mode] ? MODE_CONFIG[challengeFromUrl.mode].name : challengeFromUrl.mode;
             ctx.fillStyle = '#FFF';
             ctx.font = '14px Arial';
             ctx.fillText('Mode: ' + modeName, CANVAS_WIDTH / 2, 100);
-            ctx.fillText('Seed: ' + challengeFromUrl.seed, CANVAS_WIDTH / 2, 125);
-            
+            // Score-only links have no seed line — the run will not be seeded.
+            if (challengeFromUrl.seed) {
+                ctx.fillText('Seed: ' + challengeFromUrl.seed, CANVAS_WIDTH / 2, 125);
+            } else {
+                ctx.fillStyle = '#888';
+                ctx.fillText('(score challenge — no seed)', CANVAS_WIDTH / 2, 125);
+            }
+
             if (challengeFromUrl.targetScore) {
                 ctx.fillStyle = '#FFD700';
                 ctx.font = 'bold 16px Arial';
                 ctx.fillText('Target: ' + challengeFromUrl.targetScore + ' points', CANVAS_WIDTH / 2, 155);
             }
-            
+
+            // FOV-2729: Play / Not now buttons. Hit rects in CANVAS coordinates, read
+            // by the touchend handler's idle branch — checked BEFORE the start band,
+            // which is not even drawn while this overlay is up. A tap elsewhere does
+            // nothing (same zero-accidental-action rule as the v15 F3 start band).
+            var bw = 150, bh = 36, bGap = 20;
+            var bY = CANVAS_HEIGHT - 130;
+            var b1x = (CANVAS_WIDTH / 2) - bw - (bGap / 2);
+            var b2x = (CANVAS_WIDTH / 2) + (bGap / 2);
+            challengeAcceptRect = { x: b1x, y: bY, w: bw, h: bh };
+            challengeDeclineRect = { x: b2x, y: bY, w: bw, h: bh };
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#88AAFF';
+            ctx.fillStyle = 'rgba(136, 170, 255, 0.15)';
+            ctx.fillRect(b1x, bY, bw, bh);
+            ctx.strokeRect(b1x, bY, bw, bh);
+            ctx.fillStyle = '#88AAFF';
+            ctx.font = 'bold 15px Arial';
+            ctx.fillText('Play', b1x + bw / 2, bY + bh / 2);
+            ctx.strokeStyle = '#666';
+            ctx.fillStyle = 'rgba(102, 102, 102, 0.2)';
+            ctx.fillRect(b2x, bY, bw, bh);
+            ctx.strokeRect(b2x, bY, bw, bh);
+            ctx.fillStyle = '#AAA';
+            ctx.fillText('Not now', b2x + bw / 2, bY + bh / 2);
+
             ctx.fillStyle = '#AAA';
             ctx.font = '13px Arial';
-            ctx.fillText('Press Enter to accept challenge', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 60);
-            ctx.fillText('Press Escape to dismiss', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+            ctx.fillText(hasTouch ? 'Tap Play to accept' : 'Press Enter to accept challenge', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 60);
+            ctx.fillText(hasTouch ? 'Tap Not now to decline' : 'Press Escape to dismiss', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
             ctx.restore();
         }
 
@@ -9469,10 +9587,15 @@ const TRAIL_RENDER_CONFIG = {
                     if (challengeFromUrl) {
                         gameMode = challengeFromUrl.mode;
                         // resetGame derives activeSeed/seedPrng from seedField.
+                        // FOV-2729: a score-only challenge sets an EMPTY field, so
+                        // resetGame leaves activeSeed null — the run stays
+                        // non-deterministic and speed food still works.
                         var seedField = document.getElementById('seedField');
                         seedField.value = challengeFromUrl.seed;
                         try { history.replaceState(null, '', window.location.pathname); } catch(e) {}
                         challengeFromUrl = null;
+                        challengeAcceptRect = null;
+                        challengeDeclineRect = null;
                         resetGame();
                         startGame();
                         visualDirty = true;
@@ -9695,6 +9818,19 @@ const TRAIL_RENDER_CONFIG = {
                     visualDirty = true;
                     return;
                 }
+                // FOV-2729: the challenge overlay's dismiss key — the overlay's copy
+                // promised it and it never worked before. Same as the Not-now tap:
+                // clear the challenge and the URL back to a plain landing.
+                if (gameState === 'idle' && challengeFromUrl) {
+                    challengeFromUrl = null;
+                    challengeAcceptRect = null;
+                    challengeDeclineRect = null;
+                    try { history.replaceState(null, '', window.location.pathname); } catch(eEsc) {}
+                    updateMenuFooter();
+                    drawGame(1);
+                    visualDirty = true;
+                    return;
+                }
                 if (gameState === 'gameover') {
                     gameState = 'idle';
                     closeAllPanels();
@@ -9758,17 +9894,13 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
-            if ((e.key === 'k' || e.key === 'K') && gameState === 'gameover' && activeSeed !== null) {
-                var url = window.location.origin + window.location.pathname + '#' + gameMode + '~' + encodeURIComponent(activeSeed) + (score > 0 ? '~' + score : '');
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(url).then(function() {
-                        queueToast('Challenge link copied!', 2000);
-                    }).catch(function() {
-                        fallbackCopy(url);
-                    });
-                } else {
-                    fallbackCopy(url);
-                }
+            // FOV-2729: K on gameover now shares EVERY non-daily run — seeded links
+            // carry '#mode~seed~score', unseeded ones are score-only ('#mode~~score')
+            // built from the canonical Pages URL. Daily stays out: parseChallengeUrl
+            // rejects it (a shared daily would collide with the attempt/streak rules),
+            // so pre-FOV-2729 K shared a daily link the game itself could not parse.
+            if ((e.key === 'k' || e.key === 'K') && gameState === 'gameover' && gameMode !== 'daily') {
+                copyChallengeLink();
                 return;
             }
 
@@ -9935,7 +10067,14 @@ const TRAIL_RENDER_CONFIG = {
               // (below) is displacement-discriminated and never starts — the page
               // has nothing to scroll, so time-based guards protected a gesture
               // that cannot exist here.
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+              // FOV-2729: EXCEPT when a challenge link is up — the challenge
+              // overlay replaces the welcome overlay's pixels, and the tap's job
+              // is dismissal only. A challenge must be accepted or declined by a
+              // deliberate tap on its own buttons; auto-starting it would turn a
+              // friend's link into a trap on first contact.
+              if (!challengeFromUrl) {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+              }
               return;
             }
             if (gameState === 'paused') {
@@ -9977,6 +10116,31 @@ const TRAIL_RENDER_CONFIG = {
                   return;
                 }
               }
+            }
+            // FOV-2729: while a challenge overlay is up it owns the idle taps —
+            // Play dispatches Enter (the accept path), Not now clears the challenge
+            // the same way Escape does. Both hit rects are checked BEFORE the
+            // Resume-Run and install rows and the start band, all of which sit
+            // behind this full-screen overlay; a tap elsewhere does nothing and the
+            // band isn't even drawn (drawChallengeOverlay nulls startBandRect), so
+            // no stale rect can start a run behind the overlay.
+            if (gameState === 'idle' && challengeFromUrl) {
+              const crect = canvas.getBoundingClientRect();
+              const cTapX = (e.changedTouches[0].clientX - crect.left) * (CANVAS_WIDTH / crect.width);
+              const cTapY = (e.changedTouches[0].clientY - crect.top) * (CANVAS_HEIGHT / crect.height);
+              const hitRect = (r) => r && cTapX >= r.x && cTapX <= r.x + r.w && cTapY >= r.y && cTapY <= r.y + r.h;
+              if (hitRect(challengeAcceptRect)) {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+              } else if (hitRect(challengeDeclineRect)) {
+                challengeFromUrl = null;
+                challengeAcceptRect = null;
+                challengeDeclineRect = null;
+                try { history.replaceState(null, '', window.location.pathname); } catch(cDecl) {}
+                updateMenuFooter();
+                drawGame(1);
+                visualDirty = true;
+              }
+              return;
             }
             // v7 E: Resume Run tap on idle screen
             if (gameState === 'idle' && hasSnapshot()) {
@@ -10031,6 +10195,22 @@ const TRAIL_RENDER_CONFIG = {
                 }
               }
             } else if (gameState === 'gameover') {
+              // FOV-2729: the recap card's Share hit area is evaluated BEFORE the
+              // catch-all — a Share tap copies the challenge link and keeps the
+              // card up; before this, the ONLY thing a gameover tap could do was
+              // restart, so the share moment did not exist on touch. Shares are
+              // allowed immediately (an intentional tap; the 500 ms guard below
+              // protects only against reflex restarts).
+              if (recapShareRect && recapData && recapData.score > 0) {
+                const grect = canvas.getBoundingClientRect();
+                const gTapX = (e.changedTouches[0].clientX - grect.left) * (CANVAS_WIDTH / grect.width);
+                const gTapY = (e.changedTouches[0].clientY - grect.top) * (CANVAS_HEIGHT / grect.height);
+                if (gTapX >= recapShareRect.x && gTapX <= recapShareRect.x + recapShareRect.w &&
+                    gTapY >= recapShareRect.y && gTapY <= recapShareRect.y + recapShareRect.h) {
+                  copyChallengeLink();
+                  return;
+                }
+              }
               // v15 F7: a reflex tap within 500ms of death is ignored — before v15 it
               // restarted instantly and destroyed the recap card the player was trying
               // to read. After 500ms the tap restarts as before. Keyboard Enter does
