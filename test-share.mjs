@@ -322,7 +322,7 @@ async function tapCanvasAt(page, cx, cy) {
     await page0.waitForTimeout(200);
     let clip = await page0.evaluate(() => (window.__copied || []).pop() || '');
     check('D: K at gameover copies the score-only CANONICAL link',
-          clip === 'Beat my 120 in Snakes — https://j3k0.github.io/snakes/#classic~~120',
+          clip === 'Beat my 120 in Classic — https://j3k0.github.io/snakes/#classic~~120',
           'clipboard=' + JSON.stringify(clip));
     const sharePos0 = await pagePosFor(page0,
         await page0.evaluate(() => recapShareRect.x + recapShareRect.w / 2),
@@ -356,7 +356,7 @@ async function tapCanvasAt(page, cx, cy) {
     await pageT.waitForTimeout(200);
     clip = await pageT.evaluate(() => (window.__copied || []).pop() || '');
     check('D: a Share TAP copies the canonical link',
-          clip === 'Beat my 120 in Snakes — https://j3k0.github.io/snakes/#classic~~120',
+          clip === 'Beat my 120 in Classic — https://j3k0.github.io/snakes/#classic~~120',
           'clipboard=' + JSON.stringify(clip));
     check('D: a Share tap does NOT start a run (gameover stays)',
           await pageT.evaluate(() => gameState === 'gameover' && !!recapData));
@@ -376,7 +376,7 @@ async function tapCanvasAt(page, cx, cy) {
     await pageT.waitForTimeout(200);
     clip = await pageT.evaluate(() => (window.__copied || []).pop() || '');
     check('D: seeded run still shares #classic~hello~95 via the canonical base',
-          clip === 'Beat my 95 in Snakes — https://j3k0.github.io/snakes/#classic~hello~95',
+          clip === 'Beat my 95 in Classic — https://j3k0.github.io/snakes/#classic~hello~95',
           'clipboard=' + JSON.stringify(clip));
 
     // A tap outside the Share button still restarts (v15 F7 semantics unchanged).

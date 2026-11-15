@@ -661,8 +661,11 @@
             return CANONICAL_SHARE_BASE + '#' + hash;
         }
         function copyChallengeLink() {
+            // 'Beat my 120 in Classic — <link>': the pasted MESSAGE carries the score
+            // and the mode name, the URL carries both again, and the v15 og-image
+            // renders the preview card — the three things a challenge must show.
             var url = buildChallengeLink();
-            var text = score > 0 ? 'Beat my ' + score + ' in Snakes — ' + url : url;
+            var text = score > 0 ? 'Beat my ' + score + ' in ' + (MODE_CONFIG[gameMode] ? MODE_CONFIG[gameMode].name : gameMode) + ' — ' + url : url;
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(text).then(function() {
                     queueToast('Challenge link copied!', 2000);
