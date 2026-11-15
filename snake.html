@@ -811,6 +811,10 @@
             if (mode === 'daily') return null;
             var seed = decodeURIComponent(parts[1]);
             var targetScore = parts[2] ? parseInt(parts[2], 10) || null : null;
+            // A '~' that survived decodeURIComponent ('a%7Eb' -> 'a~b') would make the
+            // seed re-split wrongly when the link is rebuilt — reject it (review #2).
+            if (seed.indexOf('~') !== -1) return null;
+            // Score-only form needs the score; empty-seed-empty-score is not a challenge.
             if (!seed && !targetScore) return null;
             return { mode: mode, seed: seed, targetScore: targetScore, version: CHALLENGE_URL_VERSION };
         }
@@ -947,6 +951,10 @@ if (JSON.stringify(replayMutators) !== JSON.stringify(activeMutators)) return []
         let challengeAcceptRect = null;
         let challengeDeclineRect = null;
         let recapShareRect = null;
+        // FOV-2729 (review #5): the drawn card's canvas rect, written by every
+        // drawRecapCard, so tests can assert the card fits the canvas even in the
+        // worst case (cause + save + cascade + 3 quest rows + Share button).
+        let recapCardRect = null;
         let hasSeenPortal = saveManager.get('snake_has_seen_portal', '') === '1'; // v9 D: portal food onboarding toast
         let hasSeenHazard = saveManager.get('snake_has_seen_hazard', '') === '1'; // v10 C: hazard onboarding toast
         let hasSeenBomb = saveManager.get('snake_has_seen_bomb', '') === '1'; // v10 B: bomb food onboarding toast
@@ -2542,6 +2550,7 @@ const TRAIL_RENDER_CONFIG = {
             lastSaveEvent = '';
             gameOverAt = 0; // v15 F7
             recapShareRect = null; // FOV-2729: the Share hit area never outlives the card
+            recapCardRect = null;
             // v12 C: pre-cascade score + factor. gameOver() overwrites `score` with the
             // cascaded value, so the raw score must be captured there — score/0.5 cannot
             // recover it (the Math.floor loss is unrecoverable and wrong for odd scores).
@@ -2808,6 +2817,7 @@ const TRAIL_RENDER_CONFIG = {
             // v8 D: reset recap state and snapshot quest progress for end-of-run delta.
             recapData = null;
             recapShareRect = null; // FOV-2729
+            recapCardRect = null;
             recapQuestBaseline = captureQuestBaseline();
             srSpeak('Game started. Mode: ' + gameMode);
             if (gameMode === 'daily') {
@@ -4359,6 +4369,7 @@ const TRAIL_RENDER_CONFIG = {
             var cardH = contentH + 26;                        // + retry-prompt row
             var cardX = (CANVAS_WIDTH - cardW) / 2;
             var cardY = CANVAS_HEIGHT / 2 - cardH / 2 + 6;
+            recapCardRect = { x: cardX, y: cardY, w: cardW, h: cardH }; // FOV-2729 (review #5)
             ctx.fillStyle = 'rgba(0,0,0,0.88)';
             ctx.fillRect(cardX, cardY, cardW, cardH);
             ctx.strokeStyle = recapData.isNewBest ? '#FFD700' : '#555';
@@ -7062,6 +7073,8 @@ const TRAIL_RENDER_CONFIG = {
         function resetWaveState() {
             dirQueue = [];
             gameOverAt = 0; // v15 F7
+            recapShareRect = null; // FOV-2729: hit rects never outlive their card
+            recapCardRect = null;
             var wave = GAUNTLET_WAVES[gauntletWave];
             snake = [{ x: 10 * TILE_SIZE, y: 10 * TILE_SIZE }];
             dx = TILE_SIZE;
@@ -9897,12 +9910,14 @@ const TRAIL_RENDER_CONFIG = {
                 return;
             }
 
-            // FOV-2729: K on gameover now shares EVERY non-daily run — seeded links
-            // carry '#mode~seed~score', unseeded ones are score-only ('#mode~~score')
-            // built from the canonical Pages URL. Daily stays out: parseChallengeUrl
-            // rejects it (a shared daily would collide with the attempt/streak rules),
-            // so pre-FOV-2729 K shared a daily link the game itself could not parse.
-            if ((e.key === 'k' || e.key === 'K') && gameState === 'gameover' && gameMode !== 'daily') {
+            // FOV-2729: K at gameover shares every run that HAS something to share —
+            // a score ('#mode~~score') or a seed ('#mode~seed[~score]'). The recap
+            // Share button is likewise score-gated; without the score check a 0-score
+            // unseeded run copied a bare '#classic' the parser rejects while toasting
+            // success (review #1). Daily stays out: parseChallengeUrl rejects it (a
+            // shared daily would collide with the attempt/streak rules), so K shared a
+            // daily link the game itself could not parse.
+            if ((e.key === 'k' || e.key === 'K') && gameState === 'gameover' && gameMode !== 'daily' && (score > 0 || activeSeed !== null)) {
                 copyChallengeLink();
                 return;
             }
@@ -10070,14 +10085,11 @@ const TRAIL_RENDER_CONFIG = {
               // (below) is displacement-discriminated and never starts — the page
               // has nothing to scroll, so time-based guards protected a gesture
               // that cannot exist here.
-              // FOV-2729: EXCEPT when a challenge link is up — the challenge
-              // overlay replaces the welcome overlay's pixels, and the tap's job
-              // is dismissal only. A challenge must be accepted or declined by a
-              // deliberate tap on its own buttons; auto-starting it would turn a
-              // friend's link into a trap on first contact.
-              if (!challengeFromUrl) {
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-              }
+              // FOV-2729: no challenge guard any more — a challenge link clears
+              // welcomeOverlay when it is parsed (see the load/hashchange handlers),
+              // so this branch is unreachable with a challenge up, and keyboard Enter
+              // accepts in one press. Touch and keyboard agree (review #6).
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
               return;
             }
             if (gameState === 'paused') {
@@ -10354,6 +10366,14 @@ const TRAIL_RENDER_CONFIG = {
                     restoreFromSnapshotHash(hash.slice(9));
                 } else {
                     challengeFromUrl = parseChallengeUrl(hash);
+                    // FOV-2729 (review #6): a challenge overlay replaces the welcome
+                    // overlay's pixels, so a fresh visitor would tap 'Play' and see
+                    // 'nothing' happen (the tap only dismissed an invisible welcome
+                    // state) while keyboard Enter accepted in one press. Clear the
+                    // welcome state when the challenge is parsed: the overlay is the
+                    // onboarding for a challenge visitor. NOT persisted — a plain
+                    // visit still gets the welcome overlay.
+                    if (challengeFromUrl) welcomeOverlay = false;
                 }
             }
         });
@@ -10365,6 +10385,7 @@ const TRAIL_RENDER_CONFIG = {
                     restoreFromSnapshotHash(hash.slice(9));
                 } else {
                     challengeFromUrl = hash ? parseChallengeUrl(hash) : null;
+                    if (challengeFromUrl) welcomeOverlay = false; // FOV-2729 (review #6)
                 }
                 visualDirty = true;
             }

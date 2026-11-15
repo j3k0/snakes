@@ -97,6 +97,7 @@ async function tapCanvasAt(page, cx, cy) {
         seededEncoded: parseChallengeUrl('classic~' + encodeURIComponent('a b') + '~10'),
         badMode: parseChallengeUrl('nope~~100'),
         badScore: parseChallengeUrl('classic~~abc'),
+        tildeSeed: parseChallengeUrl('classic~a%7Eb~5'), // review #2: 'a%7Eb' decodes to 'a~b' — must stay rejected
         twoSlotNumber: parseChallengeUrl('classic~120'), // legacy seeding slot — still a seed, not a score
     }));
     check('A: classic~~120 parses score-only with an EMPTY seed',
@@ -116,6 +117,7 @@ async function tapCanvasAt(page, cx, cy) {
           JSON.stringify(table.seededEncoded));
     check('A: unknown mode rejected', table.badMode === null, JSON.stringify(table.badMode));
     check('A: non-numeric score still rejected', table.badScore === null, JSON.stringify(table.badScore));
+    check('A: a seed decoding to a~b is rejected (would re-split when rebuilt)', table.tildeSeed === null, JSON.stringify(table.tildeSeed));
     check('A: classic~120 is a seed (2-slot legacy), not a bare score',
           table.twoSlotNumber && table.twoSlotNumber.seed === '120' && table.twoSlotNumber.targetScore === null,
           JSON.stringify(table.twoSlotNumber));
@@ -204,34 +206,30 @@ async function tapCanvasAt(page, cx, cy) {
     const errors = [];
     page.on('pageerror', e => errors.push(String(e)));
 
-    // Fresh profile (empty localStorage) + a challenge link: the overlay must be
-    // up and the welcome overlay must NOT auto-start it.
+    // Fresh profile (empty localStorage) + a challenge link: the challenge overlay
+    // replaces the welcome overlay's PIXELS, so the welcome state is cleared when
+    // the link is parsed (review #6) — one tap on Play accepts, exactly like Enter.
     await page.goto(FILE_URL + '#classic~~250', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(400);
     await page.evaluate(() => drawGame(1));
+    await startFillTextRecorder(page); // BEFORE the draw that renders the overlay text
+    await page.evaluate(() => drawGame(1));
     let st = await page.evaluate(() => ({ welcome: welcomeOverlay, challenge: !!challengeFromUrl, rects: !!challengeAcceptRect && !!challengeDeclineRect }));
-    check('C: fresh visitor sees the challenge overlay (not the welcome pixels)', st.challenge && st.rects, JSON.stringify(st));
+    check('C: fresh visitor sees the challenge overlay, welcome state cleared at parse', st.challenge && st.rects && st.welcome === false, JSON.stringify(st));
 
-    // First tap on Play: dismisses onboarding ONLY — challenge stays up, run not started.
-    await startFillTextRecorder(page);
+    // A tap on Play accepts the challenge in ONE tap (keyboard parity).
     const playPos = await page.evaluate(() => {
         const rect = document.getElementById('gameCanvas').getBoundingClientRect();
         return { x: rect.left + ((challengeAcceptRect.x + challengeAcceptRect.w / 2) / CANVAS_WIDTH) * rect.width,
                  y: rect.top + ((challengeAcceptRect.y + challengeAcceptRect.h / 2) / CANVAS_HEIGHT) * rect.height };
     });
     await page.touchscreen.tap(playPos.x, playPos.y);
-    await page.waitForTimeout(200);
-    st = await page.evaluate(() => ({ welcome: welcomeOverlay, challenge: !!challengeFromUrl, state: gameState }));
-    check('C: first tap dismisses the welcome overlay ONLY', st.welcome === false && st.challenge && st.state === 'idle', JSON.stringify(st));
+    await page.waitForTimeout(250);
+    st = await page.evaluate(() => ({ welcome: welcomeOverlay, state: gameState, mode: gameMode, challenge: challengeFromUrl, seed: activeSeed }));
+    check('C: one Play tap accepts the challenge (welcome already cleared)',
+          st.state === 'playing' && st.mode === 'classic' && st.challenge === null && st.seed === null && st.welcome === false, JSON.stringify(st));
     check('C: touch copy names taps, never keys',
           await page.evaluate(() => window.__strings.some(s => s.indexOf('Tap Play') === 0) && !window.__strings.some(s => /Press/.test(s))));
-
-    // Second tap on Play: accepts the challenge.
-    await page.touchscreen.tap(playPos.x, playPos.y);
-    await page.waitForTimeout(250);
-    st = await page.evaluate(() => ({ state: gameState, mode: gameMode, challenge: challengeFromUrl, seed: activeSeed }));
-    check('C: tapping Play accepts the challenge',
-          st.state === 'playing' && st.mode === 'classic' && st.challenge === null && st.seed === null, JSON.stringify(st));
     await page.evaluate(() => stopGameLoop());
 
     // Decline path: Not now -> idle, challenge cleared, no run.
@@ -253,9 +251,10 @@ async function tapCanvasAt(page, cx, cy) {
     // Hash-clearing is best-effort on file:// (replaceState can be restricted);
     // the http fixture below asserts it for real.
 
-    // A tap elsewhere on the challenge overlay does nothing.
-    await page2.touchscreen.tap(10, 10); // top-left corner canvas-ish: outside both buttons
-    await page2.waitForTimeout(200);
+    // A tap elsewhere on the challenge overlay does nothing — canvas coords, inside
+    // the canvas but outside both buttons (review #4: the old fixture tapped page
+    // (10,10), which is off the canvas and so vacuous).
+    await tapCanvasAt(page2, 30, 60);
     st = await page2.evaluate(() => gameState);
     check('C: a tap outside the buttons does nothing (still idle)', st === 'idle', 'gameState=' + st);
     await browser.close();
@@ -279,11 +278,14 @@ async function tapCanvasAt(page, cx, cy) {
     const ctx = await browser.newContext({ viewport: { width: 1366, height: 768 } });
     const ctxTouch0 = await browser.newContext({ hasTouch: true, viewport: { width: 390, height: 844 } });
     const page = await ctxTouch0.newPage();
-    await ctxTouch0.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://127.0.0.1:8137' });
     const errors = [];
     page.on('pageerror', e => errors.push(String(e)));
+    // Review #3: EVERY page that plays a run must carry the Abacus route — the old
+    // fixture routed only `page`, which was closed before the runs happened, so the
+    // inertness assertion passed vacuously.
     const hits = [];
-    await page.route('https://' + ABACUS + '/**', route => { hits.push(route.request().url()); return route.fulfill({ status: 200, body: '' }); });
+    const watchBeacons = (p) => p.route('https://' + ABACUS + '/**', route => { hits.push(route.request().url()); return route.fulfill({ status: 200, body: '' }); });
+    watchBeacons(page);
 
     await page.goto(HTTP_URL + '#walled~~77', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(400);
@@ -296,6 +298,8 @@ async function tapCanvasAt(page, cx, cy) {
 
     // Build a finished 120-point classic run (desktop context).
     const page0 = await ctx.newPage();
+    watchBeacons(page0);
+    page0.on('pageerror', e => errors.push(String(e)));
     await page0.goto(HTTP_URL, { waitUntil: 'domcontentloaded' });
     await page0.waitForTimeout(400);
     await page0.evaluate(() => {
@@ -334,6 +338,7 @@ async function tapCanvasAt(page, cx, cy) {
     const ctxT = await browser.newContext({ hasTouch: true, viewport: { width: 390, height: 844 } });
     await ctxT.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://127.0.0.1:8137' });
     const pageT = await ctxT.newPage();
+    watchBeacons(pageT);
     pageT.on('pageerror', e => errors.push(String(e)));
     await pageT.goto(HTTP_URL, { waitUntil: 'domcontentloaded' });
     await pageT.waitForTimeout(400);
@@ -361,6 +366,26 @@ async function tapCanvasAt(page, cx, cy) {
     check('D: a Share tap does NOT start a run (gameover stays)',
           await pageT.evaluate(() => gameState === 'gameover' && !!recapData));
 
+    // A tap outside the Share button still restarts (v15 F7 semantics unchanged).
+    // The tap point is asserted OUTSIDE the hit rect first (review #4) and the
+    // result is asserted strictly: playing, nothing looser. Done while the card
+    // is live (the rect is non-null), before the later fixtures replace recapData.
+    await pageT.waitForTimeout(600); // past the 500ms reflex guard
+    const outside = await pageT.evaluate(() => {
+        // Above the vertically-centered card (~180-420 on the 600px canvas) — but
+        // verify against the rect, not the guess.
+        const p = { x: 220, y: 80 };
+        const r = recapShareRect;
+        if (!r) return { inside: null, r };
+        return { inside: p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h, r };
+    });
+    check('D: the restart-tap point is outside the Share hit rect (fixture sanity)', outside.inside === false, JSON.stringify(outside.r));
+    await tapCanvasAt(pageT, 220, 80);
+    await pageT.waitForTimeout(300);
+    check('D: a tap outside the Share button still restarts the run',
+          await pageT.evaluate(() => gameState === 'playing'),
+          'gameState=' + await pageT.evaluate(() => gameState));
+
     // Seeded run: K copies the seeded form.
     await pageT.keyboard.press('Enter'); // restart from gameover
     await pageT.waitForTimeout(250);
@@ -379,18 +404,49 @@ async function tapCanvasAt(page, cx, cy) {
           clip === 'Beat my 95 in Classic — https://j3k0.github.io/snakes/#classic~hello~95',
           'clipboard=' + JSON.stringify(clip));
 
-    // A tap outside the Share button still restarts (v15 F7 semantics unchanged).
-    await pageT.waitForTimeout(600); // past the 500ms reflex guard
-    await tapCanvasAt(pageT, 220, 250); // canvas centre-ish, above the card's button
-    await pageT.waitForTimeout(300);
-    check('D: a tap outside the Share button still restarts the run',
-          await pageT.evaluate(() => gameState === 'playing' || gameState === 'idle'),
-          'gameState=' + await pageT.evaluate(() => gameState));
-
-    // A zero-score run renders NO share button.
+    // A zero-score run renders NO share button — and K copies nothing either
+    // (review #1): without the gate a 0-score unseeded run copied a bare
+    // '#classic' the parser rejects, while toasting success.
     await pageT.evaluate(() => { stopGameLoop(); gameMode = 'classic'; resetGame(); startGame(); stopGameLoop(); score = 0; gameOver(); drawGame(1); });
     check('D: a 0-score run gets no Share hit area (nothing to beat)',
           await pageT.evaluate(() => recapShareRect === null));
+    const clipLen0 = await pageT.evaluate(() => (window.__copied || []).length);
+    await pageT.keyboard.press('k');
+    await pageT.waitForTimeout(200);
+    check('D: K copies nothing on a 0-score unseeded run (no false toast)',
+          await pageT.evaluate((n) => (window.__copied || []).length === n, clipLen0));
+    // ...but a 0-score SEEDED run still shares '#mode~seed' (K's original form).
+    await pageT.evaluate(() => {
+        stopGameLoop();
+        activeSeed = 'hello'; gameMode = 'classic'; score = 0; gameState = 'gameover'; drawGame(1);
+    });
+    await pageT.keyboard.press('k');
+    await pageT.waitForTimeout(200);
+    clip = await pageT.evaluate(() => (window.__copied || []).pop() || '');
+    check('D: K still shares a 0-score seeded run (#classic~hello)',
+          clip === 'https://j3k0.github.io/snakes/#classic~hello',
+          'clipboard=' + JSON.stringify(clip));
+
+    // Review #5: the worst-case card (cause + save + cascade + 3 quest rows +
+    // Share) must fit the canvas — every row present at once.
+    await pageT.evaluate(() => {
+        stopGameLoop();
+        activeSeed = null; gameMode = 'classic'; score = 120; gameState = 'gameover';
+        recapData = {
+            score: 120, isZen: false, prevBest: 10, isNewBest: true, xpEarned: 42,
+            evolutionTier: 'Titan',
+            questDeltas: [{ desc: 'a', delta: 1, target: 2, completed: false },
+                          { desc: 'b', delta: 2, target: 3, completed: false },
+                          { desc: 'c', delta: 3, target: 4, completed: true }],
+            deathCause: 'You charged the rival head-on!', saveEvent: '🛡 Shield save',
+            rawScore: 240, cascadeMult: 0.5
+        };
+        drawGame(1);
+    });
+    const card = await pageT.evaluate(() => ({ rect: recapCardRect, H: CANVAS_HEIGHT }));
+    check('D: worst-case recap card fits the canvas',
+          card.rect && card.rect.y >= 0 && card.rect.y + card.rect.h <= card.H,
+          JSON.stringify(card));
 
     // Daily runs are not shareable (K gated; parser rejects).
     await pageT.evaluate(() => { stopGameLoop(); gameMode = 'daily'; resetGame(); startGame(); stopGameLoop(); score = 60; gameOver(); drawGame(1); });
@@ -405,12 +461,40 @@ async function tapCanvasAt(page, cx, cy) {
     await startFillTextRecorder(pageT);
     await pageT.evaluate(() => { stopGameLoop(); gameMode = 'classic'; resetGame(); startGame(); stopGameLoop(); score = 40; gameOver(); drawGame(1); });
     check('D: touch card copy says Share, never K',
-          await pageT.evaluate(() => window.__strings.some(s => s.indexOf('Share') !== -1)) &&
-          await pageT.evaluate(() => window.__strings.every(s => s.indexOf('(K)') === -1)) &&
-          await pageT.evaluate(() => window.__strings.every(s => !/Press\s/.test(s) || s === window.__strings[0])),
-          (await pageT.evaluate(() => window.__strings.filter(s => /Share|K\)|Press/.test(s)).join(' | '))));
+          await pageT.evaluate(() => window.__strings.some(s => s.indexOf('Share my run') !== -1)) &&
+          await pageT.evaluate(() => window.__strings.every(s => s.indexOf('(K)') === -1)),
+          (await pageT.evaluate(() => window.__strings.filter(s => /Share|K\)/.test(s)).join(' | '))));
+
+    // Review #7: the issue's gate wants a preview image — the og card comes from
+    // PR 1's meta tags; assert they are present and absolute (they render the
+    // preview for a pasted canonical link).
+    const og = await pageT.evaluate(() => ({
+        title: (document.querySelector('meta[property="og:title"]') || {}).content,
+        image: (document.querySelector('meta[property="og:image"]') || {}).content
+    }));
+    check('D: og:title names the game', og.title === 'Snakes', JSON.stringify(og.title));
+    check('D: og:image is the absolute og-image URL (preview card)',
+          og.image === 'https://j3k0.github.io/snakes/og-image.png', JSON.stringify(og.image));
 
     check('D: no page errors across fixture D', errors.length === 0, errors.join('; '));
+
+    // Route sanity (review #3): prove the Abacus route actually catches requests,
+    // so the inertness assertion above cannot pass vacuously. isCountedHost is a
+    // plain window function by design (v15 F1) — patch it true, fire one beacon,
+    // watch it land, restore, and clear.
+    const probeHits = await pageT.evaluate(async () => {
+        const orig = isCountedHost;
+        isCountedHost = () => true;
+        snakeBump('route_probe');
+        await new Promise(r => setTimeout(r, 300));
+        isCountedHost = orig;
+        return true;
+    });
+    await pageT.waitForTimeout(300);
+    check('D: the beacon route is live (probe request observed)',
+          probeHits && hits.some(u => u.indexOf('route_probe') !== -1),
+          'hits=' + hits.join(', '));
+    hits.length = 0;
     await ctxT.close();
     await browser.close();
     server.close();
