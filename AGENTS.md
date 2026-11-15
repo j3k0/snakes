@@ -574,3 +574,48 @@ Theme: *the rival obeys the board and is legible.* Zero snapshot fields, zero `S
 7. Rival hoard mechanic — needs a balance playtest.
 8. The cascade-agnostic global `highScore` write.
 9. The 20%/10% rival AI branches still ignore obstacles (B1 residual, measured above).
+
+## v15 Features
+
+Theme: *a stranger goes from URL to playing in ten seconds — and the counters say whether it worked.* No new modes, mechanics or currencies (JC chose the funnel cycle, FOV-2676). Two features from the rev-1 plan were CUT in review (R1-1): touch panel entries (F5) and shareable runs (F8, with Share and the `shared` key) — both deferred to v16 with the context file's fail-today tests 5 and 6.
+
+### Funnel v2 (v15 F1) — load-scoped, allow-listed, opt-out-able
+- `snakeBump(key)` replaces `_snakesCount`: the single send path owning a once-per-PAGE-LOAD `Set` (`_firedFunnel`). Keys are LOAD-SCOPED, not per-run: five runs in one visit produce one `start`, one `first_food`, one death bucket (the first). `gameOver()` has no double-call guard; the Set is the guard. `finish` is therefore once per load too — documented, intended.
+- `isCountedHost(h)` / `channelForHost(h)` are PLAIN FUNCTIONS (window globals, test-visible) and `snakeBump` resolves `isCountedHost(location.hostname)` by BARE NAME at call time — never captured at module init, or the test suite cannot exercise the gate. Allow-list: `j3k0.github.io`, `*.itch.zone`, `*.newgrounds.com`; everything else (`file://`, localhost, CI) fires nothing. `localStorage.snake_nocount === '1'` suppresses every beacon.
+- Death buckets are a fixed `DEATH_BUCKET` map from `lastDeathCause` (v12 C's separate field — never the cause STRING, and never `lastSaveEvent`: a rescue is not a death; rescues are structurally excluded because they never reach `gameOver()`, and a fixture pins it). Unmapped terminal causes fall to `die_other`.
+- `touch`/`keys`: first input class wins. A TRUSTED keypress (`e.isTrusted`) fires `keys` — the D-pad's synthetic keydowns are `isTrusted === false` and never count as keyboard input. `touch` fires on any canvas `touchend`.
+- `paused_early` uses the per-run `gameTick` (reset in both reset sites) with the once-per-load Set — no per-load latch.
+- `overlay_gone` fires on BOTH dismissal sites (keydown handler and touchend); under F4 the touch dismissal and `start` fire on the same tap (different keys, not a double count).
+- Test fixtures that must observe INIT-TIME keys (`load`, `day-*`, `ch_*`) run on a HOST-MAPPED origin (`--host-resolver-rules MAP j3k0.github.io 127.0.0.1` + a local HTTP server on :8099, fetch intercepted) — an after-load monkeypatch cannot resurrect keys that no-opped before it existed. Fixtures asserting ABSENCE of keys need a FRESH LOAD (an already-fired key in the Set is indistinguishable from a suppressed re-fire).
+
+### The board fits the phone (v15 F2) — scale, never clip
+- `body` uses `justify-content: safe center` (plain `center` as fallback): on overflow the column anchors to the TOP instead of clipping both ends. This is load-bearing — the mutation run showed small viewports fail without it (the old symmetric clip ate row 0 at 320×568). The measured cap below only bounds the bottom edge.
+- `resizeCanvas()` caps the canvas by MEASURED ESSENTIAL chrome: everything visible above it plus `#menuFooter` (the door hint) and `#dpad` (the touch controls) below it. The DOM score lines, seed row and combo line are deliberately NOT counted — they clip off the bottom exactly as pre-v15 (hiding them is a deferred item). No pixel floor — a floor is a clip by another name when it exceeds the cap. The canvas's own 2px border is budgeted on both axes. `updateMenuFooter()` re-runs `resizeCanvas()` on every visibility change (URL-bar collapse and rotation arrive as ordinary resizes).
+- `compact` = `matchMedia('(pointer: coarse)') && innerHeight < 700` (NOT `hasTouch` — they differ on fine-pointer touch laptops). Hides `h1`, `#scoreLine` (the score PARAGRAPH — hiding the `#score` span alone leaves an empty "Score:" line; `#scoreLine` is a v15 id) and `#highScore` — the same three standalone mode hides. Plan deviation, recorded: rev 2 said "h1 alone first, score only if the gate fails"; at 320×568 the h1-only cap leaves a ~216px board, too small for F3's ≥24-physical-px band, so the F3 gate itself demands all three.
+- `--snakes-scale` (CSS custom property) carries the applied scale for tests.
+
+### The start control (v15 F3) — load-bearing, not decoration
+- `drawOverlay`'s idle branch renders the previously-discarded subtext as a bordered button in the lower third (canvas y 456-504: below the mode list, above the daily/resume stack), drawn LAST so it owns its rect. `startBandRect` (canvas coords) is written on the idle draw and reset by `drawGame` EVERY FRAME (drawOverlay re-sets it) — a stale rect can never accept a tap after a state change.
+- On touch the band is the ONLY idle start target: a tap inside dispatches Enter; **a tap outside does nothing**. Pre-v15 any idle tap started the run, which made the band unfalsifiable (R2-1) — the negative case is the gate. Keyboard and D-pad (synthetic keydowns) still start from anywhere.
+- Contrast gates read back the canvas (`getImageData`): min/max relative luminance in the band interior must clear 4.5:1. The plan's "fill #555" mutation cannot bite a white-glyph design (white on #555 is 7.5:1) — the mutation is the TEXT colour. `.shortcut-dim` rose `#555`→`#999` (2.13:1 → 5.6:1).
+
+### Onboarding truth (v15 F4) — the AGENTS.md reversal
+- The First-Time Onboarding note above is the authoritative record: ONE TAP dismisses the welcome overlay AND starts. Swipe discrimination is DISPLACEMENT-based (≥10px — the tap branch's own threshold), never time-based; `overscroll-behavior-y: contain` (body CSS) keeps pull-to-refresh out. A swipe dismisses WITHOUT starting.
+- The touch welcome panel is "Stay alive" (rival head-on, live rifts) — mechanics the game already enforces. The recap prompt is `hasTouch ? 'Tap to play again' : 'Press ENTER to retry'`. The touch sweep asserts EXACT strings plus no `/Press\s/` in drawn strings or the visible DOM (`innerText`, NOT `textContent` — textContent counts hidden panels and false-positives on the settings panel).
+
+### The opening lane (v15 F6) — board-generation cut-over
+- `inOpeningLane(tx, ty)`: tiles 11-14 on spawn row 10. `generateObstacles` tests the PATTERN's tile set (the old 3-tile rule tested the anchor while four of five patterns extend beside it — 109/3000 classic boards blocked the lane, and `generateObstaclesForWave` 91/1000); `generateObstaclesForWave` has its own check (findFreeTile's shared 3-tile guard does not cover the lane). **findFreeTile is untouched** — five death-save callers depend on it.
+- Every seeded board changed (daily, diary, ghost arena). The deploy date is recorded in `counter-snapshot.sh`'s CUT-OVERS block as the board cut-over — the first funnel read must not attribute a board change to a UX change.
+- Test rule: a probe's lane definition must be INLINE and independent of the shipped predicate — a probe that reads the predicate it tests is vacuous under mutation (found live in the mutation run).
+
+### The recap tap-guard (v15 F7)
+- `gameOverAt` stamps BOTH session-end hooks (`gameOver` and `endZenSession`), resets in BOTH `resetGame()` and `resetWaveState()`. The touchend gameover branch ignores taps for 500ms; keyboard Enter bypasses the touch branch and restarts immediately. The resets are DEFENSIVE (write-before-read by construction: gameOverAt is only read in the gameover branch and every gameover entry re-stamps) — the load-bearing write is the STAMP, and the gate pins that invariant directly.
+
+### Funnel report (v15 F10)
+- `/opt/shared/reports/snakes/counter-snapshot.sh` (JC's crontab, 12:00 UTC, unchanged invocation): append-only JSONL, one line per UTC date, YESTERDAY only (two independent bounds prevent a today row — over-determined by design), `--dry-run`, `--backfill <since> --until <date>`, lifetime totals fetched ONCE per run (per-date refetching trips Abacus's rate limit), and a /get/-only guard checked at TOP LEVEL (an `exit` inside `val()`'s command substitution is swallowed — found live). The decision matrix, caveats, ours-by-name-and-date and the cut-over blanks live in its header; the companion doc is `funnel-decision-rule.md` next to it.
+- `og-image.png` (1200×630) must be pushed to the github.com/j3k0/snakes repo root at deploy, with the README's "3 keys" privacy line corrected to the wording that stays true at ~10 keys.
+
+### v15 Verification Notes
+- `node test-v15.mjs` — 102 assertions: F1 (25), F2 (26), F3 (11), F4 (14), F6 (4), F7 (7), F9 (5), F10 (10). Every gate's named mutation was run once per gate and each failed exactly its intended assertion; the mutation findings are recorded in the commit messages and `IMPL_PLAN_v15.md`. Baseline on `ee0e3f2`: 309 assertions / 14 suites, all green throughout the cycle.
+- NEVER open https://j3k0.github.io/snakes/ from a script or test — a visit there is counted production traffic. Probe on `file://` or the host-mapped local origin; every scripted LIVE check sets `localStorage.snake_nocount = '1'`. The day-key absence on test days is the pollution check (day-2026-11-14 has no key despite a full day of development).
+- `test-v15.mjs`'s funnel fixtures are slow (~5 min under Abacus rate limiting); the suite total is ~12 min.
