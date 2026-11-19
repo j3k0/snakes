@@ -923,11 +923,15 @@ async function drawnStrings(page, state) {
             twitterImage: get('meta[name="twitter:image"]', 'content')
         };
     });
-    check('C7 meta: title is Snakes, description present',
-          meta.title === 'Snakes' && !!meta.desc && meta.desc.length > 20,
+    // v16 A2 rewrote the decided copy, so this no longer pins the exact string
+    // (test-v16.mjs A2 owns the copy's contract and its count checks). What stays
+    // here is the v15 half: the card exists, opens with the game's name, and the
+    // URLs are canonical/absolute.
+    check('C7 meta: title opens with the game name, description present',
+          /^Snakes\b/.test(meta.title) && !!meta.desc && meta.desc.length > 20,
           JSON.stringify(meta));
     check('C7 meta: og:title/og:description/og:url present and canonical',
-          meta.ogTitle === 'Snakes' && !!meta.ogDesc &&
+          /^Snakes\b/.test(meta.ogTitle) && !!meta.ogDesc &&
           meta.ogUrl === 'https://j3k0.github.io/snakes/',
           JSON.stringify(meta));
     check('C7 meta: og:image is ABSOLUTE (a relative URL is the trap)',

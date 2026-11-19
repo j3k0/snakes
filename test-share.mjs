@@ -472,7 +472,12 @@ async function tapCanvasAt(page, cx, cy) {
         title: (document.querySelector('meta[property="og:title"]') || {}).content,
         image: (document.querySelector('meta[property="og:image"]') || {}).content
     }));
-    check('D: og:title names the game', og.title === 'Snakes', JSON.stringify(og.title));
+    // v16 A2 changed the decided copy ("Snakes — a rival snake is racing you for
+    // the food"), so this pins the contract instead of the old string: it still
+    // opens with the game's name and now names the mechanic.
+    check('D: og:title names the game, then the hook',
+          /^Snakes\b/.test(og.title || '') && /rival/i.test(og.title || ''),
+          JSON.stringify(og.title));
     check('D: og:image is the absolute og-image URL (preview card)',
           og.image === 'https://j3k0.github.io/snakes/og-image.png', JSON.stringify(og.image));
 
