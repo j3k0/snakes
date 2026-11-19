@@ -206,5 +206,60 @@ const stop = async ({ server, browser }) => { await browser.close(); server.clos
           'DEPLOY-v16-checklist.md missing or silent about chal_seen');
 }
 
+// ---------------------------------------------------------------------------
+// F3 — a stray thumb tap on the board must not pause the run.
+// Gate: phone context, playing, tap canvas centre → still playing; the ⏸ D-pad
+// button still pauses. Mutation: restore the `playing` catch-all branch in the
+// touchend handler → the first assertion fails.
+// ---------------------------------------------------------------------------
+{
+    const browser = await chromium.launch();
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await ctx.newPage();
+    const errors = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto('file://' + htmlPath, { waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => {
+        saveManager.set('snake_has_played', '1');
+        welcomeOverlay = false; gameMode = 'classic'; resetGame(); startGame();
+    });
+    await page.waitForTimeout(150);
+    const box = await page.evaluate(() => {
+        const r = document.getElementById('gameCanvas').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.touchscreen.tap(box.x, box.y);
+    await page.waitForTimeout(200);
+    check('F3 board tap: a centre tap while playing does NOT pause',
+          await page.evaluate(() => gameState === 'playing'), 'state changed');
+    // The advertised control still works.
+    await page.tap('button[aria-label="Pause"]');
+    await page.waitForTimeout(200);
+    check('F3 board tap: the ⏸ button still pauses',
+          await page.evaluate(() => gameState === 'paused'), 'state: not paused');
+    await page.tap('button[aria-label="Pause"]');
+    await page.waitForTimeout(200);
+    check('F3 board tap: ⏸ again resumes', await page.evaluate(() => gameState === 'playing'));
+    // A swipe still turns (the tap path must not have swallowed the gesture).
+    // Read the queue inside the same task: the live tick would otherwise consume it.
+    const swiped = await page.evaluate(() => {
+        stopGameLoop();               // freeze the tick so the buffer is observable
+        dirQueue = []; lastConsumedDir = { dx: TILE_SIZE, dy: 0 };
+        const el = document.getElementById('gameCanvas');
+        const r = el.getBoundingClientRect();
+        const t0 = new Touch({ identifier: 9, target: el, clientX: r.left + 60, clientY: r.top + 60 });
+        el.dispatchEvent(new TouchEvent('touchstart', { touches: [t0], targetTouches: [t0], changedTouches: [t0], bubbles: true, cancelable: true }));
+        const t1 = new Touch({ identifier: 9, target: el, clientX: r.left + 60, clientY: r.top + 140 });
+        el.dispatchEvent(new TouchEvent('touchend', { touches: [], targetTouches: [], changedTouches: [t1], bubbles: true, cancelable: true }));
+        return { state: gameState, q: dirQueue.slice() };
+    });
+    check('F3 board tap: a downward swipe still queues a turn',
+          swiped.state === 'playing' && swiped.q.length === 1 &&
+          swiped.q[0].dx === 0 && swiped.q[0].dy === 20,
+          JSON.stringify(swiped));
+    check('F3: no page errors', errors.length === 0, errors.join('; '));
+    await browser.close();
+}
+
 console.log(`\nv16 results: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -10243,9 +10243,12 @@ const TRAIL_RENDER_CONFIG = {
               // highlighted pick (gameState stays 'playing' during intermission, so
               // without this a touch device has no way to confirm — soft-lock).
               document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-            } else if (gameState === 'playing') {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
             }
+            // v16 F3: a tap on the board while playing does NOTHING. It used to
+            // dispatch Space — a second, unadvertised pause control that fired on
+            // the exact place a thumb rests, while every string in the game names
+            // the ⏸ button as the way to pause (welcome panel, pause menu footer).
+            // ⏸ is the pause on touch; the swipe path below still owns turning.
             return;
           }
 
